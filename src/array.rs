@@ -369,7 +369,10 @@ impl<A: DefragAllocator> Defrag<A> for IArray {
             }
         }
         unsafe {
-            let new_ptr = defrag_allocator.realloc_ptr(self.0.ptr(), Self::layout((*self.0.ptr().cast::<Header>()).cap).unwrap());
+            let new_ptr = defrag_allocator.realloc_ptr(
+                self.0.ptr(),
+                Self::layout((*self.0.ptr().cast::<Header>()).cap).unwrap(),
+            );
             self.0.set_ptr(new_ptr.cast());
         }
         self

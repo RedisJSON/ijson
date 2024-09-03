@@ -196,11 +196,10 @@ impl IString {
             return Self::new();
         }
 
-        
         let cache = unsafe { get_cache() };
 
         let k = cache.get_or_insert_with(s, |s| WeakIString {
-            ptr: unsafe{ NonNull::new_unchecked(Self::alloc(s, allocator)) },
+            ptr: unsafe { NonNull::new_unchecked(Self::alloc(s, allocator)) },
         });
         k.upgrade()
     }
@@ -208,7 +207,7 @@ impl IString {
     /// Converts a `&str` to an `IString` by interning it in the global string cache.
     #[must_use]
     pub fn intern(s: &str) -> Self {
-        Self::intern_with_allocator(s, |layout| unsafe{alloc(layout)})
+        Self::intern_with_allocator(s, |layout| unsafe { alloc(layout) })
     }
 
     fn header(&self) -> ThinMut<Header> {
@@ -265,7 +264,7 @@ impl IString {
                     // we can not simply remove the element from the cache, while we
                     // perform active defrag, the element might be in the cache but will
                     // point to another (newer) value. In this case we do not want to remove it.
-                    if element.ptr.as_ptr().cast() == unsafe{ self.0.ptr() } {
+                    if element.ptr.as_ptr().cast() == unsafe { self.0.ptr() } {
                         cache.remove(hd.str());
                     }
                 }
@@ -281,7 +280,7 @@ impl IString {
     }
 
     pub(crate) fn drop_impl(&mut self) {
-        self.drop_impl_with_deallocator(|ptr, layout| unsafe{ dealloc(ptr, layout) });
+        self.drop_impl_with_deallocator(|ptr, layout| unsafe { dealloc(ptr, layout) });
     }
 }
 
@@ -407,8 +406,12 @@ impl Debug for IString {
 
 impl<A: DefragAllocator> Defrag<A> for IString {
     fn defrag(mut self, defrag_allocator: &mut A) -> Self {
-        let new = Self::intern_with_allocator(self.as_str(), |layout| unsafe{ defrag_allocator.alloc(layout) });
-        self.drop_impl_with_deallocator(|ptr, layout| unsafe{ defrag_allocator.free(ptr, layout) });
+        let new = Self::intern_with_allocator(self.as_str(), |layout| unsafe {
+            defrag_allocator.alloc(layout)
+        });
+        self.drop_impl_with_deallocator(|ptr, layout| unsafe {
+            defrag_allocator.free(ptr, layout)
+        });
         mem::forget(self);
         new
     }

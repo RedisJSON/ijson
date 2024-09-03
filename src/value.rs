@@ -211,14 +211,30 @@ unsafe impl Send for IValue {}
 unsafe impl Sync for IValue {}
 
 impl<A: DefragAllocator> Defrag<A> for IValue {
-    fn defrag(self, defrag_allocator: &mut A)-> Self {
+    fn defrag(self, defrag_allocator: &mut A) -> Self {
         match self.type_() {
             // Inline types has nothing to defrag todo: is that true?
-            ValueType::Null | ValueType::Bool => {self}
-            ValueType::Array => unsafe { self.to_array_unchecked() }.defrag(defrag_allocator).0,
-            ValueType::Object => unsafe { self.to_object_unchecked() }.defrag(defrag_allocator).0,
-            ValueType::String => unsafe { self.to_string_unchecked() }.defrag(defrag_allocator).0,
-            ValueType::Number => unsafe { self.to_number_unchecked() }.defrag(defrag_allocator).0,
+            ValueType::Null | ValueType::Bool => self,
+            ValueType::Array => {
+                unsafe { self.to_array_unchecked() }
+                    .defrag(defrag_allocator)
+                    .0
+            }
+            ValueType::Object => {
+                unsafe { self.to_object_unchecked() }
+                    .defrag(defrag_allocator)
+                    .0
+            }
+            ValueType::String => {
+                unsafe { self.to_string_unchecked() }
+                    .defrag(defrag_allocator)
+                    .0
+            }
+            ValueType::Number => {
+                unsafe { self.to_number_unchecked() }
+                    .defrag(defrag_allocator)
+                    .0
+            }
         }
     }
 }

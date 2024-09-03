@@ -719,7 +719,9 @@ impl<A: DefragAllocator> Defrag<A> for INumber {
         }
         unsafe {
             let ptr = self.0.ptr().cast::<Header>();
-            self.0.set_ptr(defrag_allocator.realloc_ptr(ptr.cast(), Self::layout((*ptr).type_).unwrap()))
+            self.0.set_ptr(
+                defrag_allocator.realloc_ptr(ptr.cast(), Self::layout((*ptr).type_).unwrap()),
+            )
         };
         self
     }

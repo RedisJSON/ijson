@@ -1084,14 +1084,17 @@ impl<A: DefragAllocator> Defrag<A> for IObject {
         if self.is_static() {
             return self;
         }
-        let header = unsafe{self.header_mut()};
+        let header = unsafe { self.header_mut() };
         let slit_header = header.split_mut();
         for i in 0..slit_header.items.len() {
-            unsafe{
+            unsafe {
                 let old_val = slit_header.items.as_ptr().add(i).read();
                 let value = old_val.value.defrag(defrag_allocator);
                 let key = old_val.key.defrag(defrag_allocator);
-                std::ptr::write(slit_header.items.as_ptr().add(i) as *mut KeyValuePair, KeyValuePair{key, value});
+                std::ptr::write(
+                    slit_header.items.as_ptr().add(i) as *mut KeyValuePair,
+                    KeyValuePair { key, value },
+                );
             }
         }
         unsafe {
