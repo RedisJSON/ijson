@@ -371,7 +371,8 @@ impl<A: DefragAllocator> Defrag<A> for IArray {
         unsafe {
             let new_ptr = defrag_allocator.realloc_ptr(
                 self.0.ptr(),
-                Self::layout((*self.0.ptr().cast::<Header>()).cap).unwrap(),
+                Self::layout((*self.0.ptr().cast::<Header>()).cap)
+                    .expect("layout is expected to return a valid value"),
             );
             self.0.set_ptr(new_ptr.cast());
         }

@@ -168,10 +168,13 @@ impl IString {
             .pad_to_align())
     }
 
-    fn alloc<A: FnMut(Layout) -> *mut u8>(s: &str, mut allocator: A) -> *mut Header {
+    fn alloc<A: FnOnce(Layout) -> *mut u8>(s: &str, allocator: A) -> *mut Header {
         assert!((s.len() as u64) < (1 << 48));
         unsafe {
-            let ptr = allocator(Self::layout(s.len()).unwrap()).cast::<Header>();
+            let ptr = allocator(
+                Self::layout(s.len()).expect("layout is expected to return a valid value"),
+            )
+            .cast::<Header>();
             ptr.write(Header {
                 len_lower: s.len() as u32,
                 len_upper: ((s.len() as u64) >> 32) as u16,
@@ -183,7 +186,7 @@ impl IString {
         }
     }
 
-    fn dealloc<D: FnMut(*mut u8, Layout)>(ptr: *mut Header, mut deallocator: D) {
+    fn dealloc<D: FnOnce(*mut u8, Layout)>(ptr: *mut Header, deallocator: D) {
         unsafe {
             let hd = ThinRef::new(ptr);
             let layout = Self::layout(hd.len()).unwrap();
@@ -191,7 +194,7 @@ impl IString {
         }
     }
 
-    fn intern_with_allocator<A: FnMut(Layout) -> *mut u8>(s: &str, allocator: A) -> Self {
+    fn intern_with_allocator<A: FnOnce(Layout) -> *mut u8>(s: &str, allocator: A) -> Self {
         if s.is_empty() {
             return Self::new();
         }
@@ -253,7 +256,7 @@ impl IString {
         }
     }
 
-    fn drop_impl_with_deallocator<D: FnMut(*mut u8, Layout)>(&mut self, deallocator: D) {
+    fn drop_impl_with_deallocator<D: FnOnce(*mut u8, Layout)>(&mut self, deallocator: D) {
         if !self.is_empty() {
             let mut hd = self.header();
             hd.rc -= 1;

@@ -714,16 +714,18 @@ impl Default for INumber {
 impl<A: DefragAllocator> Defrag<A> for INumber {
     fn defrag(mut self, defrag_allocator: &mut A) -> Self {
         let hd = self.header();
-        if hd.type_ == NumberType::Static {
-            return self;
+        match hd.type_ {
+            NumberType::Static => self,
+            t => {
+                let ptr = hd.ptr() as *mut Header;
+                let layout = Self::layout(t).expect("Layout should return a valid value");
+                unsafe {
+                    self.0
+                        .set_ptr(defrag_allocator.realloc_ptr(ptr.cast(), layout));
+                }
+                self
+            }
         }
-        unsafe {
-            let ptr = self.0.ptr().cast::<Header>();
-            self.0.set_ptr(
-                defrag_allocator.realloc_ptr(ptr.cast(), Self::layout((*ptr).type_).unwrap()),
-            )
-        };
-        self
     }
 }
 
