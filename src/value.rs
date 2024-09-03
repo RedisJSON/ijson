@@ -278,9 +278,6 @@ impl IValue {
     pub(crate) fn raw_eq(&self, other: &Self) -> bool {
         self.ptr == other.ptr
     }
-    pub(crate) fn raw_hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.ptr.hash(state);
-    }
     fn is_ptr(&self) -> bool {
         self.ptr_usize() >= ALIGNMENT
     }
@@ -626,24 +623,6 @@ impl IValue {
     // Safety: Must be an array
     unsafe fn as_array_unchecked(&self) -> &IArray {
         self.unchecked_cast_ref()
-    }
-
-    // Safety: Must be an array
-    unsafe fn to_array_unchecked(self) -> IArray {
-        IArray(self)
-    }
-
-    // Safety: Must be an array
-    unsafe fn to_object_unchecked(self) -> IObject {
-        IObject(self)
-    }
-
-    unsafe fn to_string_unchecked(self) -> IString {
-        IString(self)
-    }
-
-    unsafe fn to_number_unchecked(self) -> INumber {
-        INumber(self)
     }
 
     // Safety: Must be an array
