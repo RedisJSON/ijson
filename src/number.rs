@@ -8,6 +8,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
+use crate::{Defrag, DefragAllocator};
 
 use super::value::{IValue, TypeTag};
 
@@ -707,6 +708,20 @@ impl Debug for INumber {
 impl Default for INumber {
     fn default() -> Self {
         Self::zero()
+    }
+}
+
+impl<A: DefragAllocator> Defrag<A> for INumber {
+    fn defrag(mut self, defrag_allocator: &mut A) -> Self {
+        let hd = self.header();
+        if hd.type_ == NumberType::Static {
+            return self;
+        }
+        unsafe {
+            let ptr = self.0.ptr().cast::<Header>();
+            self.0.set_ptr(defrag_allocator.realloc_ptr(ptr.cast(), Self::layout((*ptr).type_).unwrap()))
+        };
+        self
     }
 }
 

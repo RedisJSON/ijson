@@ -8,6 +8,8 @@ use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
 
+use crate::{Defrag, DefragAllocator};
+
 use super::array::IArray;
 use super::number::INumber;
 use super::object::IObject;
@@ -207,6 +209,19 @@ pub enum ValueType {
 
 unsafe impl Send for IValue {}
 unsafe impl Sync for IValue {}
+
+impl<A: DefragAllocator> Defrag<A> for IValue {
+    fn defrag(self, defrag_allocator: &mut A)-> Self {
+        match self.type_() {
+            // Inline types has nothing to defrag todo: is that true?
+            ValueType::Null | ValueType::Bool => {self}
+            ValueType::Array => unsafe { self.to_array_unchecked() }.defrag(defrag_allocator).0,
+            ValueType::Object => unsafe { self.to_object_unchecked() }.defrag(defrag_allocator).0,
+            ValueType::String => unsafe { self.to_string_unchecked() }.defrag(defrag_allocator).0,
+            ValueType::Number => unsafe { self.to_number_unchecked() }.defrag(defrag_allocator).0,
+        }
+    }
+}
 
 impl IValue {
     // Safety: Tag must not be `Number`
@@ -608,6 +623,24 @@ impl IValue {
     }
 
     // Safety: Must be an array
+    unsafe fn to_array_unchecked(self) -> IArray {
+        IArray(self)
+    }
+
+    // Safety: Must be an array
+    unsafe fn to_object_unchecked(self) -> IObject {
+        IObject(self)
+    }
+
+    unsafe fn to_string_unchecked(self) -> IString {
+        IString(self)
+    }
+
+    unsafe fn to_number_unchecked(self) -> INumber {
+        INumber(self)
+    }
+
+    // Safety: Must be an array
     unsafe fn as_array_unchecked_mut(&mut self) -> &mut IArray {
         self.unchecked_cast_mut()
     }
@@ -753,7 +786,8 @@ impl PartialEq for IValue {
             unsafe {
                 match t1 {
                     // Inline and interned types can be trivially compared
-                    ValueType::Null | ValueType::Bool | ValueType::String => self.ptr == other.ptr,
+                    ValueType::Null | ValueType::Bool => self.ptr == other.ptr,
+                    ValueType::String => self.as_string_unchecked() == other.as_string_unchecked(),
                     ValueType::Number => self.as_number_unchecked() == other.as_number_unchecked(),
                     ValueType::Array => self.as_array_unchecked() == other.as_array_unchecked(),
                     ValueType::Object => self.as_object_unchecked() == other.as_object_unchecked(),
@@ -1111,5 +1145,98 @@ mod tests {
         let x = IValue::from(o.clone());
 
         assert_eq!(x.into_object(), Ok(o));
+    }
+}
+
+#[cfg(test)]
+mod tests_defrag {
+    use std::alloc::{alloc, dealloc, Layout};
+
+    use super::*;
+
+    struct DummyDefragAllocator;
+
+    impl DefragAllocator for DummyDefragAllocator {
+        unsafe fn realloc_ptr<T>(&mut self, ptr: *mut T, layout: Layout) -> *mut T {
+            let new_ptr = self.alloc(layout).cast::<T>();
+            std::ptr::copy_nonoverlapping(ptr.cast::<u8>(), new_ptr.cast::<u8>(), layout.size());
+            self.free(ptr, layout);
+            new_ptr
+        }
+
+        /// Allocate memory for defrag
+        unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
+            alloc(layout)
+        }
+
+        /// Free memory for defrag
+        unsafe fn free<T>(&mut self, ptr: *mut T, layout: Layout) {
+            dealloc(ptr as *mut u8, layout);
+        }
+    }
+
+    fn test_defrag_generic(val: IValue) {
+        let defrag_val = val.clone();
+        crate::reinit_shared_string_cache();
+        let defrag_val = defrag_val.defrag(&mut DummyDefragAllocator);
+        assert_eq!(val, defrag_val);
+    }
+
+    #[test]
+    fn test_defrag_null() {
+        test_defrag_generic(ijson!(null));
+    }
+
+    #[test]
+    fn test_defrag_bool() {
+        test_defrag_generic(ijson!(true));
+        test_defrag_generic(ijson!(false));
+    }
+
+    #[test]
+    fn test_defrag_number() {
+        test_defrag_generic(ijson!(1));
+        test_defrag_generic(ijson!(1000000000));
+        test_defrag_generic(ijson!(-1000000000));
+        test_defrag_generic(ijson!(1.11111111));
+        test_defrag_generic(ijson!(-1.11111111));
+    }
+
+    #[test]
+    fn test_defrag_string() {
+        test_defrag_generic(ijson!("test"));
+        test_defrag_generic(ijson!(""));
+    }
+
+    #[test]
+    fn test_defrag_array() {
+        test_defrag_generic(ijson!([1, 2, "bar"]));
+    }
+
+    #[test]
+    fn test_defrag_array_of_numbers() {
+        test_defrag_generic(ijson!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_defrag_empty_array_of_numbers() {
+        test_defrag_generic(ijson!([]));
+    }
+
+    #[test]
+    fn test_defrag_object() {
+        test_defrag_generic(ijson!({"foo": "bar"}));
+    }
+
+    #[test]
+    fn test_defrag_empty_object() {
+        test_defrag_generic(ijson!({}));
+    }
+
+    #[test]
+    fn test_defrag_complex() {
+        test_defrag_generic(ijson!([
+            {"foo": "bar"}, 1, 2, 3, null, true, false, {"test":[1,2,null, true, false, 3, {"foo":[1, "bar"]}]}
+        ]));
     }
 }
