@@ -62,7 +62,7 @@ enum StringCache {
 static mut STRING_CACHE: OnceLock<StringCache> = OnceLock::new();
 
 pub(crate) fn reinit_cache() {
-    let s_c = get_cache();
+    let s_c = get_cache_mut();
     match s_c {
         StringCache::ThreadUnsafe(s_c) => *s_c = HashSet::new(),
         StringCache::ThreadSafe(s_c) => {
@@ -83,14 +83,14 @@ pub(crate) fn init_cache(thread_safe: bool) -> Result<(), String> {
     .map_err(|_| "Cache is already initialized".to_owned())
 }
 
-fn get_cache() -> &'static mut StringCache {
+fn get_cache_mut() -> &'static mut StringCache {
     let s_c = unsafe { &mut *addr_of_mut!(STRING_CACHE) };
     s_c.get_or_init(|| StringCache::ThreadUnsafe(HashSet::new()));
     s_c.get_mut().unwrap()
 }
 
 fn is_thread_safe() -> bool {
-    match get_cache() {
+    match get_cache_mut() {
         StringCache::ThreadSafe(_) => true,
         StringCache::ThreadUnsafe(_) => false,
     }
@@ -145,7 +145,7 @@ impl CacheGuard {
 }
 
 fn get_cache_guard() -> CacheGuard {
-    let s_c = get_cache();
+    let s_c = get_cache_mut();
     match s_c {
         StringCache::ThreadUnsafe(s_c) => CacheGuard::ThreadUnsafe(s_c),
         StringCache::ThreadSafe(s_c) => {
@@ -157,9 +157,6 @@ fn get_cache_guard() -> CacheGuard {
 struct WeakIString {
     ptr: NonNull<Header>,
 }
-
-unsafe impl Sync for WeakIString {}
-unsafe impl Send for WeakIString {}
 
 impl PartialEq for WeakIString {
     fn eq(&self, other: &Self) -> bool {
