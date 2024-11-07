@@ -8,7 +8,9 @@ use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::mem;
 use std::ops::Deref;
-use std::ptr::{copy_nonoverlapping, NonNull};
+use std::ptr::{addr_of_mut, copy_nonoverlapping, NonNull};
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 use crate::{Defrag, DefragAllocator};
@@ -18,7 +20,7 @@ use super::value::{IValue, TypeTag};
 #[repr(C)]
 #[repr(align(4))]
 struct Header {
-    rc: usize,
+    rc: AtomicUsize,
     // We use 48 bits for the length.
     len_lower: u32,
     len_upper: u16,
@@ -52,42 +54,104 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
 impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
 impl<'a, T: ThinMutExt<'a, Header>> HeaderMut<'a> for T {}
 
-static mut STRING_CACHE: Option<HashSet<WeakIString>> = None;
-
-// Eagerly initialize the string cache during tests or when the
-// `ctor` feature is enabled.
-#[cfg(any(test, feature = "ctor"))]
-#[ctor::ctor]
-unsafe fn ctor_init_cache() {
-    if STRING_CACHE.is_none() {
-        STRING_CACHE = Some(HashSet::new());
-    };
+enum StringCache {
+    ThreadSafe(Mutex<HashSet<WeakIString>>),
+    ThreadUnsafe(HashSet<WeakIString>),
 }
 
-#[doc(hidden)]
-pub fn init_cache() {
-    unsafe {
-        if STRING_CACHE.is_none() {
-            STRING_CACHE = Some(HashSet::new());
-        };
-    }
-}
+static mut STRING_CACHE: OnceLock<StringCache> = OnceLock::new();
 
 pub(crate) fn reinit_cache() {
-    unsafe {
-        STRING_CACHE = Some(HashSet::new());
+    let s_c = get_cache_mut();
+    match s_c {
+        StringCache::ThreadUnsafe(s_c) => *s_c = HashSet::new(),
+        StringCache::ThreadSafe(s_c) => {
+            let mut s_c: std::sync::MutexGuard<'_, HashSet<WeakIString>> =
+                s_c.lock().expect("Mutex lock should succeed");
+            *s_c = HashSet::new();
+        }
     }
 }
 
-#[cfg(not(feature = "ctor"))]
-unsafe fn get_cache() -> &'static mut HashSet<WeakIString> {
-    init_cache();
-    STRING_CACHE.as_mut().unwrap()
+pub(crate) fn init_cache(thread_safe: bool) -> Result<(), String> {
+    let s_c = unsafe { &*addr_of_mut!(STRING_CACHE) };
+    s_c.set(if thread_safe {
+        StringCache::ThreadSafe(Mutex::new(HashSet::new()))
+    } else {
+        StringCache::ThreadUnsafe(HashSet::new())
+    })
+    .map_err(|_| "Cache is already initialized".to_owned())
 }
 
-#[cfg(feature = "ctor")]
-unsafe fn get_cache() -> &'static mut HashSet<WeakIString> {
-    STRING_CACHE.as_mut().unwrap()
+fn get_cache_mut() -> &'static mut StringCache {
+    let s_c = unsafe { &mut *addr_of_mut!(STRING_CACHE) };
+    s_c.get_or_init(|| StringCache::ThreadUnsafe(HashSet::new()));
+    s_c.get_mut().unwrap()
+}
+
+fn is_thread_safe() -> bool {
+    match get_cache_mut() {
+        StringCache::ThreadSafe(_) => true,
+        StringCache::ThreadUnsafe(_) => false,
+    }
+}
+
+enum CacheGuard {
+    ThreadUnsafe(&'static mut HashSet<WeakIString>),
+    ThreadSafe(MutexGuard<'static, HashSet<WeakIString>>),
+}
+
+impl CacheGuard {
+    fn get_or_insert<'a>(
+        &mut self,
+        value: &str,
+        f: Box<dyn FnOnce(&str) -> WeakIString + 'a>,
+    ) -> &WeakIString {
+        match self {
+            CacheGuard::ThreadSafe(c_g) => c_g.get_or_insert_with(value, |val| f(val)),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.get_or_insert_with(value, |val| f(val)),
+        }
+    }
+
+    fn get_val(&self, val: &str) -> Option<&WeakIString> {
+        match self {
+            CacheGuard::ThreadSafe(c_g) => c_g.get(val),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.get(val),
+        }
+    }
+
+    fn remove_val(&mut self, val: &str) -> bool {
+        match self {
+            CacheGuard::ThreadSafe(c_g) => c_g.remove(val),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.remove(val),
+        }
+    }
+
+    #[cfg(test)]
+    fn check_if_empty(&self) -> bool {
+        match self {
+            CacheGuard::ThreadSafe(c_g) => c_g.is_empty(),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.is_empty(),
+        }
+    }
+
+    #[cfg(test)]
+    fn shrink(&mut self) {
+        match self {
+            CacheGuard::ThreadSafe(c_g) => c_g.shrink_to_fit(),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.shrink_to_fit(),
+        }
+    }
+}
+
+fn get_cache_guard() -> CacheGuard {
+    let s_c = get_cache_mut();
+    match s_c {
+        StringCache::ThreadUnsafe(s_c) => CacheGuard::ThreadUnsafe(s_c),
+        StringCache::ThreadSafe(s_c) => {
+            CacheGuard::ThreadSafe(s_c.lock().expect("Mutex lock should succeed"))
+        }
+    }
 }
 
 struct WeakIString {
@@ -125,7 +189,9 @@ impl WeakIString {
     }
     fn upgrade(&self) -> IString {
         unsafe {
-            self.header().rc += 1;
+            self.header()
+                .rc
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             IString(IValue::new_ptr(
                 self.ptr.as_ptr().cast::<u8>(),
                 TypeTag::StringOrNull,
@@ -157,7 +223,7 @@ value_subtype_impls!(IString, into_string, as_string, as_string_mut);
 static EMPTY_HEADER: Header = Header {
     len_lower: 0,
     len_upper: 0,
-    rc: 0,
+    rc: AtomicUsize::new(0),
 };
 
 impl IString {
@@ -178,7 +244,7 @@ impl IString {
             ptr.write(Header {
                 len_lower: s.len() as u32,
                 len_upper: ((s.len() as u64) >> 32) as u16,
-                rc: 0,
+                rc: AtomicUsize::new(0),
             });
             let hd = ThinMut::new(ptr);
             copy_nonoverlapping(s.as_ptr(), hd.str_ptr_mut(), s.len());
@@ -199,11 +265,14 @@ impl IString {
             return Self::new();
         }
 
-        let cache = unsafe { get_cache() };
+        let mut cache = get_cache_guard();
 
-        let k = cache.get_or_insert_with(s, |s| WeakIString {
-            ptr: unsafe { NonNull::new_unchecked(Self::alloc(s, allocator)) },
-        });
+        let k = cache.get_or_insert(
+            s,
+            Box::new(|s| WeakIString {
+                ptr: unsafe { NonNull::new_unchecked(Self::alloc(s, allocator)) },
+            }),
+        );
         k.upgrade()
     }
 
@@ -251,31 +320,50 @@ impl IString {
         if self.is_empty() {
             Self::new().0
         } else {
-            self.header().rc += 1;
+            self.header()
+                .rc
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             unsafe { self.0.raw_copy() }
         }
     }
 
     fn drop_impl_with_deallocator<D: FnOnce(*mut u8, Layout)>(&mut self, deallocator: D) {
         if !self.is_empty() {
-            let mut hd = self.header();
-            hd.rc -= 1;
-            if hd.rc == 0 {
+            let hd = self.header();
+
+            if is_thread_safe() {
+                // Optimization for the thread safe case, we want to avoid locking the cache if the ref count
+                // is not potentially going to reach zero.
+                let mut rc = hd.rc.load(std::sync::atomic::Ordering::Relaxed);
+                while rc > 1 {
+                    match hd.rc.compare_exchange_weak(
+                        rc,
+                        rc - 1,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    ) {
+                        Ok(_) => return,
+                        Err(new_rc) => rc = new_rc,
+                    }
+                }
+            }
+
+            let mut cache = get_cache_guard();
+            if hd.rc.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) == 1 {
                 // Reference count reached zero, free the string
-                let cache = unsafe { get_cache() };
-                if let Some(element) = cache.get(hd.str()) {
+                if let Some(element) = cache.get_val(hd.str()) {
                     // we can not simply remove the element from the cache, while we
                     // perform active defrag, the element might be in the cache but will
                     // point to another (newer) value. In this case we do not want to remove it.
                     if element.ptr.as_ptr().cast() == unsafe { self.0.ptr() } {
-                        cache.remove(hd.str());
+                        cache.remove_val(hd.str());
                     }
                 }
 
                 // Shrink the cache if it is empty in tests to verify no memory leaks
                 #[cfg(test)]
-                if cache.is_empty() {
-                    cache.shrink_to_fit();
+                if cache.check_if_empty() {
+                    cache.shrink();
                 }
                 Self::dealloc(unsafe { self.0.ptr().cast() }, deallocator);
             }

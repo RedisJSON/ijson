@@ -80,6 +80,13 @@ pub fn reinit_shared_string_cache() {
     unsafe_string::reinit_cache();
 }
 
+/// Initialized shared string cache. Either thread safe or thread unsafe (in case
+/// the user know the string cache is protected by other means or the application is
+/// single threaded). Return `Ok(())` on succeed and error if the cache is already initialized.
+pub fn init_shared_string_cache(thread_safe: bool) -> Result<(), String> {
+    unsafe_string::init_cache(thread_safe)
+}
+
 #[cfg(all(test, not(miri)))]
 mod tests {
     use mockalloc::Mockalloc;
