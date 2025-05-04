@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
-use std::hint::unreachable_unchecked;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
@@ -38,7 +37,7 @@ use super::string::IString;
 ///   original `IValue` if the type is not the one expected). These methods
 ///   also exist for the variants which are not `Copy`.
 ///
-/// - Getting using `IValue::to_{bool,{i,u,f}{32,64}}[_lossy]}()`
+/// - Getting using `IValue::to_{bool,{i,u,f}{32,64}[_lossy]}()`
 ///
 ///   These methods return an `Option` of the corresponding type. These
 ///   methods exist for types where the return value would be `Copy`.
@@ -163,15 +162,18 @@ impl<'a> Deref for BoolMut<'a> {
     }
 }
 
-pub(crate) const ALIGNMENT: usize = 4;
+pub(crate) const ALIGNMENT: usize = 8;
 
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TypeTag {
-    Number = 0,
+    F64 = 0,
     StringOrNull = 1,
     ArrayOrFalse = 2,
     ObjectOrTrue = 3,
+    I64 = 4,
+    U64 = 5,
+    InlineInt = 6,
 }
 
 impl From<usize> for TypeTag {
@@ -190,9 +192,11 @@ pub enum ValueType {
     /// Boolean.
     Bool,
 
-    // Stored behind pointer
+    // May be stored either inline or behind pointer
     /// Number.
     Number,
+
+    // Stored behind pointer
     /// String.
     String,
     /// Array.
@@ -212,13 +216,13 @@ impl IValue {
         }
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
-    pub(crate) unsafe fn new_ptr(p: *mut u8, tag: TypeTag) -> Self {
+    pub(crate) const unsafe fn new_ptr(p: *mut u8, tag: TypeTag) -> Self {
         Self {
             ptr: NonNull::new_unchecked(p.add(tag as usize)),
         }
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
-    pub(crate) unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
+    pub(crate) const unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
         Self::new_ptr(r as *const _ as *mut u8, tag)
     }
 
@@ -259,26 +263,26 @@ impl IValue {
     fn is_ptr(&self) -> bool {
         self.ptr_usize() >= ALIGNMENT
     }
-    fn type_tag(&self) -> TypeTag {
+    pub(crate) fn type_tag(&self) -> TypeTag {
         self.ptr_usize().into()
     }
 
     /// Returns the type of this value.
     #[must_use]
     pub fn type_(&self) -> ValueType {
+        use TypeTag::*;
         match (self.type_tag(), self.is_ptr()) {
+            // Numbers
+            (InlineInt, _) | (I64, _) | (U64, _) | (F64, _) => ValueType::Number,
+
             // Pointers
-            (TypeTag::Number, true) => ValueType::Number,
-            (TypeTag::StringOrNull, true) => ValueType::String,
-            (TypeTag::ArrayOrFalse, true) => ValueType::Array,
-            (TypeTag::ObjectOrTrue, true) => ValueType::Object,
+            (StringOrNull, true) => ValueType::String,
+            (ArrayOrFalse, true) => ValueType::Array,
+            (ObjectOrTrue, true) => ValueType::Object,
 
             // Non-pointers
-            (TypeTag::StringOrNull, false) => ValueType::Null,
-            (TypeTag::ArrayOrFalse, false) | (TypeTag::ObjectOrTrue, false) => ValueType::Bool,
-
-            // Safety: due to invariants on IValue
-            _ => unsafe { unreachable_unchecked() },
+            (StringOrNull, false) => ValueType::Null,
+            (ArrayOrFalse, false) | (ObjectOrTrue, false) => ValueType::Bool,
         }
     }
 
@@ -428,7 +432,11 @@ impl IValue {
     /// Returns `true` if this is a number.
     #[must_use]
     pub fn is_number(&self) -> bool {
-        self.type_tag() == TypeTag::Number
+        use TypeTag::*;
+        match self.type_tag() {
+            InlineInt | I64 | U64 | F64 => true,
+            _ => false,
+        }
     }
 
     unsafe fn unchecked_cast_ref<T>(&self) -> &T {
@@ -439,12 +447,12 @@ impl IValue {
         &mut *(self as *mut Self).cast::<T>()
     }
 
-    // Safety: Must be a string
+    // Safety: Must be a number
     unsafe fn as_number_unchecked(&self) -> &INumber {
         self.unchecked_cast_ref()
     }
 
-    // Safety: Must be a string
+    // Safety: Must be a number
     unsafe fn as_number_unchecked_mut(&mut self) -> &mut INumber {
         self.unchecked_cast_mut()
     }
