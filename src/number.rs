@@ -9,7 +9,6 @@ use std::hash::Hash;
 use std::hint::unreachable_unchecked;
 
 use super::value::{IValue, TypeTag, ALIGNMENT};
-const TAG_SIZE_BITS: u32 = ALIGNMENT.trailing_zeros();
 
 fn can_represent_as_f64(x: u64) -> bool {
     x.leading_zeros() + x.trailing_zeros() >= 11
@@ -45,8 +44,9 @@ fn cmp_u64_to_f64(a: u64, b: f64) -> Ordering {
 }
 
 // Range of a 61-bit signed integer.
-const INLINE_LOWER: i64 = -0x2000_0000_0000_0000;
-const INLINE_UPPER: i64 = 0x2000_0000_0000_0000;
+const TAG_SIZE_BITS: u32 = ALIGNMENT.trailing_zeros();
+const INLINE_LOWER: i64 = i64::MIN >> TAG_SIZE_BITS;
+const INLINE_UPPER: i64 = i64::MAX >> TAG_SIZE_BITS;
 
 /// The `INumber` type represents a JSON number. It is decoupled from any specific
 /// representation, and internally uses several. There is no way to determine the
@@ -99,7 +99,7 @@ impl INumber {
         // Safety: 1 is in the inline range
         unsafe { Self::new_inline(1) }
     }
-    // Safety: Value must be in the range INLINE_LOWER..INLINE_UPPER
+    // Safety: Value must be in the range INLINE_LOWER..=INLINE_UPPER
     unsafe fn new_inline(value: i64) -> Self {
         INumber(IValue::new_ptr(
             (value << TAG_SIZE_BITS) as *mut u8,
@@ -123,7 +123,7 @@ impl INumber {
     }
 
     fn new_i64(value: i64) -> Self {
-        if (INLINE_LOWER..INLINE_UPPER).contains(&value) {
+        if (INLINE_LOWER..=INLINE_UPPER).contains(&value) {
             // Safety: We know this is in the inline range
             unsafe { Self::new_inline(value) }
         } else {
@@ -213,7 +213,8 @@ impl INumber {
             match self.type_tag() {
                 TypeTag::InlineInt => Some(self.inline_int_unchecked()),
                 TypeTag::I64 => Some(*self.i64_unchecked()),
-                TypeTag::U64 => i64::try_from(*self.u64_unchecked()).ok(),
+                // all u64 values are in the range [i64::MAX, u64::MAX)
+                TypeTag::U64 => None,
                 TypeTag::F64 => {
                     let v = *self.f64_unchecked();
                     if v.fract() == 0.0 && i64::MIN as f64 <= v && v < i64::MAX as f64 {
@@ -497,7 +498,7 @@ impl From<i16> for INumber {
 }
 impl From<i8> for INumber {
     fn from(v: i8) -> Self {
-        // Safety: All i8s are in the static range
+        // Safety: All i8s are in the inline range
         unsafe { Self::new_inline(v as i64) }
     }
 }

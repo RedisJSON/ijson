@@ -1042,25 +1042,72 @@ mod tests {
 
     #[mockalloc::test]
     fn test_number() {
-        for v in 300..400 {
-            let mut x = IValue::from(v);
-            assert!(x.is_number());
-            assert_eq!(x.type_(), ValueType::Number);
-            assert_eq!(x.to_i32(), Some(v));
-            assert_eq!(x.to_u32(), Some(v as u32));
-            assert_eq!(x.to_i64(), Some(i64::from(v)));
-            assert_eq!(x.to_u64(), Some(v as u64));
-            assert_eq!(x.to_isize(), Some(v as isize));
-            assert_eq!(x.to_usize(), Some(v as usize));
-            assert_eq!(x.as_number(), Some(&v.into()));
-            assert_eq!(x.as_number_mut(), Some(&mut v.into()));
-            assert!(matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into()));
-            assert!(
-                matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
-            );
-            assert!(
-                matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
-            );
+        for range in [-1 << 61, 0i64, 1 << 61].map(|b| b-100..b+100) {
+            for v in range {
+                let mut x = IValue::from(v);
+                assert!(x.is_number());
+                assert_eq!(x.type_(), ValueType::Number);
+                assert_eq!(x.to_i32(), i32::try_from(v).ok());
+                assert_eq!(x.to_u32(), u32::try_from(v).ok());
+                assert_eq!(x.to_i64(), i64::try_from(v).ok());
+                assert_eq!(x.to_u64(), u64::try_from(v).ok());
+                assert_eq!(x.to_isize(), isize::try_from(v).ok());
+                assert_eq!(x.to_usize(), usize::try_from(v).ok());
+                assert_eq!(x.to_f64_lossy(), Some(v as f64));
+                assert_eq!(x.to_f32_lossy(), Some(v as f32));
+                assert_eq!(x.as_number(), Some(&v.into()));
+                assert_eq!(x.as_number_mut(), Some(&mut v.into()));
+                assert!(matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into()));
+                assert!(
+                    matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
+                );
+                assert!(
+                    matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
+                );
+            }
+        }
+        for range in [0u64, 1 << 61, 1 << 63].map(|b| b..b+100) {
+            for v in range {
+                let mut x = IValue::from(v);
+                assert!(x.is_number());
+                assert_eq!(x.type_(), ValueType::Number);
+                assert_eq!(x.to_i32(), i32::try_from(v).ok());
+                assert_eq!(x.to_u32(), u32::try_from(v).ok());
+                assert_eq!(x.to_i64(), i64::try_from(v).ok());
+                assert_eq!(x.to_u64(), u64::try_from(v).ok());
+                assert_eq!(x.to_isize(), isize::try_from(v).ok());
+                assert_eq!(x.to_usize(), usize::try_from(v).ok());
+                assert_eq!(x.to_f64_lossy(), Some(v as f64));
+                assert_eq!(x.to_f32_lossy(), Some(v as f32));
+                assert_eq!(x.as_number(), Some(&v.into()));
+                assert_eq!(x.as_number_mut(), Some(&mut v.into()));
+                assert!(matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into()));
+                assert!(
+                    matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
+                );
+                assert!(
+                    matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
+                );
+            }
+        }
+        for range in [-1i64 << 62, 1 << 62].map(|v| v-100..v+100) {
+            for v in range.map(|v| v as f64 * 1e-30) {
+                let mut x = IValue::from(v);
+                assert!(x.is_number());
+                assert_eq!(x.type_(), ValueType::Number);
+                assert_eq!(x.to_f64(), Some(v));
+                assert_eq!(x.to_f64_lossy(), Some(v));
+                assert_eq!(x.to_f32_lossy(), Some(v as f32));
+                assert_eq!(x.as_number(), Some(&INumber::try_from(v).unwrap()));
+                assert_eq!(x.as_number_mut(), Some(&mut INumber::try_from(v).unwrap()));
+                assert!(matches!(x.clone().destructure(), Destructured::Number(u) if u == INumber::try_from(v).unwrap()));
+                assert!(
+                    matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == INumber::try_from(v).unwrap())
+                );
+                assert!(
+                    matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == INumber::try_from(v).unwrap())
+                );
+            }
         }
     }
 
