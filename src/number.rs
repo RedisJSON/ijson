@@ -9,33 +9,25 @@ use std::hash::Hash;
 
 use super::value::{IValue, TypeTag, ALIGNMENT};
 
+#[repr(usize)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum NumberType {
-    F64 = 0,
-    I64 = 4,
-    U64 = 5,
-    Inline = 6,
+    F64 = TypeTag::F64 as usize,
+    I64 = TypeTag::I64 as usize,
+    U64 = TypeTag::U64 as usize,
+    Inline = TypeTag::InlineInt as usize,
 }
 
-impl From<TypeTag> for NumberType {
-    fn from(tag: TypeTag) -> Self {
-        match tag {
-            TypeTag::F64 => NumberType::F64,
-            TypeTag::I64 => NumberType::I64,
-            TypeTag::U64 => NumberType::U64,
-            TypeTag::InlineInt => NumberType::Inline,
-            _ => unreachable!(),
-        }
+impl From<usize> for NumberType {
+    fn from(other: usize) -> Self {
+        // Safety: `% ALIGNMENT` can only return valid variants
+        unsafe { std::mem::transmute(other % ALIGNMENT) }
     }
 }
 impl From<NumberType> for TypeTag {
     fn from(tag: NumberType) -> Self {
-        match tag {
-            NumberType::F64 => TypeTag::F64,
-            NumberType::I64 => TypeTag::I64,
-            NumberType::U64 => TypeTag::U64,
-            NumberType::Inline => TypeTag::InlineInt,
-        }
+        // Safety: all NumberType variants are equal to their corresponding TypeTags
+        unsafe { std::mem::transmute(tag as usize) }
     }
 }
 
@@ -145,7 +137,7 @@ impl INumber {
     }
 
     fn type_tag(&self) -> NumberType {
-        TypeTag::from(self.0.ptr_usize() % ALIGNMENT).into()
+        self.0.ptr_usize().into()
     }
     fn is_inline(&self) -> bool {
         self.type_tag() == NumberType::Inline
