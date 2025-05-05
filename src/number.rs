@@ -6,9 +6,38 @@ use std::cmp::Ordering;
 use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
-use std::hint::unreachable_unchecked;
 
 use super::value::{IValue, TypeTag, ALIGNMENT};
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum NumberType {
+    F64 = 0,
+    I64 = 4,
+    U64 = 5,
+    Inline = 6,
+}
+
+impl From<TypeTag> for NumberType {
+    fn from(tag: TypeTag) -> Self {
+        match tag {
+            TypeTag::F64 => NumberType::F64,
+            TypeTag::I64 => NumberType::I64,
+            TypeTag::U64 => NumberType::U64,
+            TypeTag::InlineInt => NumberType::Inline,
+            _ => unreachable!(),
+        }
+    }
+}
+impl From<NumberType> for TypeTag {
+    fn from(tag: NumberType) -> Self {
+        match tag {
+            NumberType::F64 => TypeTag::F64,
+            NumberType::I64 => TypeTag::I64,
+            NumberType::U64 => TypeTag::U64,
+            NumberType::Inline => TypeTag::InlineInt,
+        }
+    }
+}
 
 fn can_represent_as_f64(x: u64) -> bool {
     x.leading_zeros() + x.trailing_zeros() >= 11
@@ -77,13 +106,13 @@ pub struct INumber(pub(crate) IValue);
 value_subtype_impls!(INumber, into_number, as_number, as_number_mut);
 
 impl INumber {
-    fn layout(tag: TypeTag) -> Layout {
-        use TypeTag::*;
+    fn layout(tag: NumberType) -> Layout {
         match tag {
-            I64 => Layout::new::<i64>(),
-            U64 => Layout::new::<u64>(),
-            F64 => Layout::new::<f64>(),
-            _ => unreachable!(),
+            NumberType::I64 => Layout::new::<i64>(),
+            NumberType::U64 => Layout::new::<u64>(),
+            NumberType::F64 => Layout::new::<f64>(),
+            // Inline numbers are stored in the pointer itself, so no layout is needed
+            NumberType::Inline => unreachable!(),
         }
     }
 
@@ -106,20 +135,20 @@ impl INumber {
             TypeTag::InlineInt,
         ))
     }
-    fn new_ptr(tag: TypeTag) -> Self {
+    fn new_ptr(tag: NumberType) -> Self {
         unsafe {
             INumber(IValue::new_ptr(
                 alloc(Self::layout(tag)),
-                tag,
+                tag.into(),
             ))
         }
     }
 
-    fn type_tag(&self) -> TypeTag {
-        self.0.type_tag()
+    fn type_tag(&self) -> NumberType {
+        TypeTag::from(self.0.ptr_usize() % ALIGNMENT).into()
     }
     fn is_inline(&self) -> bool {
-        self.type_tag() == TypeTag::InlineInt
+        self.type_tag() == NumberType::Inline
     }
 
     fn new_i64(value: i64) -> Self {
@@ -127,7 +156,7 @@ impl INumber {
             // Safety: We know this is in the inline range
             unsafe { Self::new_inline(value) }
         } else {
-            let mut res = Self::new_ptr(TypeTag::I64);
+            let mut res = Self::new_ptr(NumberType::I64);
             // Safety: We know this is an i64 because we just created it
             unsafe {
                 res.ptr_mut().cast::<i64>().write(value);
@@ -139,7 +168,7 @@ impl INumber {
         if let Ok(val) = i64::try_from(value) {
             Self::new_i64(val)
         } else {
-            let mut res = Self::new_ptr(TypeTag::U64);
+            let mut res = Self::new_ptr(NumberType::U64);
             // Safety: We know this is a u64 because we just created it
             unsafe {
                 res.ptr_mut().write(value);
@@ -148,7 +177,7 @@ impl INumber {
         }
     }
     fn new_f64(value: f64) -> Self {
-        let mut res = Self::new_ptr(TypeTag::F64);
+        let mut res = Self::new_ptr(NumberType::F64);
         // Safety: We know this is an f64 because we just created it
         unsafe {
             res.ptr_mut().cast::<f64>().write(value);
@@ -160,11 +189,10 @@ impl INumber {
         // Safety: We only call methods appropriate for the matched type
         unsafe {
             match self.type_tag() {
-                TypeTag::InlineInt => self.0.raw_copy(),
-                TypeTag::I64 => Self::new_i64(*self.i64_unchecked()).0,
-                TypeTag::U64 => Self::new_u64(*self.u64_unchecked()).0,
-                TypeTag::F64 => Self::new_f64(*self.f64_unchecked()).0,
-                _ => unreachable_unchecked(),
+                NumberType::Inline => self.0.raw_copy(),
+                NumberType::I64 => Self::new_i64(*self.i64_unchecked()).0,
+                NumberType::U64 => Self::new_u64(*self.u64_unchecked()).0,
+                NumberType::F64 => Self::new_f64(*self.f64_unchecked()).0,
             }
         }
     }
@@ -211,11 +239,11 @@ impl INumber {
         // Safety: We only call methods appropriate for the type
         unsafe {
             match self.type_tag() {
-                TypeTag::InlineInt => Some(self.inline_int_unchecked()),
-                TypeTag::I64 => Some(*self.i64_unchecked()),
+                NumberType::Inline => Some(self.inline_int_unchecked()),
+                NumberType::I64 => Some(*self.i64_unchecked()),
                 // all u64 values are in the range [i64::MAX, u64::MAX)
-                TypeTag::U64 => None,
-                TypeTag::F64 => {
+                NumberType::U64 => None,
+                NumberType::F64 => {
                     let v = *self.f64_unchecked();
                     if v.fract() == 0.0 && i64::MIN as f64 <= v && v < i64::MAX as f64 {
                         Some(v as i64)
@@ -223,7 +251,6 @@ impl INumber {
                         None
                     }
                 }
-                _ => unreachable_unchecked()
             }
         }
     }
@@ -233,10 +260,10 @@ impl INumber {
         // Safety: We only call methods appropriate for the type
         unsafe {
             match self.type_tag() {
-                TypeTag::InlineInt => u64::try_from(self.inline_int_unchecked()).ok(),
-                TypeTag::I64 => u64::try_from(*self.i64_unchecked()).ok(),
-                TypeTag::U64 => Some(*self.u64_unchecked()),
-                TypeTag::F64 => {
+                NumberType::Inline => u64::try_from(self.inline_int_unchecked()).ok(),
+                NumberType::I64 => u64::try_from(*self.i64_unchecked()).ok(),
+                NumberType::U64 => Some(*self.u64_unchecked()),
+                NumberType::F64 => {
                     let v = *self.f64_unchecked();
                     if v.fract() == 0.0 && 0.0 <= v && v < u64::MAX as f64 {
                         Some(v as u64)
@@ -244,7 +271,6 @@ impl INumber {
                         None
                     }
                 }
-                _ => unreachable_unchecked(),
             }
         }
     }
@@ -272,18 +298,17 @@ impl INumber {
     /// Numeric operations will otherwise treat these two values as equivalent.
     #[must_use]
     pub fn has_decimal_point(&self) -> bool {
-        self.type_tag() == TypeTag::F64
+        self.type_tag() == NumberType::F64
     }
     /// Converts this number to an f64, potentially losing precision in the process.
     #[must_use]
     pub fn to_f64_lossy(&self) -> f64 {
         unsafe {
             match self.type_tag() {
-                TypeTag::InlineInt => self.inline_int_unchecked() as f64,
-                TypeTag::I64 => *self.i64_unchecked() as f64,
-                TypeTag::U64 => *self.u64_unchecked() as f64,
-                TypeTag::F64 => *self.f64_unchecked(),
-                _ => unreachable_unchecked(),
+                NumberType::Inline => self.inline_int_unchecked() as f64,
+                NumberType::I64 => *self.i64_unchecked() as f64,
+                NumberType::U64 => *self.u64_unchecked() as f64,
+                NumberType::F64 => *self.f64_unchecked(),
             }
         }
     }
@@ -293,7 +318,7 @@ impl INumber {
         // Safety: We only call methods appropriate for the type
         unsafe {
             match self.type_tag() {
-                TypeTag::InlineInt => {
+                NumberType::Inline => {
                     let v = self.inline_int_unchecked();
                     let can_represent = if v < 0 {
                         can_represent_as_f64(v.wrapping_neg() as u64)
@@ -306,7 +331,7 @@ impl INumber {
                         None
                     }
                 }
-                TypeTag::I64 => {
+                NumberType::I64 => {
                     let v = *self.i64_unchecked();
                     let can_represent = if v < 0 {
                         can_represent_as_f64(v.wrapping_neg() as u64)
@@ -319,7 +344,7 @@ impl INumber {
                         None
                     }
                 }
-                TypeTag::U64 => {
+                NumberType::U64 => {
                     let v = *self.u64_unchecked();
                     if can_represent_as_f64(v) {
                         Some(v as f64)
@@ -327,8 +352,7 @@ impl INumber {
                         None
                     }
                 }
-                TypeTag::F64 => Some(*self.f64_unchecked()),
-                _ => unreachable_unchecked(),
+                NumberType::F64 => Some(*self.f64_unchecked()),
             }
         }
     }
@@ -343,7 +367,7 @@ impl INumber {
         // Safety: We only call methods appropriate for the type
         unsafe {
             match self.type_tag() {
-                TypeTag::InlineInt => {
+                NumberType::Inline => {
                     let v = self.inline_int_unchecked();
                     let can_represent = if v < 0 {
                         can_represent_as_f32(v.wrapping_neg() as u64)
@@ -356,7 +380,7 @@ impl INumber {
                         None
                     }
                 }
-                TypeTag::I64 => {
+                NumberType::I64 => {
                     let v = *self.i64_unchecked();
                     let can_represent = if v < 0 {
                         can_represent_as_f32(v.wrapping_neg() as u64)
@@ -369,7 +393,7 @@ impl INumber {
                         None
                     }
                 }
-                TypeTag::U64 => {
+                NumberType::U64 => {
                     let v = *self.u64_unchecked();
                     if can_represent_as_f32(v) {
                         Some(v as f32)
@@ -377,7 +401,7 @@ impl INumber {
                         None
                     }
                 }
-                TypeTag::F64 => {
+                NumberType::F64 => {
                     let v = *self.f64_unchecked();
                     let u = v as f32;
                     if v == f64::from(u) {
@@ -386,7 +410,6 @@ impl INumber {
                         None
                     }
                 }
-                _ => unreachable_unchecked(),
             }
         }
     }
@@ -402,25 +425,24 @@ impl INumber {
     }
     // Safety: type tags must be the same
     unsafe fn cmp_homogenous_tags(&self, other: &Self) -> Ordering {
-        use TypeTag::*;
+        use NumberType::*;
         // Safety: We only call methods appropriate for the matched type
         match self.type_tag() {
-            InlineInt => self.inline_int_unchecked().cmp(&other.inline_int_unchecked()),
+            Inline => self.inline_int_unchecked().cmp(&other.inline_int_unchecked()),
             I64 => self.i64_unchecked().cmp(other.i64_unchecked()),
             U64 => self.u64_unchecked().cmp(other.u64_unchecked()),
             F64 => self.f64_unchecked().partial_cmp(other.f64_unchecked()).unwrap(),
-            _ => unreachable_unchecked(),
         }
     }
     // Safety: type tags must be different
     unsafe fn cmp_heterogenous_tags(&self, other: &Self) -> Ordering {
-        use TypeTag::*;
+        use NumberType::*;
         // Safety: We only call methods appropriate for the matched type
         match (self.type_tag(), other.type_tag()) {
-            (InlineInt, I64) => self.inline_int_unchecked().cmp(&*other.i64_unchecked()),
+            (Inline, I64) => self.inline_int_unchecked().cmp(&*other.i64_unchecked()),
             // all inline values are in the range [-2^61, 2^61)
-            (InlineInt, U64) => Ordering::Less,
-            (InlineInt, F64) => cmp_i64_to_f64(self.inline_int_unchecked(), *other.f64_unchecked()),
+            (Inline, U64) => Ordering::Less,
+            (Inline, F64) => cmp_i64_to_f64(self.inline_int_unchecked(), *other.f64_unchecked()),
 
             // all u64 values are in the range [i64::MAX, u64::MAX)
             (I64, U64) => Ordering::Less,

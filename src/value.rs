@@ -216,13 +216,13 @@ impl IValue {
         }
     }
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
-    pub(crate) const unsafe fn new_ptr(p: *mut u8, tag: TypeTag) -> Self {
+    pub(crate) unsafe fn new_ptr(p: *mut u8, tag: TypeTag) -> Self {
         Self {
             ptr: NonNull::new_unchecked(p.add(tag as usize)),
         }
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
-    pub(crate) const unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
+    pub(crate) unsafe fn new_ref<T>(r: &T, tag: TypeTag) -> Self {
         Self::new_ptr(r as *const _ as *mut u8, tag)
     }
 
@@ -263,7 +263,7 @@ impl IValue {
     fn is_ptr(&self) -> bool {
         self.ptr_usize() >= ALIGNMENT
     }
-    pub(crate) fn type_tag(&self) -> TypeTag {
+    fn type_tag(&self) -> TypeTag {
         self.ptr_usize().into()
     }
 
