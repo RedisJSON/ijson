@@ -289,6 +289,14 @@ impl IString {
             }
         }
     }
+
+    pub(crate) fn mem_allocated(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            Self::layout(self.header().len()).unwrap().size()
+        }
+    }
 }
 
 impl Deref for IString {

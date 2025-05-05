@@ -325,6 +325,19 @@ impl IValue {
             }
         }
     }
+    
+    /// Reports dynamic memory allocated by this value.
+    pub fn mem_allocated(&self) -> usize {
+        match self.type_() {
+            // inline types consume no extra memory
+            ValueType::Null | ValueType::Bool => 0,
+            // Safety: We checked the type
+            ValueType::Number => unsafe { self.as_number_unchecked() }.mem_allocated(),
+            ValueType::String => unsafe { self.as_string_unchecked() }.mem_allocated(),
+            ValueType::Array => unsafe { self.as_array_unchecked() }.mem_allocated(),
+            ValueType::Object => unsafe { self.as_object_unchecked() }.mem_allocated(),
+        }
+    }
 
     /// Indexes into this value with a number or string.
     /// Panics if the value is not an array or object.

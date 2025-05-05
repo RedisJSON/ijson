@@ -352,6 +352,15 @@ impl IArray {
             }
         }
     }
+
+    pub(crate) fn mem_allocated(&self) -> usize {
+        if self.is_static() {
+            0
+        } else {
+            Self::layout(self.header().cap).unwrap().size()
+                + self.iter().map(IValue::mem_allocated).sum::<usize>()
+        }
+    }
 }
 
 impl IntoIterator for IArray {
