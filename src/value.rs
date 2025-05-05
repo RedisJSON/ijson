@@ -1127,9 +1127,7 @@ mod tests {
                 o.iter()
                     .map(|(k, v)| k.mem_allocated() + v.mem_allocated())
                     .sum::<usize>()
-                    + o.capacity()
-                        * (mem::size_of::<IString>()
-                            + mem::size_of::<IValue>())
+                    + o.capacity() * (mem::size_of::<IString>() + mem::size_of::<IValue>())
                     + 5 * o.capacity() / 4 * mem::size_of::<usize>()
                     + 2 * mem::size_of::<usize>()
             );
