@@ -325,7 +325,7 @@ impl IValue {
             }
         }
     }
-    
+
     /// Reports dynamic memory allocated by this value.
     pub fn mem_allocated(&self) -> usize {
         match self.type_() {
@@ -1022,6 +1022,7 @@ mod tests {
         assert!(matches!(x.clone().destructure(), Destructured::Null));
         assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Null));
         assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Null));
+        assert_eq!(x.mem_allocated(), 0);
     }
 
     #[test]
@@ -1042,6 +1043,7 @@ mod tests {
             }
 
             assert_eq!(x.to_bool(), Some(!v));
+            assert_eq!(x.mem_allocated(), 0);
         }
     }
 
@@ -1066,6 +1068,7 @@ mod tests {
             assert!(
                 matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
             );
+            assert_eq!(x.mem_allocated(), if v < 384 { 0 } else { 4 });
         }
     }
 
@@ -1081,12 +1084,16 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
+            assert_eq!(
+                x.mem_allocated(),
+                2 * mem::size_of::<usize>() + s.capacity()
+            );
         }
     }
 
     #[mockalloc::test]
     fn test_array() {
-        for v in 0..10 {
+        for v in 4..20 {
             let mut a: IArray = (0..v).collect();
             let mut x = IValue::from(a.clone());
             assert!(x.is_array());
@@ -1096,12 +1103,16 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::Array(u) if u == a));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Array(u) if *u == a));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Array(u) if *u == a));
+            assert_eq!(
+                x.mem_allocated(),
+                2 * mem::size_of::<usize>() + a.capacity() * mem::size_of::<IValue>()
+            );
         }
     }
 
     #[mockalloc::test]
     fn test_object() {
-        for v in 0..10 {
+        for v in 4..20 {
             let mut o: IObject = (0..v).map(|i| (i.to_string(), i)).collect();
             let mut x = IValue::from(o.clone());
             assert!(x.is_object());
@@ -1111,6 +1122,17 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::Object(u) if u == o));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Object(u) if *u == o));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Object(u) if *u == o));
+            assert_eq!(
+                x.mem_allocated(),
+                o.iter()
+                    .map(|(k, v)| k.mem_allocated() + v.mem_allocated())
+                    .sum::<usize>()
+                    + o.capacity()
+                        * (mem::size_of::<IString>()
+                            + mem::size_of::<IValue>())
+                    + 5 * o.capacity() / 4 * mem::size_of::<usize>()
+                    + 2 * mem::size_of::<usize>()
+            );
         }
     }
 

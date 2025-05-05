@@ -783,7 +783,7 @@ impl IObject {
         if self.is_static() {
             0
         } else {
-            Self::layout(self.header().cap).unwrap().size()
+            Self::layout(self.capacity()).unwrap().size()
                 + self
                     .iter()
                     .map(|(k, v)| k.mem_allocated() + v.mem_allocated())

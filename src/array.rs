@@ -357,7 +357,7 @@ impl IArray {
         if self.is_static() {
             0
         } else {
-            Self::layout(self.header().cap).unwrap().size()
+            Self::layout(self.capacity()).unwrap().size()
                 + self.iter().map(IValue::mem_allocated).sum::<usize>()
         }
     }

@@ -294,7 +294,7 @@ impl IString {
         if self.is_empty() {
             0
         } else {
-            Self::layout(self.header().len()).unwrap().size()
+            Self::layout(self.len()).unwrap().size()
         }
     }
 }
