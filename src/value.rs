@@ -348,6 +348,19 @@ impl IValue {
         }
     }
 
+    /// Reports dynamic memory allocated by this value.
+    pub fn mem_allocated(&self) -> usize {
+        match self.type_() {
+            // inline types consume no extra memory
+            ValueType::Null | ValueType::Bool => 0,
+            // Safety: We checked the type
+            ValueType::Number => unsafe { self.as_number_unchecked() }.mem_allocated(),
+            ValueType::String => unsafe { self.as_string_unchecked() }.mem_allocated(),
+            ValueType::Array => unsafe { self.as_array_unchecked() }.mem_allocated(),
+            ValueType::Object => unsafe { self.as_object_unchecked() }.mem_allocated(),
+        }
+    }
+
     /// Indexes into this value with a number or string.
     /// Panics if the value is not an array or object.
     /// Panics if attempting to index an array with a string.
@@ -1032,6 +1045,7 @@ mod tests {
         assert!(matches!(x.clone().destructure(), Destructured::Null));
         assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Null));
         assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Null));
+        assert_eq!(x.mem_allocated(), 0);
     }
 
     #[test]
@@ -1052,30 +1066,47 @@ mod tests {
             }
 
             assert_eq!(x.to_bool(), Some(!v));
+            assert_eq!(x.mem_allocated(), 0);
         }
     }
 
     #[mockalloc::test]
     fn test_number() {
-        for v in 300..400 {
-            let mut x = IValue::from(v);
-            assert!(x.is_number());
-            assert_eq!(x.type_(), ValueType::Number);
-            assert_eq!(x.to_i32(), Some(v));
-            assert_eq!(x.to_u32(), Some(v as u32));
-            assert_eq!(x.to_i64(), Some(i64::from(v)));
-            assert_eq!(x.to_u64(), Some(v as u64));
-            assert_eq!(x.to_isize(), Some(v as isize));
-            assert_eq!(x.to_usize(), Some(v as usize));
-            assert_eq!(x.as_number(), Some(&v.into()));
-            assert_eq!(x.as_number_mut(), Some(&mut v.into()));
-            assert!(matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into()));
-            assert!(
-                matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
-            );
-            assert!(
-                matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
-            );
+        const STATIC_UPPER: i64 = 0x0200 - 0x0080; // it's not worth making crate::number::STATIC_UPPER public
+        const SHORT_UPPER: i64 = 0x0080_0000; // nor crate::number::SHORT_UPPER
+        for range in [STATIC_UPPER, SHORT_UPPER].map(|b| b - 100..b + 100) {
+            for v in range {
+                let mut x = IValue::from(v);
+                assert!(x.is_number());
+                assert_eq!(x.type_(), ValueType::Number);
+                assert_eq!(x.to_i32(), Some(v as i32));
+                assert_eq!(x.to_u32(), Some(v as u32));
+                assert_eq!(x.to_i64(), Some(v as i64));
+                assert_eq!(x.to_u64(), Some(v as u64));
+                assert_eq!(x.to_isize(), Some(v as isize));
+                assert_eq!(x.to_usize(), Some(v as usize));
+                assert_eq!(x.as_number(), Some(&v.into()));
+                assert_eq!(x.as_number_mut(), Some(&mut v.into()));
+                assert!(
+                    matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into())
+                );
+                assert!(
+                    matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
+                );
+                assert!(
+                    matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
+                );
+                assert_eq!(
+                    x.mem_allocated(),
+                    if v < STATIC_UPPER {
+                        0
+                    } else if v < SHORT_UPPER {
+                        4
+                    } else {
+                        16
+                    }
+                );
+            }
         }
     }
 
@@ -1091,12 +1122,16 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
+            assert_eq!(
+                x.mem_allocated(),
+                2 * mem::size_of::<usize>() + s.capacity()
+            );
         }
     }
 
     #[mockalloc::test]
     fn test_array() {
-        for v in 0..10 {
+        for v in 4..20 {
             let mut a: IArray = (0..v).collect();
             let mut x = IValue::from(a.clone());
             assert!(x.is_array());
@@ -1106,12 +1141,16 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::Array(u) if u == a));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Array(u) if *u == a));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Array(u) if *u == a));
+            assert_eq!(
+                x.mem_allocated(),
+                2 * mem::size_of::<usize>() + a.capacity() * mem::size_of::<IValue>()
+            );
         }
     }
 
     #[mockalloc::test]
     fn test_object() {
-        for v in 0..10 {
+        for v in 4..20 {
             let mut o: IObject = (0..v).map(|i| (i.to_string(), i)).collect();
             let mut x = IValue::from(o.clone());
             assert!(x.is_object());
@@ -1121,6 +1160,15 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::Object(u) if u == o));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Object(u) if *u == o));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Object(u) if *u == o));
+            assert_eq!(
+                x.mem_allocated(),
+                o.iter()
+                    .map(|(k, v)| k.mem_allocated() + v.mem_allocated())
+                    .sum::<usize>()
+                    + o.capacity() * (mem::size_of::<IString>() + mem::size_of::<IValue>())
+                    + 5 * o.capacity() / 4 * mem::size_of::<usize>()
+                    + 2 * mem::size_of::<usize>()
+            );
         }
     }
 

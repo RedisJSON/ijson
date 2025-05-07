@@ -516,6 +516,14 @@ impl INumber {
         }
     }
 
+    pub(crate) fn mem_allocated(&self) -> usize {
+        if self.is_static() {
+            0
+        } else {
+            Self::layout(self.header().type_).unwrap().size()
+        }
+    }
+
     /// Converts this number to an i64 if it can be represented exactly.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
