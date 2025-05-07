@@ -1139,7 +1139,7 @@ mod tests {
                 );
                 assert_eq!(
                     x.mem_allocated(),
-                    if v < i64::MAX as u64 && (INLINE_LOWER..=INLINE_UPPER).contains(&(v as i64)) {
+                    if v <= i64::MAX as u64 && (INLINE_LOWER..=INLINE_UPPER).contains(&(v as i64)) {
                         0
                     } else {
                         8
