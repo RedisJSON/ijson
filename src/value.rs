@@ -1083,7 +1083,7 @@ mod tests {
         const TAG_SIZE_BITS: u32 = ALIGNMENT.trailing_zeros();
         const INLINE_LOWER: i64 = i64::MIN >> TAG_SIZE_BITS;
         const INLINE_UPPER: i64 = i64::MAX >> TAG_SIZE_BITS;
-        for range in [-1 << 61, 0i64, 1 << 61].map(|b| b-100..b+100) {
+        for range in [-1 << 61, 0i64, 1 << 61].map(|b| b - 100..b + 100) {
             for v in range {
                 let mut x = IValue::from(v);
                 assert!(x.is_number());
@@ -1098,7 +1098,9 @@ mod tests {
                 assert_eq!(x.to_f32_lossy(), Some(v as f32));
                 assert_eq!(x.as_number(), Some(&v.into()));
                 assert_eq!(x.as_number_mut(), Some(&mut v.into()));
-                assert!(matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into()));
+                assert!(
+                    matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into())
+                );
                 assert!(
                     matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
                 );
@@ -1115,7 +1117,7 @@ mod tests {
                 );
             }
         }
-        for range in [0u64, 1 << 61, 1 << 63].map(|b| b..b+100) {
+        for range in [0u64, 1 << 61, 1 << 63].map(|b| b..b + 100) {
             for v in range {
                 let mut x = IValue::from(v);
                 assert!(x.is_number());
@@ -1130,7 +1132,9 @@ mod tests {
                 assert_eq!(x.to_f32_lossy(), Some(v as f32));
                 assert_eq!(x.as_number(), Some(&v.into()));
                 assert_eq!(x.as_number_mut(), Some(&mut v.into()));
-                assert!(matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into()));
+                assert!(
+                    matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into())
+                );
                 assert!(
                     matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
                 );
@@ -1147,7 +1151,7 @@ mod tests {
                 );
             }
         }
-        for range in [-1i64 << 62, 1 << 62].map(|v| v-100..v+100) {
+        for range in [-1i64 << 62, 1 << 62].map(|v| v - 100..v + 100) {
             for v in range.map(|v| v as f64 * 1e-30) {
                 let mut x = IValue::from(v);
                 assert!(x.is_number());
@@ -1157,13 +1161,16 @@ mod tests {
                 assert_eq!(x.to_f32_lossy(), Some(v as f32));
                 assert_eq!(x.as_number(), Some(&INumber::try_from(v).unwrap()));
                 assert_eq!(x.as_number_mut(), Some(&mut INumber::try_from(v).unwrap()));
-                assert!(matches!(x.clone().destructure(), Destructured::Number(u) if u == INumber::try_from(v).unwrap()));
+                assert!(
+                    matches!(x.clone().destructure(), Destructured::Number(u) if u == INumber::try_from(v).unwrap())
+                );
                 assert!(
                     matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == INumber::try_from(v).unwrap())
                 );
                 assert!(
                     matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == INumber::try_from(v).unwrap())
                 );
+                assert_eq!(x.mem_allocated(), 8);
             }
         }
     }

@@ -130,12 +130,7 @@ impl INumber {
         ))
     }
     fn new_ptr(tag: NumberType) -> Self {
-        unsafe {
-            INumber(IValue::new_ptr(
-                alloc(Self::layout(tag)),
-                tag.into(),
-            ))
-        }
+        unsafe { INumber(IValue::new_ptr(alloc(Self::layout(tag)), tag.into())) }
     }
 
     fn type_tag(&self) -> NumberType {
@@ -226,7 +221,7 @@ impl INumber {
     // unsafe fn f64_unchecked_mut(&mut self) -> &mut f64 {
     //     &mut *self.ptr_mut().cast()
     // }
-    
+
     /// Converts this number to an i64 if it can be represented exactly.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
@@ -422,10 +417,15 @@ impl INumber {
         use NumberType::*;
         // Safety: We only call methods appropriate for the matched type
         match self.type_tag() {
-            Inline => self.inline_int_unchecked().cmp(&other.inline_int_unchecked()),
+            Inline => self
+                .inline_int_unchecked()
+                .cmp(&other.inline_int_unchecked()),
             I64 => self.i64_unchecked().cmp(other.i64_unchecked()),
             U64 => self.u64_unchecked().cmp(other.u64_unchecked()),
-            F64 => self.f64_unchecked().partial_cmp(other.f64_unchecked()).unwrap(),
+            F64 => self
+                .f64_unchecked()
+                .partial_cmp(other.f64_unchecked())
+                .unwrap(),
         }
     }
     // Safety: type tags must be different
@@ -441,9 +441,9 @@ impl INumber {
             // all u64 values are in the range [i64::MAX, u64::MAX)
             (I64, U64) => Ordering::Less,
             (I64, F64) => cmp_i64_to_f64(*self.i64_unchecked(), *other.f64_unchecked()),
-            
+
             (U64, F64) => cmp_u64_to_f64(*self.u64_unchecked(), *other.f64_unchecked()),
-            
+
             // Non-number types do not exist for INumbers. All cases covered here are inverse of the above.
             _ => other.cmp_heterogenous_tags(&self).reverse(),
         }
