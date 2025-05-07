@@ -7,7 +7,6 @@ use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 
-use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 use crate::{Defrag, DefragAllocator};
 
 use super::value::{IValue, TypeTag, ALIGNMENT};
@@ -449,12 +448,12 @@ impl INumber {
             _ => other.cmp_heterogenous_tags(&self).reverse(),
         }
     }
-    
+
     pub(crate) fn mem_allocated(&self) -> usize {
-        if self.is_static() {
+        if self.is_inline() {
             0
         } else {
-            Self::layout(self.header().type_).unwrap().size()
+            Self::layout(self.type_tag()).size()
         }
     }
 }
@@ -597,13 +596,12 @@ impl Default for INumber {
 
 impl<A: DefragAllocator> Defrag<A> for INumber {
     fn defrag(mut self, defrag_allocator: &mut A) -> Self {
-        let hd = self.header();
-        match hd.type_ {
-            NumberType::Static => self,
+        match self.type_tag() {
+            NumberType::Inline => self,
             t => {
-                let ptr = hd.ptr() as *mut Header;
-                let layout = Self::layout(t).expect("Layout should return a valid value");
+                let layout = Self::layout(t);
                 unsafe {
+                    let ptr = self.ptr_mut();
                     self.0
                         .set_ptr(defrag_allocator.realloc_ptr(ptr.cast(), layout));
                 }
