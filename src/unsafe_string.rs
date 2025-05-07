@@ -1,16 +1,16 @@
 //! Functionality relating to the JSON string type
 
+use hashbrown::HashSet;
 use std::alloc::{alloc, dealloc, Layout, LayoutError};
 use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
+use std::mem;
 use std::ops::Deref;
-use std::ptr::{copy_nonoverlapping, NonNull};
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-
-use dashmap::{DashSet, SharedValue};
-use lazy_static::lazy_static;
+use std::ptr::{addr_of_mut, copy_nonoverlapping, NonNull};
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 use crate::{Defrag, DefragAllocator};
@@ -21,18 +21,14 @@ use super::value::{IValue, TypeTag};
 #[repr(align(4))]
 struct Header {
     rc: AtomicUsize,
-    // We use 48 bits for the length and 16 bits for the shard index.
+    // We use 48 bits for the length.
     len_lower: u32,
     len_upper: u16,
-    shard_index: u16,
 }
 
 trait HeaderRef<'a>: ThinRefExt<'a, Header> {
     fn len(&self) -> usize {
         (u64::from(self.len_lower) | (u64::from(self.len_upper) << 32)) as usize
-    }
-    fn shard_index(&self) -> usize {
-        self.shard_index as usize
     }
     fn str_ptr(&self) -> *const u8 {
         // Safety: pointers to the end of structs are allowed
@@ -58,29 +54,110 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
 impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
 impl<'a, T: ThinMutExt<'a, Header>> HeaderMut<'a> for T {}
 
-lazy_static! {
-    static ref STRING_CACHE: DashSet<WeakIString> = DashSet::new();
+enum StringCache {
+    ThreadSafe(Mutex<HashSet<WeakIString>>),
+    ThreadUnsafe(HashSet<WeakIString>),
 }
 
-// Eagerly initialize the string cache during tests or when the
-// `ctor` feature is enabled.
-#[cfg(any(test, feature = "ctor"))]
-#[ctor::ctor]
-fn ctor_init_cache() {
-    lazy_static::initialize(&STRING_CACHE);
+static mut STRING_CACHE: OnceLock<StringCache> = OnceLock::new();
+
+pub(crate) fn reinit_cache() {
+    let s_c = get_cache_mut();
+    match s_c {
+        StringCache::ThreadUnsafe(s_c) => *s_c = HashSet::new(),
+        StringCache::ThreadSafe(s_c) => {
+            let mut s_c: std::sync::MutexGuard<'_, HashSet<WeakIString>> =
+                s_c.lock().expect("Mutex lock should succeed");
+            *s_c = HashSet::new();
+        }
+    }
 }
 
-#[doc(hidden)]
-pub fn init_cache() {
-    lazy_static::initialize(&STRING_CACHE);
+pub(crate) fn init_cache(thread_safe: bool) -> Result<(), String> {
+    let s_c = unsafe { &*addr_of_mut!(STRING_CACHE) };
+    s_c.set(if thread_safe {
+        StringCache::ThreadSafe(Mutex::new(HashSet::new()))
+    } else {
+        StringCache::ThreadUnsafe(HashSet::new())
+    })
+    .map_err(|_| "Cache is already initialized".to_owned())
+}
+
+fn get_cache_mut() -> &'static mut StringCache {
+    let s_c = unsafe { &mut *addr_of_mut!(STRING_CACHE) };
+    s_c.get_or_init(|| StringCache::ThreadUnsafe(HashSet::new()));
+    s_c.get_mut().unwrap()
+}
+
+fn is_thread_safe() -> bool {
+    match get_cache_mut() {
+        StringCache::ThreadSafe(_) => true,
+        StringCache::ThreadUnsafe(_) => false,
+    }
+}
+
+enum CacheGuard {
+    ThreadUnsafe(&'static mut HashSet<WeakIString>),
+    ThreadSafe(MutexGuard<'static, HashSet<WeakIString>>),
+}
+
+impl CacheGuard {
+    fn get_or_insert<'a>(
+        &mut self,
+        value: &str,
+        f: Box<dyn FnOnce(&str) -> WeakIString + 'a>,
+    ) -> &WeakIString {
+        match self {
+            CacheGuard::ThreadSafe(c_g) => c_g.get_or_insert_with(value, |val| f(val)),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.get_or_insert_with(value, |val| f(val)),
+        }
+    }
+
+    fn get_val(&self, val: &str) -> Option<&WeakIString> {
+        match self {
+            CacheGuard::ThreadSafe(c_g) => c_g.get(val),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.get(val),
+        }
+    }
+
+    fn remove_val(&mut self, val: &str) -> bool {
+        match self {
+            CacheGuard::ThreadSafe(c_g) => c_g.remove(val),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.remove(val),
+        }
+    }
+
+    #[cfg(test)]
+    fn check_if_empty(&self) -> bool {
+        match self {
+            CacheGuard::ThreadSafe(c_g) => c_g.is_empty(),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.is_empty(),
+        }
+    }
+
+    #[cfg(test)]
+    fn shrink(&mut self) {
+        match self {
+            CacheGuard::ThreadSafe(c_g) => c_g.shrink_to_fit(),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.shrink_to_fit(),
+        }
+    }
+}
+
+fn get_cache_guard() -> CacheGuard {
+    let s_c = get_cache_mut();
+    match s_c {
+        StringCache::ThreadUnsafe(s_c) => CacheGuard::ThreadUnsafe(s_c),
+        StringCache::ThreadSafe(s_c) => {
+            CacheGuard::ThreadSafe(s_c.lock().expect("Mutex lock should succeed"))
+        }
+    }
 }
 
 struct WeakIString {
     ptr: NonNull<Header>,
 }
 
-unsafe impl Send for WeakIString {}
-unsafe impl Sync for WeakIString {}
 impl PartialEq for WeakIString {
     fn eq(&self, other: &Self) -> bool {
         **self == **other
@@ -106,13 +183,15 @@ impl Borrow<str> for WeakIString {
     }
 }
 impl WeakIString {
-    fn header(&self) -> ThinRef<Header> {
+    fn header(&self) -> ThinMut<Header> {
         // Safety: pointer is always valid
-        unsafe { ThinRef::new(self.ptr.as_ptr()) }
+        unsafe { ThinMut::new(self.ptr.as_ptr()) }
     }
     fn upgrade(&self) -> IString {
         unsafe {
-            self.ptr.as_ref().rc.fetch_add(1, AtomicOrdering::Relaxed);
+            self.header()
+                .rc
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             IString(IValue::new_ptr(
                 self.ptr.as_ptr().cast::<u8>(),
                 TypeTag::StringOrNull,
@@ -144,7 +223,6 @@ value_subtype_impls!(IString, into_string, as_string, as_string_mut);
 static EMPTY_HEADER: Header = Header {
     len_lower: 0,
     len_upper: 0,
-    shard_index: 0,
     rc: AtomicUsize::new(0),
 };
 
@@ -156,15 +234,16 @@ impl IString {
             .pad_to_align())
     }
 
-    fn alloc(s: &str, shard_index: usize) -> *mut Header {
+    fn alloc<A: FnOnce(Layout) -> *mut u8>(s: &str, allocator: A) -> *mut Header {
         assert!((s.len() as u64) < (1 << 48));
-        assert!(shard_index < (1 << 16));
         unsafe {
-            let ptr = alloc(Self::layout(s.len()).unwrap()).cast::<Header>();
+            let ptr = allocator(
+                Self::layout(s.len()).expect("layout is expected to return a valid value"),
+            )
+            .cast::<Header>();
             ptr.write(Header {
                 len_lower: s.len() as u32,
                 len_upper: ((s.len() as u64) >> 32) as u16,
-                shard_index: shard_index as u16,
                 rc: AtomicUsize::new(0),
             });
             let hd = ThinMut::new(ptr);
@@ -173,42 +252,38 @@ impl IString {
         }
     }
 
-    fn dealloc(ptr: *mut Header) {
+    fn dealloc<D: FnOnce(*mut u8, Layout)>(ptr: *mut Header, deallocator: D) {
         unsafe {
             let hd = ThinRef::new(ptr);
             let layout = Self::layout(hd.len()).unwrap();
-            dealloc(ptr.cast::<u8>(), layout);
+            deallocator(ptr.cast::<u8>(), layout);
         }
+    }
+
+    fn intern_with_allocator<A: FnOnce(Layout) -> *mut u8>(s: &str, allocator: A) -> Self {
+        if s.is_empty() {
+            return Self::new();
+        }
+
+        let mut cache = get_cache_guard();
+
+        let k = cache.get_or_insert(
+            s,
+            Box::new(|s| WeakIString {
+                ptr: unsafe { NonNull::new_unchecked(Self::alloc(s, allocator)) },
+            }),
+        );
+        k.upgrade()
     }
 
     /// Converts a `&str` to an `IString` by interning it in the global string cache.
     #[must_use]
     pub fn intern(s: &str) -> Self {
-        if s.is_empty() {
-            return Self::new();
-        }
-        let cache = &*STRING_CACHE;
-        let shard_index = cache.determine_map(s);
-
-        // Safety: `determine_map` should only return valid shard indices
-        let shard = unsafe { cache.shards().get_unchecked(shard_index) };
-        let mut guard = shard.write();
-        if let Some((k, _)) = guard.get_key_value(s) {
-            k.upgrade()
-        } else {
-            let k = unsafe {
-                WeakIString {
-                    ptr: NonNull::new_unchecked(Self::alloc(s, shard_index)),
-                }
-            };
-            let res = k.upgrade();
-            guard.insert(k, SharedValue::new(()));
-            res
-        }
+        Self::intern_with_allocator(s, |layout| unsafe { alloc(layout) })
     }
 
-    fn header(&self) -> ThinRef<Header> {
-        unsafe { ThinRef::new(self.0.ptr().cast()) }
+    fn header(&self) -> ThinMut<Header> {
+        unsafe { ThinMut::new(self.0.ptr().cast()) }
     }
 
     /// Returns the length (in bytes) of this string.
@@ -245,58 +320,58 @@ impl IString {
         if self.is_empty() {
             Self::new().0
         } else {
-            self.header().rc.fetch_add(1, AtomicOrdering::Relaxed);
+            self.header()
+                .rc
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             unsafe { self.0.raw_copy() }
         }
     }
-    pub(crate) fn drop_impl(&mut self) {
+
+    fn drop_impl_with_deallocator<D: FnOnce(*mut u8, Layout)>(&mut self, deallocator: D) {
         if !self.is_empty() {
             let hd = self.header();
 
-            // If the reference count is greater than 1, we can safely decrement it without
-            // locking the string cache.
-            let mut rc = hd.rc.load(AtomicOrdering::Relaxed);
-            while rc > 1 {
-                match hd.rc.compare_exchange_weak(
-                    rc,
-                    rc - 1,
-                    AtomicOrdering::Relaxed,
-                    AtomicOrdering::Relaxed,
-                ) {
-                    Ok(_) => return,
-                    Err(new_rc) => rc = new_rc,
+            if is_thread_safe() {
+                // Optimization for the thread safe case, we want to avoid locking the cache if the ref count
+                // is not potentially going to reach zero.
+                let mut rc = hd.rc.load(std::sync::atomic::Ordering::Relaxed);
+                while rc > 1 {
+                    match hd.rc.compare_exchange_weak(
+                        rc,
+                        rc - 1,
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                    ) {
+                        Ok(_) => return,
+                        Err(new_rc) => rc = new_rc,
+                    }
                 }
             }
 
-            // Slow path: we observed a reference count of 1, so we need to lock the string cache
-            let cache = &*STRING_CACHE;
-            // Safety: the number of shards is fixed
-            let shard = unsafe { cache.shards().get_unchecked(hd.shard_index()) };
-            let mut guard = shard.write();
-            if hd.rc.fetch_sub(1, AtomicOrdering::Relaxed) == 1 {
+            let mut cache = get_cache_guard();
+            if hd.rc.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) == 1 {
                 // Reference count reached zero, free the string
-                assert!(guard.remove(hd.str()).is_some());
-
-                // Shrink the shard if it's mostly empty.
-                // The second condition is necessary because `HashMap` sometimes
-                // reports a capacity of zero even when it's still backed by an
-                // allocation.
-                if guard.len() * 3 < guard.capacity() || guard.is_empty() {
-                    guard.shrink_to_fit();
+                if let Some(element) = cache.get_val(hd.str()) {
+                    // we can not simply remove the element from the cache, while we
+                    // perform active defrag, the element might be in the cache but will
+                    // point to another (newer) value. In this case we do not want to remove it.
+                    if element.ptr.as_ptr().cast() == unsafe { self.0.ptr() } {
+                        cache.remove_val(hd.str());
+                    }
                 }
-                drop(guard);
 
-                Self::dealloc(unsafe { self.0.ptr().cast() });
+                // Shrink the cache if it is empty in tests to verify no memory leaks
+                #[cfg(test)]
+                if cache.check_if_empty() {
+                    cache.shrink();
+                }
+                Self::dealloc(unsafe { self.0.ptr().cast() }, deallocator);
             }
         }
     }
 
-    pub(crate) fn mem_allocated(&self) -> usize {
-        if self.is_empty() {
-            0
-        } else {
-            Self::layout(self.len()).unwrap().size()
-        }
+    pub(crate) fn drop_impl(&mut self) {
+        self.drop_impl_with_deallocator(|ptr, layout| unsafe { dealloc(ptr, layout) });
     }
 }
 
@@ -351,7 +426,15 @@ impl From<IString> for String {
 
 impl PartialEq for IString {
     fn eq(&self, other: &Self) -> bool {
-        self.0.raw_eq(&other.0)
+        if self.0.raw_eq(&other.0) {
+            // if we have the same exact point we know they are equals.
+            return true;
+        }
+        // otherwise we need to compare the strings.
+        let s1 = self.as_str();
+        let s2 = other.as_str();
+        let res = s1 == s2;
+        res
     }
 }
 
@@ -402,7 +485,7 @@ impl PartialOrd for IString {
 }
 impl Hash for IString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.raw_hash(state);
+        self.as_str().hash(state)
     }
 }
 
@@ -413,8 +496,15 @@ impl Debug for IString {
 }
 
 impl<A: DefragAllocator> Defrag<A> for IString {
-    fn defrag(self, _defrag_allocator: &mut A) -> Self {
-        self
+    fn defrag(mut self, defrag_allocator: &mut A) -> Self {
+        let new = Self::intern_with_allocator(self.as_str(), |layout| unsafe {
+            defrag_allocator.alloc(layout)
+        });
+        self.drop_impl_with_deallocator(|ptr, layout| unsafe {
+            defrag_allocator.free(ptr, layout)
+        });
+        mem::forget(self);
+        new
     }
 }
 

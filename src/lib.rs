@@ -25,14 +25,27 @@ mod macros;
 pub mod array;
 pub mod number;
 pub mod object;
+
+#[cfg(feature = "thread_safe")]
 pub mod string;
+
+use std::alloc::Layout;
+
+#[cfg(feature = "thread_safe")]
+pub use string::IString;
+
+#[cfg(not(feature = "thread_safe"))]
+pub mod unsafe_string;
+#[cfg(not(feature = "thread_safe"))]
+pub use unsafe_string::IString;
+
 mod thin;
 mod value;
 
 pub use array::IArray;
 pub use number::INumber;
 pub use object::IObject;
-pub use string::IString;
+
 pub use value::{
     BoolMut, Destructured, DestructuredMut, DestructuredRef, IValue, ValueIndex, ValueType,
 };
@@ -41,6 +54,38 @@ mod de;
 mod ser;
 pub use de::from_value;
 pub use ser::to_value;
+
+/// Trait to implement defrag allocator
+pub trait DefragAllocator {
+    /// Gets a pointer and return an new pointer that points to a copy
+    /// of the exact same data. The old pointer should not be used anymore.
+    unsafe fn realloc_ptr<T>(&mut self, ptr: *mut T, layout: Layout) -> *mut T;
+
+    /// Allocate memory for defrag
+    unsafe fn alloc(&mut self, layout: Layout) -> *mut u8;
+
+    /// Free memory for defrag
+    unsafe fn free<T>(&mut self, ptr: *mut T, layout: Layout);
+}
+
+/// Trait for object that implements defrag
+pub trait Defrag<A: DefragAllocator> {
+    /// Defrag implementation
+    fn defrag(self, defrag_allocator: &mut A) -> Self;
+}
+/// Reinitialized the shared strings cache.
+/// Any json that still uses a shared string will continue using it.
+/// But new strings will be reinitialized instead of reused the old ones.
+pub fn reinit_shared_string_cache() {
+    unsafe_string::reinit_cache();
+}
+
+/// Initialized shared string cache. Either thread safe or thread unsafe (in case
+/// the user know the string cache is protected by other means or the application is
+/// single threaded). Return `Ok(())` on succeed and error if the cache is already initialized.
+pub fn init_shared_string_cache(thread_safe: bool) -> Result<(), String> {
+    unsafe_string::init_cache(thread_safe)
+}
 
 #[cfg(all(test, not(miri)))]
 mod tests {
