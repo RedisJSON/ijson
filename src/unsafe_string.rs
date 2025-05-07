@@ -373,6 +373,14 @@ impl IString {
     pub(crate) fn drop_impl(&mut self) {
         self.drop_impl_with_deallocator(|ptr, layout| unsafe { dealloc(ptr, layout) });
     }
+
+    pub(crate) fn mem_allocated(&self) -> usize {
+        if self.is_empty() {
+            0
+        } else {
+            Self::layout(self.len()).unwrap().size()
+        }
+    }
 }
 
 impl Deref for IString {
