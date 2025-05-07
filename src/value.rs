@@ -1049,26 +1049,41 @@ mod tests {
 
     #[mockalloc::test]
     fn test_number() {
-        for v in 300..400 {
-            let mut x = IValue::from(v);
-            assert!(x.is_number());
-            assert_eq!(x.type_(), ValueType::Number);
-            assert_eq!(x.to_i32(), Some(v));
-            assert_eq!(x.to_u32(), Some(v as u32));
-            assert_eq!(x.to_i64(), Some(i64::from(v)));
-            assert_eq!(x.to_u64(), Some(v as u64));
-            assert_eq!(x.to_isize(), Some(v as isize));
-            assert_eq!(x.to_usize(), Some(v as usize));
-            assert_eq!(x.as_number(), Some(&v.into()));
-            assert_eq!(x.as_number_mut(), Some(&mut v.into()));
-            assert!(matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into()));
-            assert!(
-                matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
-            );
-            assert!(
-                matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
-            );
-            assert_eq!(x.mem_allocated(), if v < 384 { 0 } else { 4 });
+        const STATIC_UPPER: i64 = 0x0200 - 0x0080; // it's not worth making crate::number::STATIC_UPPER public
+        const SHORT_UPPER: i64 = 0x0080_0000; // nor crate::number::SHORT_UPPER
+        for range in [STATIC_UPPER, SHORT_UPPER].map(|b| b - 100..b + 100) {
+            for v in range {
+                let mut x = IValue::from(v);
+                assert!(x.is_number());
+                assert_eq!(x.type_(), ValueType::Number);
+                assert_eq!(x.to_i32(), Some(v as i32));
+                assert_eq!(x.to_u32(), Some(v as u32));
+                assert_eq!(x.to_i64(), Some(v as i64));
+                assert_eq!(x.to_u64(), Some(v as u64));
+                assert_eq!(x.to_isize(), Some(v as isize));
+                assert_eq!(x.to_usize(), Some(v as usize));
+                assert_eq!(x.as_number(), Some(&v.into()));
+                assert_eq!(x.as_number_mut(), Some(&mut v.into()));
+                assert!(
+                    matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into())
+                );
+                assert!(
+                    matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
+                );
+                assert!(
+                    matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
+                );
+                assert_eq!(
+                    x.mem_allocated(),
+                    if v < STATIC_UPPER {
+                        0
+                    } else if v < SHORT_UPPER {
+                        4
+                    } else {
+                        16
+                    }
+                );
+            }
         }
     }
 
