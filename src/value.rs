@@ -7,10 +7,16 @@ use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
 
+use crate::{Defrag, DefragAllocator};
+
 use super::array::IArray;
 use super::number::INumber;
 use super::object::IObject;
+
+#[cfg(feature = "thread_safe")]
 use super::string::IString;
+#[cfg(not(feature = "thread_safe"))]
+use super::unsafe_string::IString;
 
 /// Stores an arbitrary JSON value.
 ///
@@ -208,6 +214,25 @@ pub enum ValueType {
 unsafe impl Send for IValue {}
 unsafe impl Sync for IValue {}
 
+impl<A: DefragAllocator> Defrag<A> for IValue {
+    fn defrag(self, defrag_allocator: &mut A) -> Self {
+        match self.destructure() {
+            Destructured::Null => IValue::NULL,
+            Destructured::Bool(val) => {
+                if val {
+                    IValue::TRUE
+                } else {
+                    IValue::FALSE
+                }
+            }
+            Destructured::Array(array) => array.defrag(defrag_allocator).0,
+            Destructured::Object(obj) => obj.defrag(defrag_allocator).0,
+            Destructured::String(s) => s.defrag(defrag_allocator).0,
+            Destructured::Number(n) => n.defrag(defrag_allocator).0,
+        }
+    }
+}
+
 impl IValue {
     // Safety: Tag must not be `Number`
     const unsafe fn new_inline(tag: TypeTag) -> Self {
@@ -256,9 +281,6 @@ impl IValue {
     }
     pub(crate) fn raw_eq(&self, other: &Self) -> bool {
         self.ptr == other.ptr
-    }
-    pub(crate) fn raw_hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.ptr.hash(state);
     }
     fn is_ptr(&self) -> bool {
         self.ptr_usize() >= ALIGNMENT
@@ -327,6 +349,19 @@ impl IValue {
                 ValueType::Array => DestructuredMut::Array(self.as_array_unchecked_mut()),
                 ValueType::Object => DestructuredMut::Object(self.as_object_unchecked_mut()),
             }
+        }
+    }
+
+    /// Reports dynamic memory allocated by this value.
+    pub fn mem_allocated(&self) -> usize {
+        match self.type_() {
+            // inline types consume no extra memory
+            ValueType::Null | ValueType::Bool => 0,
+            // Safety: We checked the type
+            ValueType::Number => unsafe { self.as_number_unchecked() }.mem_allocated(),
+            ValueType::String => unsafe { self.as_string_unchecked() }.mem_allocated(),
+            ValueType::Array => unsafe { self.as_array_unchecked() }.mem_allocated(),
+            ValueType::Object => unsafe { self.as_object_unchecked() }.mem_allocated(),
         }
     }
 
@@ -757,7 +792,8 @@ impl PartialEq for IValue {
             unsafe {
                 match t1 {
                     // Inline and interned types can be trivially compared
-                    ValueType::Null | ValueType::Bool | ValueType::String => self.ptr == other.ptr,
+                    ValueType::Null | ValueType::Bool => self.ptr == other.ptr,
+                    ValueType::String => self.as_string_unchecked() == other.as_string_unchecked(),
                     ValueType::Number => self.as_number_unchecked() == other.as_number_unchecked(),
                     ValueType::Array => self.as_array_unchecked() == other.as_array_unchecked(),
                     ValueType::Object => self.as_object_unchecked() == other.as_object_unchecked(),
@@ -1017,6 +1053,7 @@ mod tests {
         assert!(matches!(x.clone().destructure(), Destructured::Null));
         assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Null));
         assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Null));
+        assert_eq!(x.mem_allocated(), 0);
     }
 
     #[test]
@@ -1037,11 +1074,15 @@ mod tests {
             }
 
             assert_eq!(x.to_bool(), Some(!v));
+            assert_eq!(x.mem_allocated(), 0);
         }
     }
 
     #[mockalloc::test]
     fn test_number() {
+        const TAG_SIZE_BITS: u32 = ALIGNMENT.trailing_zeros();
+        const INLINE_LOWER: i64 = i64::MIN >> TAG_SIZE_BITS;
+        const INLINE_UPPER: i64 = i64::MAX >> TAG_SIZE_BITS;
         for range in [-1 << 61, 0i64, 1 << 61].map(|b| b-100..b+100) {
             for v in range {
                 let mut x = IValue::from(v);
@@ -1063,6 +1104,14 @@ mod tests {
                 );
                 assert!(
                     matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
+                );
+                assert_eq!(
+                    x.mem_allocated(),
+                    if (INLINE_LOWER..=INLINE_UPPER).contains(&v) {
+                        0
+                    } else {
+                        8
+                    }
                 );
             }
         }
@@ -1087,6 +1136,14 @@ mod tests {
                 );
                 assert!(
                     matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
+                );
+                assert_eq!(
+                    x.mem_allocated(),
+                    if v < i64::MAX as u64 && (INLINE_LOWER..=INLINE_UPPER).contains(&(v as i64)) {
+                        0
+                    } else {
+                        8
+                    }
                 );
             }
         }
@@ -1123,12 +1180,16 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
+            assert_eq!(
+                x.mem_allocated(),
+                2 * mem::size_of::<usize>() + s.capacity()
+            );
         }
     }
 
     #[mockalloc::test]
     fn test_array() {
-        for v in 0..10 {
+        for v in 4..20 {
             let mut a: IArray = (0..v).collect();
             let mut x = IValue::from(a.clone());
             assert!(x.is_array());
@@ -1138,12 +1199,16 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::Array(u) if u == a));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Array(u) if *u == a));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Array(u) if *u == a));
+            assert_eq!(
+                x.mem_allocated(),
+                2 * mem::size_of::<usize>() + a.capacity() * mem::size_of::<IValue>()
+            );
         }
     }
 
     #[mockalloc::test]
     fn test_object() {
-        for v in 0..10 {
+        for v in 4..20 {
             let mut o: IObject = (0..v).map(|i| (i.to_string(), i)).collect();
             let mut x = IValue::from(o.clone());
             assert!(x.is_object());
@@ -1153,6 +1218,15 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::Object(u) if u == o));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Object(u) if *u == o));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Object(u) if *u == o));
+            assert_eq!(
+                x.mem_allocated(),
+                o.iter()
+                    .map(|(k, v)| k.mem_allocated() + v.mem_allocated())
+                    .sum::<usize>()
+                    + o.capacity() * (mem::size_of::<IString>() + mem::size_of::<IValue>())
+                    + 5 * o.capacity() / 4 * mem::size_of::<usize>()
+                    + 2 * mem::size_of::<usize>()
+            );
         }
     }
 
@@ -1162,5 +1236,98 @@ mod tests {
         let x = IValue::from(o.clone());
 
         assert_eq!(x.into_object(), Ok(o));
+    }
+}
+
+#[cfg(test)]
+mod tests_defrag {
+    use std::alloc::{alloc, dealloc, Layout};
+
+    use super::*;
+
+    struct DummyDefragAllocator;
+
+    impl DefragAllocator for DummyDefragAllocator {
+        unsafe fn realloc_ptr<T>(&mut self, ptr: *mut T, layout: Layout) -> *mut T {
+            let new_ptr = self.alloc(layout).cast::<T>();
+            std::ptr::copy_nonoverlapping(ptr.cast::<u8>(), new_ptr.cast::<u8>(), layout.size());
+            self.free(ptr, layout);
+            new_ptr
+        }
+
+        /// Allocate memory for defrag
+        unsafe fn alloc(&mut self, layout: Layout) -> *mut u8 {
+            alloc(layout)
+        }
+
+        /// Free memory for defrag
+        unsafe fn free<T>(&mut self, ptr: *mut T, layout: Layout) {
+            dealloc(ptr as *mut u8, layout);
+        }
+    }
+
+    fn test_defrag_generic(val: IValue) {
+        let defrag_val = val.clone();
+        crate::reinit_shared_string_cache();
+        let defrag_val = defrag_val.defrag(&mut DummyDefragAllocator);
+        assert_eq!(val, defrag_val);
+    }
+
+    #[test]
+    fn test_defrag_null() {
+        test_defrag_generic(ijson!(null));
+    }
+
+    #[test]
+    fn test_defrag_bool() {
+        test_defrag_generic(ijson!(true));
+        test_defrag_generic(ijson!(false));
+    }
+
+    #[test]
+    fn test_defrag_number() {
+        test_defrag_generic(ijson!(1));
+        test_defrag_generic(ijson!(1000000000));
+        test_defrag_generic(ijson!(-1000000000));
+        test_defrag_generic(ijson!(1.11111111));
+        test_defrag_generic(ijson!(-1.11111111));
+    }
+
+    #[test]
+    fn test_defrag_string() {
+        test_defrag_generic(ijson!("test"));
+        test_defrag_generic(ijson!(""));
+    }
+
+    #[test]
+    fn test_defrag_array() {
+        test_defrag_generic(ijson!([1, 2, "bar"]));
+    }
+
+    #[test]
+    fn test_defrag_array_of_numbers() {
+        test_defrag_generic(ijson!([1, 2, 3]));
+    }
+
+    #[test]
+    fn test_defrag_empty_array_of_numbers() {
+        test_defrag_generic(ijson!([]));
+    }
+
+    #[test]
+    fn test_defrag_object() {
+        test_defrag_generic(ijson!({"foo": "bar"}));
+    }
+
+    #[test]
+    fn test_defrag_empty_object() {
+        test_defrag_generic(ijson!({}));
+    }
+
+    #[test]
+    fn test_defrag_complex() {
+        test_defrag_generic(ijson!([
+            {"foo": "bar"}, 1, 2, 3, null, true, false, {"test":[1,2,null, true, false, 3, {"foo":[1, "bar"]}]}
+        ]));
     }
 }

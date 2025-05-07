@@ -63,7 +63,12 @@ fn print_alloc_info(
 fn main() -> Result<(), Box<dyn Error>> {
     // The string cache is normally lazily initialized which would erroneously show up as a
     // memory leak, so explicitly initialize it here.
-    ijson::string::init_cache();
+    #[cfg(feature = "thread_safe")]
+    ijson::init_shared_string_cache(true);
+    #[cfg(not(feature = "thread_safe"))]
+    ijson::init_shared_string_cache(false)
+        .expect("Expect shared string cache initialization succeed");
+
     println!(
         r#""Filename","JSON size (B)","serde-json peak memory usage (B)","ijson peak memory usage (B)","serde-json allocations","ijson allocations","serde-json clone memory usage (B)","ijson clone memory usage (B)","serde-json clone allocations","ijson clone allocations""#
     );
