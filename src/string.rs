@@ -18,7 +18,7 @@ use crate::{Defrag, DefragAllocator};
 use super::value::{IValue, TypeTag};
 
 #[repr(C)]
-#[repr(align(4))]
+#[repr(align(8))]
 struct Header {
     rc: AtomicUsize,
     // We use 48 bits for the length and 16 bits for the shard index.

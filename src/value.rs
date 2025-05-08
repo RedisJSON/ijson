@@ -3,7 +3,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
-use std::hint::unreachable_unchecked;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
@@ -44,7 +43,7 @@ use super::unsafe_string::IString;
 ///   original `IValue` if the type is not the one expected). These methods
 ///   also exist for the variants which are not `Copy`.
 ///
-/// - Getting using `IValue::to_{bool,{i,u,f}{32,64}}[_lossy]}()`
+/// - Getting using `IValue::to_{bool,{i,u,f}{32,64}[_lossy]}()`
 ///
 ///   These methods return an `Option` of the corresponding type. These
 ///   methods exist for types where the return value would be `Copy`.
@@ -169,15 +168,18 @@ impl<'a> Deref for BoolMut<'a> {
     }
 }
 
-pub(crate) const ALIGNMENT: usize = 4;
+pub(crate) const ALIGNMENT: usize = 8;
 
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TypeTag {
-    Number = 0,
+    F64 = 0,
     StringOrNull = 1,
     ArrayOrFalse = 2,
     ObjectOrTrue = 3,
+    I64 = 4,
+    U64 = 5,
+    InlineInt = 6,
 }
 
 impl From<usize> for TypeTag {
@@ -196,9 +198,11 @@ pub enum ValueType {
     /// Boolean.
     Bool,
 
-    // Stored behind pointer
+    // May be stored either inline or behind pointer
     /// Number.
     Number,
+
+    // Stored behind pointer
     /// String.
     String,
     /// Array.
@@ -288,19 +292,19 @@ impl IValue {
     /// Returns the type of this value.
     #[must_use]
     pub fn type_(&self) -> ValueType {
+        use TypeTag::*;
         match (self.type_tag(), self.is_ptr()) {
+            // Numbers
+            (InlineInt, _) | (I64, _) | (U64, _) | (F64, _) => ValueType::Number,
+
             // Pointers
-            (TypeTag::Number, true) => ValueType::Number,
-            (TypeTag::StringOrNull, true) => ValueType::String,
-            (TypeTag::ArrayOrFalse, true) => ValueType::Array,
-            (TypeTag::ObjectOrTrue, true) => ValueType::Object,
+            (StringOrNull, true) => ValueType::String,
+            (ArrayOrFalse, true) => ValueType::Array,
+            (ObjectOrTrue, true) => ValueType::Object,
 
             // Non-pointers
-            (TypeTag::StringOrNull, false) => ValueType::Null,
-            (TypeTag::ArrayOrFalse, false) | (TypeTag::ObjectOrTrue, false) => ValueType::Bool,
-
-            // Safety: due to invariants on IValue
-            _ => unsafe { unreachable_unchecked() },
+            (StringOrNull, false) => ValueType::Null,
+            (ArrayOrFalse, false) | (ObjectOrTrue, false) => ValueType::Bool,
         }
     }
 
@@ -463,7 +467,11 @@ impl IValue {
     /// Returns `true` if this is a number.
     #[must_use]
     pub fn is_number(&self) -> bool {
-        self.type_tag() == TypeTag::Number
+        use TypeTag::*;
+        match self.type_tag() {
+            InlineInt | I64 | U64 | F64 => true,
+            _ => false,
+        }
     }
 
     unsafe fn unchecked_cast_ref<T>(&self) -> &T {
@@ -474,12 +482,12 @@ impl IValue {
         &mut *(self as *mut Self).cast::<T>()
     }
 
-    // Safety: Must be a string
+    // Safety: Must be a number
     unsafe fn as_number_unchecked(&self) -> &INumber {
         self.unchecked_cast_ref()
     }
 
-    // Safety: Must be a string
+    // Safety: Must be a number
     unsafe fn as_number_unchecked_mut(&mut self) -> &mut INumber {
         self.unchecked_cast_mut()
     }
@@ -1072,19 +1080,22 @@ mod tests {
 
     #[mockalloc::test]
     fn test_number() {
-        const STATIC_UPPER: i64 = 0x0200 - 0x0080; // it's not worth making crate::number::STATIC_UPPER public
-        const SHORT_UPPER: i64 = 0x0080_0000; // nor crate::number::SHORT_UPPER
-        for range in [STATIC_UPPER, SHORT_UPPER].map(|b| b - 100..b + 100) {
+        const TAG_SIZE_BITS: u32 = ALIGNMENT.trailing_zeros();
+        const INLINE_LOWER: i64 = i64::MIN >> TAG_SIZE_BITS;
+        const INLINE_UPPER: i64 = i64::MAX >> TAG_SIZE_BITS;
+        for range in [-1 << 61, 0i64, 1 << 61].map(|b| b - 100..b + 100) {
             for v in range {
                 let mut x = IValue::from(v);
                 assert!(x.is_number());
                 assert_eq!(x.type_(), ValueType::Number);
-                assert_eq!(x.to_i32(), Some(v as i32));
-                assert_eq!(x.to_u32(), Some(v as u32));
-                assert_eq!(x.to_i64(), Some(v as i64));
-                assert_eq!(x.to_u64(), Some(v as u64));
-                assert_eq!(x.to_isize(), Some(v as isize));
-                assert_eq!(x.to_usize(), Some(v as usize));
+                assert_eq!(x.to_i32(), i32::try_from(v).ok());
+                assert_eq!(x.to_u32(), u32::try_from(v).ok());
+                assert_eq!(x.to_i64(), i64::try_from(v).ok());
+                assert_eq!(x.to_u64(), u64::try_from(v).ok());
+                assert_eq!(x.to_isize(), isize::try_from(v).ok());
+                assert_eq!(x.to_usize(), usize::try_from(v).ok());
+                assert_eq!(x.to_f64_lossy(), Some(v as f64));
+                assert_eq!(x.to_f32_lossy(), Some(v as f32));
                 assert_eq!(x.as_number(), Some(&v.into()));
                 assert_eq!(x.as_number_mut(), Some(&mut v.into()));
                 assert!(
@@ -1098,14 +1109,68 @@ mod tests {
                 );
                 assert_eq!(
                     x.mem_allocated(),
-                    if v < STATIC_UPPER {
+                    if (INLINE_LOWER..=INLINE_UPPER).contains(&v) {
                         0
-                    } else if v < SHORT_UPPER {
-                        4
                     } else {
-                        16
+                        mem::size_of::<i64>()
                     }
                 );
+            }
+        }
+        for range in [0u64, 1 << 61, 1 << 63].map(|b| b..b + 100) {
+            for v in range {
+                let mut x = IValue::from(v);
+                assert!(x.is_number());
+                assert_eq!(x.type_(), ValueType::Number);
+                assert_eq!(x.to_i32(), i32::try_from(v).ok());
+                assert_eq!(x.to_u32(), u32::try_from(v).ok());
+                assert_eq!(x.to_i64(), i64::try_from(v).ok());
+                assert_eq!(x.to_u64(), u64::try_from(v).ok());
+                assert_eq!(x.to_isize(), isize::try_from(v).ok());
+                assert_eq!(x.to_usize(), usize::try_from(v).ok());
+                assert_eq!(x.to_f64_lossy(), Some(v as f64));
+                assert_eq!(x.to_f32_lossy(), Some(v as f32));
+                assert_eq!(x.as_number(), Some(&v.into()));
+                assert_eq!(x.as_number_mut(), Some(&mut v.into()));
+                assert!(
+                    matches!(x.clone().destructure(), Destructured::Number(u) if u == v.into())
+                );
+                assert!(
+                    matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == v.into())
+                );
+                assert!(
+                    matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == v.into())
+                );
+                assert_eq!(
+                    x.mem_allocated(),
+                    if v <= i64::MAX as u64 && (INLINE_LOWER..=INLINE_UPPER).contains(&(v as i64)) {
+                        0
+                    } else {
+                        mem::size_of::<u64>()
+                    }
+                );
+            }
+        }
+        for range in [-1i64 << 62, 1 << 62].map(|v| v - 100..v + 100) {
+            for v in range.map(|v| v as f64 * 1e-30) {
+                let mut x = IValue::from(v);
+                assert!(x.is_number());
+                assert_eq!(x.type_(), ValueType::Number);
+                assert_eq!(x.to_f64(), Some(v));
+                assert_eq!(x.to_f64_lossy(), Some(v));
+                assert_eq!(x.to_f32_lossy(), Some(v as f32));
+                assert_eq!(x.as_number(), Some(&INumber::try_from(v).unwrap()));
+                assert_eq!(x.as_number_mut(), Some(&mut INumber::try_from(v).unwrap()));
+                assert!(
+                    matches!(x.clone().destructure(), Destructured::Number(u) if u == INumber::try_from(v).unwrap())
+                );
+                assert!(
+                    matches!(x.clone().destructure_ref(), DestructuredRef::Number(u) if *u == INumber::try_from(v).unwrap())
+                );
+                assert!(
+                    matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == INumber::try_from(v).unwrap())
+                );
+                assert_eq!(x.mem_allocated(), mem::size_of::<f64>());
             }
         }
     }
