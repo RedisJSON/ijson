@@ -1112,7 +1112,7 @@ mod tests {
                     if (INLINE_LOWER..=INLINE_UPPER).contains(&v) {
                         0
                     } else {
-                        8
+                        mem::size_of::<i64>()
                     }
                 );
             }
@@ -1146,7 +1146,7 @@ mod tests {
                     if v <= i64::MAX as u64 && (INLINE_LOWER..=INLINE_UPPER).contains(&(v as i64)) {
                         0
                     } else {
-                        8
+                        mem::size_of::<u64>()
                     }
                 );
             }
@@ -1170,7 +1170,7 @@ mod tests {
                 assert!(
                     matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == INumber::try_from(v).unwrap())
                 );
-                assert_eq!(x.mem_allocated(), 8);
+                assert_eq!(x.mem_allocated(), mem::size_of::<f64>());
             }
         }
     }
