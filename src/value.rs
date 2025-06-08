@@ -568,6 +568,26 @@ impl IValue {
     pub fn to_usize(&self) -> Option<usize> {
         self.as_number()?.to_usize()
     }
+    /// Converts this value to an i16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_i16(&self) -> Option<i16> {
+        self.as_number()?.to_i16()
+    }
+    /// Converts this value to a u16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_u16(&self) -> Option<u16> {
+        self.as_number()?.to_u16()
+    }
+    /// Converts this value to an i8 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_i8(&self) -> Option<i8> {
+        self.as_number()?.to_i8()
+    }
+    /// Converts this value to a u8 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_u8(&self) -> Option<u8> {
+        self.as_number()?.to_u8()
+    }
     /// Converts this value to an f64 if it is a number, potentially losing precision
     /// in the process.
     #[must_use]
@@ -579,6 +599,16 @@ impl IValue {
     #[must_use]
     pub fn to_f32_lossy(&self) -> Option<f32> {
         Some(self.as_number()?.to_f32_lossy())
+    }
+    /// Converts this value to an f16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_f16(&self) -> Option<half::f16> {
+        self.as_number()?.to_f16()
+    }
+    /// Converts this value to an b16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_b16(&self) -> Option<half::bf16> {
+        self.as_number()?.to_b16()
     }
 
     // # String methods

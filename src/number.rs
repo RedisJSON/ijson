@@ -9,6 +9,7 @@ use std::hash::Hash;
 
 use crate::{Defrag, DefragAllocator};
 
+use super::array::ArrayType;
 use super::value::{IValue, TypeTag, ALIGNMENT};
 
 #[repr(usize)]
@@ -222,6 +223,59 @@ impl INumber {
     //     &mut *self.ptr_mut().cast()
     // }
 
+    pub(crate) fn is_representable_in(&self, tag: ArrayType) -> bool {
+        match tag {
+            ArrayType::Heterogeneous => true,
+            ArrayType::I64 => self.to_i64().is_some(),
+            ArrayType::U64 => self.to_u64().is_some(),
+            ArrayType::F64 => self.to_f64().is_some(),
+            ArrayType::I32 => self.to_i32().is_some(),
+            ArrayType::U32 => self.to_u32().is_some(),
+            ArrayType::F32 => self.to_f32().is_some(),
+            ArrayType::I16 => self.to_i16().is_some(),
+            ArrayType::U16 => self.to_u16().is_some(),
+            ArrayType::F16 => self.to_f16().is_some(),
+            ArrayType::B16 => self.to_b16().is_some(),
+            ArrayType::I8 => self.to_i8().is_some(),
+            ArrayType::U8 => self.to_u8().is_some(),
+        }
+    }
+
+    pub(crate) fn minimal_representation(&self) -> ArrayType {
+        match self.type_tag() {
+            NumberType::I64 => ArrayType::I64,
+            NumberType::U64 => ArrayType::U64,
+            NumberType::Inline => {
+                if self.to_i8().is_some() {
+                    ArrayType::I8
+                } else if self.to_u8().is_some() {
+                    ArrayType::U8
+                } else if self.to_i16().is_some() {
+                    ArrayType::I16
+                } else if self.to_u16().is_some() {
+                    ArrayType::U16
+                } else if self.to_i32().is_some() {
+                    ArrayType::I32
+                } else if self.to_u32().is_some() {
+                    ArrayType::U32
+                } else {
+                    ArrayType::I64
+                }
+            }
+            NumberType::F64 => {
+                if self.to_f16().is_some() {
+                    ArrayType::F16
+                } else if self.to_b16().is_some() {
+                    ArrayType::B16
+                } else if self.to_f32().is_some() {
+                    ArrayType::F32
+                } else {
+                    ArrayType::F64
+                }
+            }
+        }
+    }
+
     /// Converts this number to an i64 if it can be represented exactly.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
@@ -281,6 +335,26 @@ impl INumber {
     /// Converts this number to a u32 if it can be represented exactly.
     #[must_use]
     pub fn to_u32(&self) -> Option<u32> {
+        self.to_u64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to an i16 if it can be represented exactly.
+    #[must_use]
+    pub fn to_i16(&self) -> Option<i16> {
+        self.to_i64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to a u16 if it can be represented exactly.
+    #[must_use]
+    pub fn to_u16(&self) -> Option<u16> {
+        self.to_u64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to an i8 if it can be represented exactly.
+    #[must_use]
+    pub fn to_i8(&self) -> Option<i8> {
+        self.to_i64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to a u8 if it can be represented exactly.
+    #[must_use]
+    pub fn to_u8(&self) -> Option<u8> {
         self.to_u64().and_then(|x| x.try_into().ok())
     }
     /// This allows distinguishing between `1.0` and `1` in the original JSON.
@@ -400,6 +474,28 @@ impl INumber {
                     }
                 }
             }
+        }
+    }
+    /// Converts this number to an f16 if it can be represented exactly.
+    #[must_use]
+    pub fn to_f16(&self) -> Option<half::f16> {
+        let v = self.to_f32()?;
+        let half = half::f16::from_f32(v);
+        if half.to_f32() == v {
+            Some(half)
+        } else {
+            None
+        }
+    }
+    /// Converts this number to an b16 if it can be represented exactly.
+    #[must_use]
+    pub fn to_b16(&self) -> Option<half::bf16> {
+        let v = self.to_f32()?;
+        let half = half::bf16::from_f32(v);
+        if half.to_f32() == v {
+            Some(half)
+        } else {
+            None
         }
     }
 
