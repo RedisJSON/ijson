@@ -242,27 +242,36 @@ impl INumber {
     }
 
     pub(crate) fn minimal_representation(&self) -> ArrayType {
+        let is_negative = self.to_i64().map_or(false, |v| v < 0);
         match self.type_tag() {
-            NumberType::I64 => ArrayType::I64,
-            NumberType::U64 => ArrayType::U64,
-            NumberType::Inline => {
+            NumberType::I64 if is_negative => ArrayType::I64,
+            NumberType::U64 | NumberType::I64 => ArrayType::U64,
+
+            NumberType::Inline if is_negative => {
                 if self.to_i8().is_some() {
                     ArrayType::I8
-                } else if self.to_u8().is_some() {
-                    ArrayType::U8
                 } else if self.to_i16().is_some() {
                     ArrayType::I16
-                } else if self.to_u16().is_some() {
-                    ArrayType::U16
                 } else if self.to_i32().is_some() {
                     ArrayType::I32
-                } else if self.to_u32().is_some() {
-                    ArrayType::U32
                 } else {
-                    // all inline values are representable in i64
+                    // all negative inline values are representable in i64
                     ArrayType::I64
                 }
             }
+            NumberType::Inline => {
+                if self.to_u8().is_some() {
+                    ArrayType::U8
+                } else if self.to_u16().is_some() {
+                    ArrayType::U16
+                } else if self.to_u32().is_some() {
+                    ArrayType::U32
+                } else {
+                    // all positive inline values are representable in u64
+                    ArrayType::U64
+                }
+            }
+            
             NumberType::F64 => {
                 if self.to_f16().is_some() {
                     ArrayType::F16
