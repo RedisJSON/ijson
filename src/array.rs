@@ -66,22 +66,8 @@ fn minimal_tag(a: ArrayType, b: ArrayType) -> ArrayType {
             _ => unreachable!(),
         }
     } else if one_float {
-        match (a, b) {
-            (I64, _) | (U64, _) | (_, I64) | (_, U64) => Heterogeneous,
-            // <= (F64, I32/U32)
-            (F64, _) | (_, F64) => F64,
-            // <= (F32, I32/U32)
-            (I32, _) | (U32, _) | (_, I32) | (_, U32) => F64,
-            // <= (F32, I16/U16)
-            (F32, _) | (_, F32) => F32,
-            // <= (F16/B16, I16/U16)
-            (I16, _) | (U16, _) | (_, I16) | (_, U16) => F32,
-            // <= (F16/B16, I8/U8)
-            (F16, _) | (_, F16) => F16,
-            (B16, _) | (_, B16) => B16,
-
-            _ => unreachable!(),
-        }
+        // floats and integers are not compatible
+        Heterogeneous
     } else if any_signed {
         match (a, b) {
             (I64, U64) | (U64, I64) => Heterogeneous,
