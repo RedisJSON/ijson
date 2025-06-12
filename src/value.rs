@@ -528,6 +528,16 @@ impl IValue {
         }
     }
 
+    /// Converts this value to an isize if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_isize(&self) -> Option<isize> {
+        self.as_number()?.to_isize()
+    }
+    /// Converts this value to a usize if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_usize(&self) -> Option<usize> {
+        self.as_number()?.to_usize()
+    }
     /// Converts this value to an i64 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_i64(&self) -> Option<i64> {
@@ -538,16 +548,6 @@ impl IValue {
     pub fn to_u64(&self) -> Option<u64> {
         self.as_number()?.to_u64()
     }
-    /// Converts this value to an f64 if it is a number that can be represented exactly.
-    #[must_use]
-    pub fn to_f64(&self) -> Option<f64> {
-        self.as_number()?.to_f64()
-    }
-    /// Converts this value to an f32 if it is a number that can be represented exactly.
-    #[must_use]
-    pub fn to_f32(&self) -> Option<f32> {
-        self.as_number()?.to_f32()
-    }
     /// Converts this value to an i32 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_i32(&self) -> Option<i32> {
@@ -557,16 +557,6 @@ impl IValue {
     #[must_use]
     pub fn to_u32(&self) -> Option<u32> {
         self.as_number()?.to_u32()
-    }
-    /// Converts this value to an isize if it is a number that can be represented exactly.
-    #[must_use]
-    pub fn to_isize(&self) -> Option<isize> {
-        self.as_number()?.to_isize()
-    }
-    /// Converts this value to a usize if it is a number that can be represented exactly.
-    #[must_use]
-    pub fn to_usize(&self) -> Option<usize> {
-        self.as_number()?.to_usize()
     }
     /// Converts this value to an i16 if it is a number that can be represented exactly.
     #[must_use]
@@ -588,6 +578,26 @@ impl IValue {
     pub fn to_u8(&self) -> Option<u8> {
         self.as_number()?.to_u8()
     }
+    /// Converts this value to an f64 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_f64(&self) -> Option<f64> {
+        self.as_number()?.to_f64()
+    }
+    /// Converts this value to an f32 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_f32(&self) -> Option<f32> {
+        self.as_number()?.to_f32()
+    }
+    /// Converts this value to an f16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_f16(&self) -> Option<half::f16> {
+        self.as_number()?.to_f16()
+    }
+    /// Converts this value to a bf16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_b16(&self) -> Option<half::bf16> {
+        self.as_number()?.to_b16()
+    }
     /// Converts this value to an f64 if it is a number, potentially losing precision
     /// in the process.
     #[must_use]
@@ -600,15 +610,17 @@ impl IValue {
     pub fn to_f32_lossy(&self) -> Option<f32> {
         Some(self.as_number()?.to_f32_lossy())
     }
-    /// Converts this value to an f16 if it is a number that can be represented exactly.
+    /// Converts this value to an f16 if it is a number, potentially losing precision
+    /// in the process.
     #[must_use]
-    pub fn to_f16(&self) -> Option<half::f16> {
-        self.as_number()?.to_f16()
+    pub fn to_f16_lossy(&self) -> Option<half::f16> {
+        Some(self.as_number()?.to_f16_lossy())
     }
-    /// Converts this value to an b16 if it is a number that can be represented exactly.
+    /// Converts this value to a bf16 if it is a number, potentially losing precision
+    /// in the process.
     #[must_use]
-    pub fn to_b16(&self) -> Option<half::bf16> {
-        self.as_number()?.to_b16()
+    pub fn to_b16_lossy(&self) -> Option<half::bf16> {
+        Some(self.as_number()?.to_b16_lossy())
     }
 
     // # String methods
@@ -1033,7 +1045,6 @@ impl From<f32> for IValue {
         INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
     }
 }
-
 impl From<f64> for IValue {
     fn from(v: f64) -> Self {
         INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)

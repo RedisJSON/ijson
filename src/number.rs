@@ -259,6 +259,7 @@ impl INumber {
                 } else if self.to_u32().is_some() {
                     ArrayType::U32
                 } else {
+                    // all inline values are representable in i64
                     ArrayType::I64
                 }
             }
@@ -476,6 +477,11 @@ impl INumber {
             }
         }
     }
+    /// Converts this number to an f16, potentially losing precision in the process.
+    #[must_use]
+    pub fn to_f16_lossy(&self) -> half::f16 {
+        half::f16::from_f32(self.to_f32_lossy())
+    }
     /// Converts this number to an f16 if it can be represented exactly.
     #[must_use]
     pub fn to_f16(&self) -> Option<half::f16> {
@@ -487,7 +493,12 @@ impl INumber {
             None
         }
     }
-    /// Converts this number to an b16 if it can be represented exactly.
+    /// Converts this number to a bf16, potentially losing precision in the process.
+    #[must_use]
+    pub fn to_b16_lossy(&self) -> half::bf16 {
+        half::bf16::from_f32(self.to_f32_lossy())
+    }
+    /// Converts this number to a bf16 if it can be represented exactly.
     #[must_use]
     pub fn to_b16(&self) -> Option<half::bf16> {
         let v = self.to_f32()?;
@@ -571,14 +582,35 @@ impl Hash for INumber {
     }
 }
 
+impl From<usize> for INumber {
+    fn from(v: usize) -> Self {
+        Self::new_u64(v as u64)
+    }
+}
+impl From<isize> for INumber {
+    fn from(v: isize) -> Self {
+        Self::new_i64(v as i64)
+    }
+}
 impl From<u64> for INumber {
     fn from(v: u64) -> Self {
         Self::new_u64(v)
     }
 }
+impl From<i64> for INumber {
+    fn from(v: i64) -> Self {
+        Self::new_i64(v)
+    }
+}
 impl From<u32> for INumber {
     fn from(v: u32) -> Self {
         // Safety: All u32s are in the inline range
+        unsafe { Self::new_inline(v as i64) }
+    }
+}
+impl From<i32> for INumber {
+    fn from(v: i32) -> Self {
+        // Safety: All i32s are in the inline range
         unsafe { Self::new_inline(v as i64) }
     }
 }
@@ -588,31 +620,15 @@ impl From<u16> for INumber {
         unsafe { Self::new_inline(v as i64) }
     }
 }
-impl From<u8> for INumber {
-    fn from(v: u8) -> Self {
-        // Safety: All u8s are in the inline range
-        unsafe { Self::new_inline(v as i64) }
-    }
-}
-impl From<usize> for INumber {
-    fn from(v: usize) -> Self {
-        Self::new_u64(v as u64)
-    }
-}
-impl From<i64> for INumber {
-    fn from(v: i64) -> Self {
-        Self::new_i64(v)
-    }
-}
-impl From<i32> for INumber {
-    fn from(v: i32) -> Self {
-        // Safety: All i32s are in the inline range
-        unsafe { Self::new_inline(v as i64) }
-    }
-}
 impl From<i16> for INumber {
     fn from(v: i16) -> Self {
         // Safety: All i16s are in the inline range
+        unsafe { Self::new_inline(v as i64) }
+    }
+}
+impl From<u8> for INumber {
+    fn from(v: u8) -> Self {
+        // Safety: All u8s are in the inline range
         unsafe { Self::new_inline(v as i64) }
     }
 }
@@ -622,29 +638,28 @@ impl From<i8> for INumber {
         unsafe { Self::new_inline(v as i64) }
     }
 }
-impl From<isize> for INumber {
-    fn from(v: isize) -> Self {
-        Self::new_i64(v as i64)
-    }
-}
 impl TryFrom<f64> for INumber {
     type Error = ();
     fn try_from(v: f64) -> Result<Self, ()> {
-        if v.is_finite() {
-            Ok(Self::new_f64(v))
-        } else {
-            Err(())
-        }
+        v.is_finite().then(|| Self::new_f64(v)).ok_or(())
     }
 }
 impl TryFrom<f32> for INumber {
     type Error = ();
     fn try_from(v: f32) -> Result<Self, ()> {
-        if v.is_finite() {
-            Ok(Self::new_f64(v as f64))
-        } else {
-            Err(())
-        }
+        v.is_finite().then(|| Self::new_f64(v as f64)).ok_or(())
+    }
+}
+impl TryFrom<half::f16> for INumber {
+    type Error = ();
+    fn try_from(v: half::f16) -> Result<Self, ()> {
+        v.is_finite().then(|| Self::new_f64(v.to_f64())).ok_or(())
+    }
+}
+impl TryFrom<half::bf16> for INumber {
+    type Error = ();
+    fn try_from(v: half::bf16) -> Result<Self, ()> {
+        v.is_finite().then(|| Self::new_f64(v.to_f64())).ok_or(())
     }
 }
 

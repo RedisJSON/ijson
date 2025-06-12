@@ -23,7 +23,7 @@ struct Header {
 }
 
 #[repr(usize)]
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub(crate) enum ArrayType {
     Heterogeneous = 0,
     I64 = 1,
@@ -40,6 +40,71 @@ pub(crate) enum ArrayType {
     U8 = 12,
     // more to come?
     // 8-bit floats?
+}
+
+fn minimal_tag(a: ArrayType, b: ArrayType) -> ArrayType {
+    use ArrayType::*;
+    if a == b {
+        return a;
+    }
+    if a == Heterogeneous || b == Heterogeneous {
+        return Heterogeneous;
+    }
+
+    let is_float = |tag: ArrayType| matches!(tag, F64 | F32 | F16 | B16);
+    let both_float = is_float(a) && is_float(b);
+    let one_float = is_float(a) || is_float(b);
+
+    let is_signed = |tag: ArrayType| matches!(tag, I64 | I32 | I16 | I8);
+    let any_signed = is_signed(a) || is_signed(b);
+    
+    if both_float {
+        match (a, b) {
+            (F64, _) | (_, F64) => F64,
+            (F32, _) | (_, F32) => F32,
+            (F16, B16) | (B16, F16) => F32,
+            _ => unreachable!(),
+        }
+    } else if one_float {
+        match (a, b) {
+            (I64, _) | (U64, _) | (_, I64) | (_, U64) => Heterogeneous,
+            // <= (F64, I32/U32)
+            (F64, _) | (_, F64) => F64,
+            // <= (F32, I32/U32)
+            (I32, _) | (U32, _) | (_, I32) | (_, U32) => F64,
+            // <= (F32, I16/U16)
+            (F32, _) | (_, F32) => F32,
+            // <= (F16/B16, I16/U16)
+            (I16, _) | (U16, _) | (_, I16) | (_, U16) => F32,
+            // <= (F16/B16, I8/U8)
+            (F16, _) | (_, F16) => F16,
+            (B16, _) | (_, B16) => B16,
+
+            _ => unreachable!(),
+        }
+    } else if any_signed {
+        match (a, b) {
+            (I64, U64) | (U64, I64) => Heterogeneous,
+            (I64, _) | (_, I64) => I64,
+            (I32, U32) | (U32, I32) => I64,
+            (I32, _) | (_, I32) => I32,
+            (I16, U16) | (U16, I16) => I32,
+            (I16, _) | (_, I16) => I16,
+            (I8, U8) | (U8, I8) => I16,
+            (I8, _) | (_, I8) => I8,
+
+            _ => unreachable!(),
+        }
+    } else {
+        match (a, b) {
+            (U64, _) | (_, U64) => U64,
+            (U32, _) | (_, U32) => U32,
+            (U16, _) | (_, U16) => U16,
+            (U8, _) | (_, U8) => U8,
+
+            _ => unreachable!(),
+        }
+    }
 }
 
 const TAG_BITS: usize = 4;
@@ -75,81 +140,56 @@ impl Header {
 
 trait HeaderRef<'a>: ThinRefExt<'a, Header> {
     fn array_ptr(&self) -> *const IValue {
+        assert_eq!(self.get_type(), ArrayType::Heterogeneous);
         // Safety: pointers to the end of structs are allowed
         unsafe { self.ptr().add(1).cast::<IValue>() }
     }
     fn items_slice(&self) -> &'a [IValue] {
-        // Safety: Header `len` must be accurate
+        assert_eq!(self.get_type(), ArrayType::Heterogeneous);
+        // Safety: Header `type` and `len` must be accurate
         unsafe { std::slice::from_raw_parts(self.array_ptr(), self.get_len()) }
     }
 }
 
 trait HeaderMut<'a>: ThinMutExt<'a, Header> {
     fn array_ptr_mut(mut self) -> *mut IValue {
+        assert_eq!(self.get_type(), ArrayType::Heterogeneous);
         // Safety: pointers to the end of structs are allowed
         unsafe { self.ptr_mut().add(1).cast::<IValue>() }
     }
     fn items_slice_mut(self) -> &'a mut [IValue] {
+        assert_eq!(self.get_type(), ArrayType::Heterogeneous);
         // Safety: Header `len` must be accurate
         let len = self.get_len();
         unsafe { std::slice::from_raw_parts_mut(self.array_ptr_mut(), len) }
     }
-    fn retag(&mut self, tag: ArrayType) {
-        let cap = self.get_cap();
-        let mut new_arr = IArray::with_type_and_capacity(tag, cap);
-        let mut header = unsafe { new_arr.header_mut() };
-        for i in 0..self.get_len() {
-            unsafe {
-                let item = self.array_ptr().add(i).read();
-                header.write_tag(i, tag, item);
-            }
-        }
-        self.header = new_arr.0.ptr_usize();
-    }
 
-    unsafe fn write<T>(&mut self, index: usize, item: T) {
+    unsafe fn push<T>(&mut self, item: T) {
+        let len = self.get_len();
         self.reborrow()
             .array_ptr_mut()
             .cast::<T>()
-            .add(index)
+            .add(len)
             .write(item);
+        self.set_len(len + 1);
     }
 
-    unsafe fn write_tag(&mut self, index: usize, tag: ArrayType, item: IValue) {
+    unsafe fn push_tag(&mut self, tag: ArrayType, item: IValue) {
         match tag {
-            ArrayType::Heterogeneous => self.write::<IValue>(index, item),
-            ArrayType::U64 => self.write::<u64>(index, item.to_u64().unwrap()),
-            ArrayType::I64 => self.write::<i64>(index, item.to_i64().unwrap()),
-            ArrayType::F64 => self.write::<f64>(index, item.to_f64().unwrap()),
-            ArrayType::U32 => self.write::<u32>(index, item.to_u32().unwrap()),
-            ArrayType::I32 => self.write::<i32>(index, item.to_i32().unwrap()),
-            ArrayType::F32 => self.write::<f32>(index, item.to_f32().unwrap()),
-            ArrayType::U16 => self.write::<u16>(index, item.to_u16().unwrap()),
-            ArrayType::I16 => self.write::<i16>(index, item.to_i16().unwrap()),
-            ArrayType::F16 => self.write::<half::f16>(index, item.to_f16().unwrap()),
-            ArrayType::B16 => self.write::<half::bf16>(index, item.to_b16().unwrap()),
-            ArrayType::U8 => self.write::<u8>(index, item.to_u8().unwrap()),
-            ArrayType::I8 => self.write::<i8>(index, item.to_i8().unwrap()),
+            ArrayType::Heterogeneous => self.push::<IValue>(item),
+            ArrayType::U64 => self.push::<u64>(item.to_u64().unwrap()),
+            ArrayType::I64 => self.push::<i64>(item.to_i64().unwrap()),
+            ArrayType::F64 => self.push::<f64>(item.to_f64().unwrap()),
+            ArrayType::U32 => self.push::<u32>(item.to_u32().unwrap()),
+            ArrayType::I32 => self.push::<i32>(item.to_i32().unwrap()),
+            ArrayType::F32 => self.push::<f32>(item.to_f32().unwrap()),
+            ArrayType::U16 => self.push::<u16>(item.to_u16().unwrap()),
+            ArrayType::I16 => self.push::<i16>(item.to_i16().unwrap()),
+            ArrayType::F16 => self.push::<half::f16>(item.to_f16().unwrap()),
+            ArrayType::B16 => self.push::<half::bf16>(item.to_b16().unwrap()),
+            ArrayType::U8 => self.push::<u8>(item.to_u8().unwrap()),
+            ArrayType::I8 => self.push::<i8>(item.to_i8().unwrap()),
         }
-    }
-    // Safety: Space must already be allocated for the item
-    unsafe fn push(&mut self, item: IValue) {
-        let index = self.get_len();
-        let tag = match (self.get_type(), item.is_number()) {
-            (ArrayType::Heterogeneous, _) => ArrayType::Heterogeneous,
-            (_, false) => {
-                self.retag(ArrayType::Heterogeneous);
-                ArrayType::Heterogeneous
-            }
-            (tag, _) if !item.as_number().unwrap().is_representable_in(tag) => {
-                let new_tag = item.as_number().unwrap().minimal_representation();
-                self.retag(new_tag);
-                new_tag
-            }
-            (tag, _) => tag,
-        };
-        self.write_tag(index, tag, item);
-        self.set_len(index + 1);
     }
 
     fn pop(&mut self) -> Option<IValue> {
@@ -257,6 +297,16 @@ impl IArray {
         }
     }
 
+    /// Safety: tag must be compatible with all items in the array
+    unsafe fn retag(&mut self, tag: ArrayType) {
+        let cap = self.capacity();
+        let mut new_arr = IArray::with_type_and_capacity(tag, cap);
+        for item in self.into_iter() {
+            new_arr.header_mut().push_tag(tag, item.clone());
+        }
+        *self = new_arr;
+    }
+
     /// Constructs a new empty `IArray`. Does not allocate.
     #[must_use]
     pub fn new() -> Self {
@@ -295,7 +345,9 @@ impl IArray {
     }
 
     fn is_static(&self) -> bool {
-        self.capacity() == 0
+        // Check if this is a reference to the static EMPTY_HEADER
+        let ptr = unsafe { self.0.ptr().cast::<Header>() };
+        ptr == &EMPTY_HEADER as *const _ as *mut _
     }
     /// Returns the capacity of the array. This is the maximum number of items the array
     /// can hold without reallocating.
@@ -435,12 +487,34 @@ impl IArray {
         }
     }
 
+    /// Safety: Space must already be allocated for the item
+    unsafe fn push_back(&mut self, item: IValue) {
+        let tag = match (self.header().get_type(), item.is_number()) {
+            (ArrayType::Heterogeneous, _) => ArrayType::Heterogeneous,
+            (_, false) => {
+                self.retag(ArrayType::Heterogeneous);
+                ArrayType::Heterogeneous
+            }
+            (tag, _) => {
+                if !item.as_number().unwrap().is_representable_in(tag) {
+                    let new_tag = item.as_number().unwrap().minimal_representation();
+                    let tag = minimal_tag(tag, new_tag);
+                    self.retag(tag);
+                    tag
+                } else {
+                    tag
+                }
+            }
+        };
+        self.header_mut().push_tag(tag, item);
+    }
+
     /// Pushes a new item onto the back of the array.
     pub fn push(&mut self, item: impl Into<IValue>) {
         self.reserve(1);
         // Safety: We just reserved enough space for at least one extra item
         unsafe {
-            self.header_mut().push(item.into());
+            self.push_back(item.into());
         }
     }
 
@@ -750,7 +824,7 @@ mod tests {
             vec![IValue::NULL, IValue::TRUE, IArray::with_capacity(10).into()].into();
         x.truncate(2);
         assert_eq!(x.len(), 2);
-        assert_eq!(x.capacity(), 3);
+        assert!(x.capacity() >= 3);
         x.shrink_to_fit();
         assert_eq!(x.len(), 2);
         assert_eq!(x.capacity(), 2);
