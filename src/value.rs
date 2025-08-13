@@ -61,7 +61,7 @@ use super::unsafe_string::IString;
 ///   six JSON types.
 #[repr(transparent)]
 pub struct IValue {
-    ptr: NonNull<u8>,
+    pub(crate) ptr: NonNull<u8>,
 }
 
 /// Enum returned by [`IValue::destructure`] to allow matching on the type of
@@ -169,6 +169,7 @@ impl<'a> Deref for BoolMut<'a> {
 }
 
 pub(crate) const ALIGNMENT: usize = 8;
+pub(crate) const TAG_SIZE_BITS: u32 = ALIGNMENT.trailing_zeros();
 
 #[repr(usize)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -180,6 +181,7 @@ pub(crate) enum TypeTag {
     I64 = 4,
     U64 = 5,
     InlineInt = 6,
+    InlineString = 7,
 }
 
 impl From<usize> for TypeTag {
@@ -301,6 +303,7 @@ impl IValue {
             (StringOrNull, true) => ValueType::String,
             (ArrayOrFalse, true) => ValueType::Array,
             (ObjectOrTrue, true) => ValueType::Object,
+            (InlineString, _) => ValueType::String,
 
             // Non-pointers
             (StringOrNull, false) => ValueType::Null,
@@ -585,7 +588,8 @@ impl IValue {
     /// Returns `true` if this is a string.
     #[must_use]
     pub fn is_string(&self) -> bool {
-        self.type_tag() == TypeTag::StringOrNull && self.is_ptr()
+        (self.type_tag() == TypeTag::StringOrNull && self.is_ptr())
+            || self.type_tag() == TypeTag::InlineString
     }
 
     // Safety: Must be a string
@@ -1080,7 +1084,6 @@ mod tests {
 
     #[mockalloc::test]
     fn test_number() {
-        const TAG_SIZE_BITS: u32 = ALIGNMENT.trailing_zeros();
         const INLINE_LOWER: i64 = i64::MIN >> TAG_SIZE_BITS;
         const INLINE_UPPER: i64 = i64::MAX >> TAG_SIZE_BITS;
         for range in [-1 << 61, 0i64, 1 << 61].map(|b| b - 100..b + 100) {
@@ -1187,11 +1190,19 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
-            assert_eq!(
-                x.mem_allocated(),
-                2 * mem::size_of::<usize>() + s.capacity()
-            );
+            assert_eq!(x.mem_allocated(), 0);
         }
+
+        let s = String::from("foofoofoo");
+        let mut x = IValue::from(&s);
+        assert!(x.is_string());
+        assert_eq!(x.type_(), ValueType::String);
+        assert_eq!(x.as_string(), Some(&IString::intern(&s)));
+        assert_eq!(x.as_string_mut(), Some(&mut IString::intern(&s)));
+        assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
+        assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
+        assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
+        assert_eq!(x.mem_allocated(), 20);
     }
 
     #[mockalloc::test]
