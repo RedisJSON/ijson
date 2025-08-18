@@ -27,7 +27,7 @@ struct Header {
 
 trait HeaderRef<'a>: ThinRefExt<'a, Header> {
     fn len(&self) -> usize {
-        u64::from(self.len) as usize
+        self.len as usize
     }
     fn str_ptr(&self) -> *const u8 {
         // Safety: pointers to the end of structs are allowed
@@ -335,9 +335,8 @@ impl IString {
     }
 
     /// Extract string from inline storage
-    /// Safety: Must be called on inline string
+    /// Safety: Must be called on inline string(strings are valid UTF-8)
     unsafe fn extract_inline_str(&self) -> &str {
-        //let data_ptr = &self.0 as *const IValue as *const u8;
         let data_ptr = self.0.ptr();
         let bytes: &[u8; 8] = transmute(&data_ptr);
         str::from_utf8(&bytes[1..self.len() + 1]).unwrap()
