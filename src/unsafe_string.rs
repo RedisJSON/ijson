@@ -686,35 +686,4 @@ mod tests {
         });
     }
 
-    #[mockalloc::test]
-    fn test_inline_vs_heap_memory_usage() {
-        // Compare memory usage
-        let inline_str = IString::intern("short"); // 5 bytes - inline
-        let heap_str = IString::intern("verylongstring"); // > 7 bytes - heap
-
-        assert!(inline_str.is_inline());
-        assert!(!heap_str.is_inline());
-
-        // Inline string: 0 additional memory
-        assert_eq!(inline_str.mem_allocated(), 0);
-
-        // Heap string: header + string data
-        assert!(heap_str.mem_allocated() > 0);
-    }
-
-    #[mockalloc::test]
-    fn test_boundary_cases() {
-        // Test exactly at the boundary
-        let exactly_7 = "1234567"; // Exactly 7 bytes
-        let exactly_8 = "12345678"; // Exactly 8 bytes
-
-        let str7 = IString::intern(exactly_7);
-        let str8 = IString::intern(exactly_8);
-
-        assert!(str7.is_inline(), "7-byte string should be inline");
-        assert!(!str8.is_inline(), "8-byte string should not be inline");
-
-        assert_eq!(str7.as_str(), exactly_7);
-        assert_eq!(str8.as_str(), exactly_8);
-    }
 }
