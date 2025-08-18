@@ -6,7 +6,7 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
-use std::mem;
+use std::mem::{self, transmute};
 use std::ops::Deref;
 use std::ptr::{addr_of_mut, copy_nonoverlapping, NonNull};
 use std::sync::atomic::AtomicU32;
@@ -54,13 +54,11 @@ impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
 impl<'a, T: ThinMutExt<'a, Header>> HeaderMut<'a> for T {}
 
 // Constants for inline string storage
-const INLINE_STRING_MAX_LEN: usize = 7; // 7 bytes + null terminator = 8 bytes total
-
-/// Check if a string can be stored inline (null-terminated in pointer)
+const INLINE_STRING_MAX_LEN: usize = 7;
+/// Check if a string can be stored inline
 fn can_inline_string(s: &str) -> bool {
     let bytes = s.as_bytes();
-    // We need space for string bytes + null terminator in the upper bits (61 bits = 7.625 bytes)
-    bytes.len() <= INLINE_STRING_MAX_LEN && s.is_char_boundary(bytes.len())
+    bytes.len() <= INLINE_STRING_MAX_LEN
 }
 
 enum StringCache {
@@ -243,7 +241,7 @@ impl IString {
     }
 
     fn alloc<A: FnOnce(Layout) -> *mut u8>(s: &str, allocator: A) -> *mut Header {
-        assert!((s.len() as u64) < (1 << 32));
+        assert!((s.len()) < u32::MAX as usize);
         unsafe {
             let ptr = allocator(
                 Self::layout(s.len()).expect("layout is expected to return a valid value"),
@@ -283,18 +281,17 @@ impl IString {
         k.upgrade()
     }
 
-    /// Create an inline string by storing bytes in upper bits with null termination
+    /// Create an inline string by storing bytes in upper bits
     /// Safety: String must be < 8 bytes and valid UTF-8
     unsafe fn new_inline_string(s: &str) -> Self {
         // 1 byte for the tag(3 bits for tag and rest for the length), 7 bytes for the string
         let bytes = s.as_bytes();
-        let mut data: usize = 0;
-        data |= s.len() << TAG_SIZE_BITS;
+        let mut data_bytes = [0u8; 8];
 
-        for (i, &byte) in bytes.iter().enumerate() {
-            data |= (byte as usize) << (8 as usize + i * 8);
-        }
-        // Remaining bytes are automatically 0 (null terminated)
+        // Set the length in the first byte (after tag bits)
+        data_bytes[0] = (s.len() << TAG_SIZE_BITS) as u8;
+        data_bytes[1..1 + bytes.len()].copy_from_slice(bytes);
+        let data: usize = usize::from_ne_bytes(data_bytes);
 
         Self(IValue::new_ptr(data as *mut u8, TypeTag::InlineString))
     }
@@ -337,12 +334,13 @@ impl IString {
         self.len() == 0
     }
 
-    /// Extract null-terminated string from inline storage  
+    /// Extract string from inline storage
     /// Safety: Must be called on inline string
     unsafe fn extract_inline_str(&self) -> &str {
-        let bytes: &[u8; 8] = &*(&self.0.ptr as *const NonNull<u8> as *const [u8; 8]);
-        let string_bytes = &bytes[1..self.len() + 1];
-        str::from_utf8_unchecked(string_bytes)
+        //let data_ptr = &self.0 as *const IValue as *const u8;
+        let data_ptr = self.0.ptr();
+        let bytes: &[u8; 8] = transmute(&data_ptr);
+        str::from_utf8(&bytes[1..self.len() + 1]).unwrap()
     }
 
     /// Obtains a `&str` from this `IString`. This is a cheap operation.

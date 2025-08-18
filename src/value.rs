@@ -61,7 +61,7 @@ use super::unsafe_string::IString;
 ///   six JSON types.
 #[repr(transparent)]
 pub struct IValue {
-    pub(crate) ptr: NonNull<u8>,
+    ptr: NonNull<u8>,
 }
 
 /// Enum returned by [`IValue::destructure`] to allow matching on the type of
@@ -203,10 +203,10 @@ pub enum ValueType {
     // May be stored either inline or behind pointer
     /// Number.
     Number,
-
-    // Stored behind pointer
     /// String.
     String,
+
+    // Stored behind pointer
     /// Array.
     Array,
     /// Object.
