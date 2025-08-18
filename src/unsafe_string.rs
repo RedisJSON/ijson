@@ -337,9 +337,10 @@ impl IString {
     /// Extract string from inline storage
     /// Safety: Must be called on inline string(strings are valid UTF-8)
     unsafe fn extract_inline_str(&self) -> &str {
-        let data_ptr = self.0.ptr();
-        let bytes: &[u8; 8] = transmute(&data_ptr);
-        str::from_utf8(&bytes[1..self.len() + 1]).unwrap()
+        let data_ptr = self.0.ptr_usize();
+        let bytes_ptr = &data_ptr as *const usize as *const u8;
+        let bytes = std::slice::from_raw_parts(bytes_ptr, 8);
+        str::from_utf8_unchecked(&bytes[1..self.len() + 1])
     }
 
     /// Obtains a `&str` from this `IString`. This is a cheap operation.
