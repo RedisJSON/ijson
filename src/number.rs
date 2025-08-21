@@ -9,7 +9,7 @@ use std::hash::Hash;
 
 use crate::{Defrag, DefragAllocator};
 
-use super::value::{IValue, TypeTag, ALIGNMENT};
+use super::value::{IValue, TypeTag, ALIGNMENT, TAG_SIZE_BITS};
 
 #[repr(usize)]
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -67,7 +67,6 @@ fn cmp_u64_to_f64(a: u64, b: f64) -> Ordering {
 }
 
 // Range of a 61-bit signed integer.
-const TAG_SIZE_BITS: u32 = ALIGNMENT.trailing_zeros();
 const INLINE_LOWER: i64 = i64::MIN >> TAG_SIZE_BITS;
 const INLINE_UPPER: i64 = i64::MAX >> TAG_SIZE_BITS;
 
