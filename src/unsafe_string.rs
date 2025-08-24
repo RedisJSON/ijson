@@ -18,7 +18,7 @@ use crate::{Defrag, DefragAllocator};
 use super::value::{IValue, TypeTag, ALIGNMENT, TAG_SIZE_BITS};
 
 #[repr(C)]
-#[repr(align(4))]
+#[repr(align(8))]
 struct Header {
     rc: AtomicU32,
     // We use 32 bits for the length, which allows up to 4 GiB (safely covers 512MB)
