@@ -1,6 +1,5 @@
 use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
-use std::slice;
 
 use serde::de::{
     DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess,
@@ -563,14 +562,30 @@ impl<'de> Deserializer<'de> for &'de IArray {
     where
         V: Visitor<'de>,
     {
+        use crate::array::ArraySliceRef;
         let len = self.len();
-        let mut deserializer = ArrayAccess::new(self);
-        let seq = visitor.visit_seq(&mut deserializer)?;
-        let remaining = deserializer.iter.len();
-        if remaining == 0 {
-            Ok(seq)
-        } else {
-            Err(SError::invalid_length(len, &"fewer elements in array"))
+
+        match self.as_slice() {
+            ArraySliceRef::Heterogeneous(slice) => {
+                // For heterogeneous arrays, use the slice directly
+                let mut deserializer = ArrayAccess::new(slice);
+                let seq = visitor.visit_seq(&mut deserializer)?;
+                let remaining = deserializer.remaining_len();
+                if remaining == 0 {
+                    Ok(seq)
+                } else {
+                    Err(SError::invalid_length(len, &"fewer elements in array"))
+                }
+            }
+            _ => {
+                // For typed arrays, we need to convert to heterogeneous representation
+                // This is a limitation of the current deserialization design
+                Err(SError::custom(
+                    "Deserialization from typed arrays is not supported. \
+                     Convert to heterogeneous array first using .iter().collect::<IArray>() \
+                     or access the typed data directly using .as_slice()"
+                ))
+            }
         }
     }
 
@@ -808,12 +823,18 @@ impl<'de> VariantAccess<'de> for VariantDeserializer<'de> {
 }
 
 struct ArrayAccess<'de> {
-    iter: slice::Iter<'de, IValue>,
+    iter: std::slice::Iter<'de, IValue>,
 }
 
 impl<'de> ArrayAccess<'de> {
     fn new(slice: &'de [IValue]) -> Self {
-        ArrayAccess { iter: slice.iter() }
+        ArrayAccess {
+            iter: slice.iter()
+        }
+    }
+
+    fn remaining_len(&self) -> usize {
+        self.iter.len()
     }
 }
 
