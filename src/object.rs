@@ -108,7 +108,7 @@ struct SplitHeaderMut<'a> {
 }
 
 impl<'a> SplitHeaderMut<'a> {
-    fn as_ref(&self) -> SplitHeader {
+    fn as_ref(&self) -> SplitHeader<'_> {
         SplitHeader {
             cap: self.cap,
             items: self.items,
@@ -570,12 +570,12 @@ impl IObject {
         }
     }
 
-    fn header(&self) -> ThinRef<Header> {
+    fn header(&self) -> ThinRef<'_, Header> {
         unsafe { ThinRef::new(self.0.ptr().cast()) }
     }
 
     // Safety: must not be static
-    unsafe fn header_mut(&mut self) -> ThinMut<Header> {
+    unsafe fn header_mut(&mut self) -> ThinMut<'_, Header> {
         ThinMut::new(self.0.ptr().cast())
     }
 
@@ -626,14 +626,14 @@ impl IObject {
     }
 
     /// Returns a view of an entry within this object.
-    pub fn entry(&mut self, key: impl Into<IString>) -> Entry {
+    pub fn entry(&mut self, key: impl Into<IString>) -> Entry<'_> {
         self.reserve(1);
         // Safety: cannot be static after reserving space
         unsafe { self.header_mut().entry(key.into()) }
     }
     /// Returns a view of an entry within this object, whilst avoiding
     /// cloning the key if the entry is already occupied.
-    pub fn entry_or_clone(&mut self, key: &IString) -> Entry {
+    pub fn entry_or_clone(&mut self, key: &IString) -> Entry<'_> {
         self.reserve(1);
         // Safety: cannot be static after reserving space
         unsafe { self.header_mut().entry_or_clone(key) }
@@ -648,7 +648,7 @@ impl IObject {
     }
     /// Returns an iterator over (&key, &value) pairs in this object.
     #[must_use]
-    pub fn iter(&self) -> Iter {
+    pub fn iter(&self) -> Iter<'_> {
         Iter(self.header().split().items.iter())
     }
     /// Returns an iterator over mutable references to the values in
@@ -657,7 +657,7 @@ impl IObject {
         self.iter_mut().map(|x| x.1)
     }
     /// Returns an iterator over (&key, &mut value) pairs in this object.
-    pub fn iter_mut(&mut self) -> IterMut {
+    pub fn iter_mut(&mut self) -> IterMut<'_> {
         IterMut(
             if self.is_empty() {
                 &mut []

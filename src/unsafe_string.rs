@@ -183,7 +183,7 @@ impl Borrow<str> for WeakIString {
     }
 }
 impl WeakIString {
-    fn header(&self) -> ThinMut<Header> {
+    fn header(&self) -> ThinMut<'_, Header> {
         // Safety: pointer is always valid
         unsafe { ThinMut::new(self.ptr.as_ptr()) }
     }
@@ -282,7 +282,7 @@ impl IString {
         Self::intern_with_allocator(s, |layout| unsafe { alloc(layout) })
     }
 
-    fn header(&self) -> ThinMut<Header> {
+    fn header(&self) -> ThinMut<'_, Header> {
         unsafe { ThinMut::new(self.0.ptr().cast()) }
     }
 

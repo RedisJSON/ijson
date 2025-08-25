@@ -69,7 +69,7 @@ pub trait ThinRefExt<'a, T>: Deref<Target = T> {
 
 pub trait ThinMutExt<'a, T>: DerefMut<Target = T> + ThinRefExt<'a, T> + Sized {
     fn ptr_mut(&mut self) -> *mut T;
-    fn reborrow(&mut self) -> ThinMut<T>;
+    fn reborrow(&mut self) -> ThinMut<'_, T>;
 }
 
 impl<'a, T> ThinRefExt<'a, T> for ThinRef<'a, T> {
@@ -88,7 +88,7 @@ impl<'a, T> ThinMutExt<'a, T> for ThinMut<'a, T> {
     fn ptr_mut(&mut self) -> *mut T {
         self.ptr.as_ptr()
     }
-    fn reborrow(&mut self) -> ThinMut<T> {
+    fn reborrow(&mut self) -> ThinMut<'_, T> {
         Self {
             ptr: self.ptr,
             phantom: self.phantom,

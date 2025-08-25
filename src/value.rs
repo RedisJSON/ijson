@@ -85,7 +85,7 @@ pub enum Destructured {
 impl Destructured {
     /// Convert to the borrowed form of thie enum.
     #[must_use]
-    pub fn as_ref(&self) -> DestructuredRef {
+    pub fn as_ref(&self) -> DestructuredRef<'_> {
         use DestructuredRef::{Array, Bool, Null, Number, Object, String};
         match self {
             Self::Null => Null,
@@ -323,7 +323,7 @@ impl IValue {
 
     /// Destructures a reference to this value into an enum which can be `match`ed on.
     #[must_use]
-    pub fn destructure_ref(&self) -> DestructuredRef {
+    pub fn destructure_ref(&self) -> DestructuredRef<'_> {
         // Safety: we check the type
         unsafe {
             match self.type_() {
@@ -338,7 +338,7 @@ impl IValue {
     }
 
     /// Destructures a mutable reference to this value into an enum which can be `match`ed on.
-    pub fn destructure_mut(&mut self) -> DestructuredMut {
+    pub fn destructure_mut(&mut self) -> DestructuredMut<'_> {
         // Safety: we check the type
         unsafe {
             match self.type_() {
@@ -1178,18 +1178,18 @@ mod tests {
     #[mockalloc::test]
     fn test_string() {
         for v in 0..10 {
-            let s = v.to_string();
-            let mut x = IValue::from(&s);
+            let mut s = IString::intern(&v.to_string());
+            let mut x = IValue::from(s.clone());
             assert!(x.is_string());
             assert_eq!(x.type_(), ValueType::String);
-            assert_eq!(x.as_string(), Some(&IString::intern(&s)));
-            assert_eq!(x.as_string_mut(), Some(&mut IString::intern(&s)));
+            assert_eq!(x.as_string(), Some(&s));
+            assert_eq!(x.as_string_mut(), Some(&mut s));
             assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
             assert_eq!(
                 x.mem_allocated(),
-                2 * mem::size_of::<usize>() + s.capacity()
+                2 * mem::size_of::<usize>() + ((s.len() + 7) & !7) // Align to 8 bytes
             );
         }
     }
@@ -1208,7 +1208,7 @@ mod tests {
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Array(u) if *u == a));
             assert_eq!(
                 x.mem_allocated(),
-                2 * mem::size_of::<usize>() + a.capacity() * mem::size_of::<IValue>()
+                mem::size_of::<usize>() + ((a.capacity() * mem::size_of::<i32>() + 7) & !7)
             );
         }
     }
