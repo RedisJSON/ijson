@@ -430,12 +430,20 @@ static EMPTY_HEADER: Header = Header::new(0, 0, ArrayTag::Heterogeneous);
 
 impl ArrayTag {
     fn element_size(self) -> usize {
+        use ArrayTag::*;
+        use std::mem::size_of;
         match self {
-            ArrayTag::Heterogeneous => std::mem::size_of::<IValue>(),
-            ArrayTag::I8 | ArrayTag::U8 => 1,
-            ArrayTag::I16 | ArrayTag::U16 => 2,
-            ArrayTag::I32 | ArrayTag::U32 | ArrayTag::F32 => 4,
-            ArrayTag::I64 | ArrayTag::U64 | ArrayTag::F64 => 8,
+            Heterogeneous => size_of::<IValue>(),
+            I8 => size_of::<i8>(),
+            U8 => size_of::<u8>(),
+            I16 => size_of::<i16>(),
+            U16 => size_of::<u16>(),
+            I32 => size_of::<i32>(),
+            U32 => size_of::<u32>(),
+            F32 => size_of::<f32>(),
+            I64 => size_of::<i64>(),
+            U64 => size_of::<u64>(),
+            F64 => size_of::<f64>(),
         }
     }
 }
@@ -1072,7 +1080,85 @@ impl<T: Into<IValue> + Clone> From<&[T]> for IArray {
     }
 }
 
-/// Iterator over array elements, yielding IValue objects
+/// Iterator item that can hold either a reference to an IValue or an owned IValue
+/// This avoids deep copying for heterogeneous arrays while still providing owned values for primitives
+#[derive(Debug)]
+pub enum ArrayIterItem<'a> {
+    /// Reference to an IValue (for heterogeneous arrays - no deep copy)
+    Borrowed(&'a IValue),
+    /// Owned IValue (for primitive types - converted from primitive)
+    Owned(IValue),
+}
+
+impl<'a> ArrayIterItem<'a> {
+    /// Get a reference to the IValue
+    pub fn as_ref(&self) -> &IValue {
+        match self {
+            ArrayIterItem::Borrowed(val) => val,
+            ArrayIterItem::Owned(val) => val,
+        }
+    }
+
+    /// Convert to an owned IValue
+    pub fn into_owned(self) -> IValue {
+        match self {
+            ArrayIterItem::Borrowed(val) => val.clone(),
+            ArrayIterItem::Owned(val) => val,
+        }
+    }
+}
+
+impl<'a> AsRef<IValue> for ArrayIterItem<'a> {
+    fn as_ref(&self) -> &IValue {
+        self.as_ref()
+    }
+}
+
+impl<'a> std::ops::Deref for ArrayIterItem<'a> {
+    type Target = IValue;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_ref()
+    }
+}
+
+impl<'a> From<ArrayIterItem<'a>> for IValue {
+    fn from(item: ArrayIterItem<'a>) -> Self {
+        item.into_owned()
+    }
+}
+
+impl<'a> PartialEq<IValue> for ArrayIterItem<'a> {
+    fn eq(&self, other: &IValue) -> bool {
+        self.as_ref() == other
+    }
+}
+
+impl<'a> PartialEq<ArrayIterItem<'a>> for IValue {
+    fn eq(&self, other: &ArrayIterItem<'a>) -> bool {
+        self == other.as_ref()
+    }
+}
+
+// Implement FromIterator for Vec<IValue> from ArrayIterItem
+impl<'a> FromIterator<ArrayIterItem<'a>> for Vec<IValue> {
+    fn from_iter<T: IntoIterator<Item = ArrayIterItem<'a>>>(iter: T) -> Self {
+        iter.into_iter().map(|item| item.into_owned()).collect()
+    }
+}
+
+// Add Serialize support for ArrayIterItem
+impl<'a> serde::Serialize for ArrayIterItem<'a> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.as_ref().serialize(serializer)
+    }
+}
+
+/// Iterator over array elements, yielding ArrayIterItem objects
+/// This avoids deep copying for heterogeneous arrays containing nested arrays/objects
 #[derive(Debug)]
 pub enum ArrayIter<'a> {
     /// Iterator over heterogeneous array
@@ -1100,39 +1186,24 @@ pub enum ArrayIter<'a> {
 }
 
 impl<'a> Iterator for ArrayIter<'a> {
-    type Item = IValue;
+    type Item = ArrayIterItem<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
         use ArrayIter::*;
         match self {
-            Heterogeneous(iter) => iter.next().cloned(),
-            I8(iter) => iter.next().map(|&v| IValue::from(v)),
-            U8(iter) => iter.next().map(|&v| IValue::from(v)),
-            I16(iter) => iter.next().map(|&v| IValue::from(v)),
-            U16(iter) => iter.next().map(|&v| IValue::from(v)),
-            I32(iter) => iter.next().map(|&v| IValue::from(v)),
-            U32(iter) => iter.next().map(|&v| IValue::from(v)),
-            F32(iter) => iter.next().map(|&v| IValue::from(v)),
-            I64(iter) => iter.next().map(|&v| IValue::from(v)),
-            U64(iter) => iter.next().map(|&v| IValue::from(v)),
-            F64(iter) => iter.next().map(|&v| IValue::from(v)),
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        use ArrayIter::*;
-        match self {
-            Heterogeneous(iter) => iter.size_hint(),
-            I8(iter) => iter.size_hint(),
-            U8(iter) => iter.size_hint(),
-            I16(iter) => iter.size_hint(),
-            U16(iter) => iter.size_hint(),
-            I32(iter) => iter.size_hint(),
-            U32(iter) => iter.size_hint(),
-            F32(iter) => iter.size_hint(),
-            I64(iter) => iter.size_hint(),
-            U64(iter) => iter.size_hint(),
-            F64(iter) => iter.size_hint(),
+            // For heterogeneous arrays, return borrowed references (no deep copy!)
+            Heterogeneous(iter) => iter.next().map(ArrayIterItem::Borrowed),
+            // For primitive types, create owned IValues
+            I8(iter) => iter.next().map(|&v| ArrayIterItem::Owned(IValue::from(v))),
+            U8(iter) => iter.next().map(|&v| ArrayIterItem::Owned(IValue::from(v))),
+            I16(iter) => iter.next().map(|&v| ArrayIterItem::Owned(IValue::from(v))),
+            U16(iter) => iter.next().map(|&v| ArrayIterItem::Owned(IValue::from(v))),
+            I32(iter) => iter.next().map(|&v| ArrayIterItem::Owned(IValue::from(v))),
+            U32(iter) => iter.next().map(|&v| ArrayIterItem::Owned(IValue::from(v))),
+            F32(iter) => iter.next().map(|&v| ArrayIterItem::Owned(IValue::from(v))),
+            I64(iter) => iter.next().map(|&v| ArrayIterItem::Owned(IValue::from(v))),
+            U64(iter) => iter.next().map(|&v| ArrayIterItem::Owned(IValue::from(v))),
+            F64(iter) => iter.next().map(|&v| ArrayIterItem::Owned(IValue::from(v))),
         }
     }
 }
@@ -1156,8 +1227,17 @@ impl<'a> ExactSizeIterator for ArrayIter<'a> {
     }
 }
 
+
+
 impl IArray {
     /// Returns an iterator over the array elements
+    ///
+    /// For heterogeneous arrays, this returns references to IValues instead of cloning them,
+    /// which avoids expensive deep copies for nested arrays and objects. For primitive arrays,
+    /// it creates owned IValues from the primitive values.
+    ///
+    /// The returned iterator yields `ArrayIterItem` which can be dereferenced to `&IValue`
+    /// or converted to owned `IValue` when needed.
     pub fn iter(&self) -> ArrayIter<'_> {
         use ArraySliceRef::*;
         match self.as_slice() {
@@ -1197,7 +1277,7 @@ impl IArray {
 }
 
 impl<'a> IntoIterator for &'a IArray {
-    type Item = IValue;
+    type Item = ArrayIterItem<'a>;
     type IntoIter = ArrayIter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -1345,6 +1425,59 @@ mod tests {
         // Test IntoIterator for &IArray
         let values: Vec<IValue> = (&i32_array).into_iter().collect();
         assert_eq!(values, vec![IValue::from(1i32), IValue::from(2i32), IValue::from(3i32)]);
+    }
+
+    #[test]
+    fn test_iter_efficient_behavior() {
+        // Test that iter() now avoids deep copies for heterogeneous arrays
+        let original_string = IValue::from("test_string");
+        let nested_array = IValue::from(vec![IValue::from(1), IValue::from(2)]);
+        let hetero_array: IArray = vec![original_string.clone(), nested_array.clone(), IValue::NULL].into();
+
+        // Iterate using the new efficient iterator
+        let mut iter = hetero_array.iter();
+
+        // First item should be a borrowed reference to the string
+        let first_item = iter.next().unwrap();
+        assert_eq!(*first_item, original_string);
+
+        // For strings, both should point to the same data (no deep copy)
+        if let (Some(original_str), Some(iter_str)) = (original_string.as_string(), first_item.as_string()) {
+            assert_eq!(original_str.as_ptr(), iter_str.as_ptr());
+        }
+
+        // Second item should be a borrowed reference to the nested array (no deep copy!)
+        let second_item = iter.next().unwrap();
+        assert_eq!(*second_item, nested_array);
+
+        // Third item should be NULL
+        let third_item = iter.next().unwrap();
+        assert_eq!(*third_item, IValue::NULL);
+
+        // Test that we can convert to owned values when needed
+        let collected: Vec<IValue> = hetero_array.iter().collect();
+        assert_eq!(collected.len(), 3);
+        assert_eq!(collected[0], original_string);
+        assert_eq!(collected[1], nested_array);
+        assert_eq!(collected[2], IValue::NULL);
+    }
+
+    #[test]
+    fn test_iter_creates_new_ivalues_for_primitives() {
+        // Test that iter() creates new IValue instances for primitive types
+        let i32_array: IArray = vec![42i32, 100i32].into();
+
+        // Iterate and collect values
+        let collected: Vec<IValue> = i32_array.iter().collect();
+
+        // Verify the values are correct
+        assert_eq!(collected.len(), 2);
+        assert_eq!(collected[0].to_i64(), Some(42));
+        assert_eq!(collected[1].to_i64(), Some(100));
+
+        // These should be newly created IValue instances from the primitive data
+        assert!(collected[0].is_number());
+        assert!(collected[1].is_number());
     }
 
     #[test]
