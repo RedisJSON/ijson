@@ -6,29 +6,28 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
-use std::mem;
+use std::mem::{self, transmute};
 use std::ops::Deref;
 use std::ptr::{addr_of_mut, copy_nonoverlapping, NonNull};
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::AtomicU32;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 use crate::{Defrag, DefragAllocator};
 
-use super::value::{IValue, TypeTag};
+use super::value::{IValue, TypeTag, ALIGNMENT, TAG_SIZE_BITS};
 
 #[repr(C)]
-#[repr(align(4))]
+#[repr(align(8))]
 struct Header {
-    rc: AtomicUsize,
-    // We use 48 bits for the length.
-    len_lower: u32,
-    len_upper: u16,
+    rc: AtomicU32,
+    // We use 32 bits for the length, which allows up to 4 GiB (safely covers 512MB)
+    len: u32,
 }
 
 trait HeaderRef<'a>: ThinRefExt<'a, Header> {
     fn len(&self) -> usize {
-        (u64::from(self.len_lower) | (u64::from(self.len_upper) << 32)) as usize
+        self.len as usize
     }
     fn str_ptr(&self) -> *const u8 {
         // Safety: pointers to the end of structs are allowed
@@ -53,6 +52,14 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
 
 impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
 impl<'a, T: ThinMutExt<'a, Header>> HeaderMut<'a> for T {}
+
+// Constants for inline string storage
+const INLINE_STRING_MAX_LEN: usize = 7;
+/// Check if a string can be stored inline
+fn can_inline_string(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.len() <= INLINE_STRING_MAX_LEN
+}
 
 enum StringCache {
     ThreadSafe(Mutex<HashSet<WeakIString>>),
@@ -221,9 +228,8 @@ pub struct IString(pub(crate) IValue);
 value_subtype_impls!(IString, into_string, as_string, as_string_mut);
 
 static EMPTY_HEADER: Header = Header {
-    len_lower: 0,
-    len_upper: 0,
-    rc: AtomicUsize::new(0),
+    len: 0,
+    rc: AtomicU32::new(0),
 };
 
 impl IString {
@@ -235,16 +241,15 @@ impl IString {
     }
 
     fn alloc<A: FnOnce(Layout) -> *mut u8>(s: &str, allocator: A) -> *mut Header {
-        assert!((s.len() as u64) < (1 << 48));
+        assert!((s.len()) < u32::MAX as usize);
         unsafe {
             let ptr = allocator(
                 Self::layout(s.len()).expect("layout is expected to return a valid value"),
             )
             .cast::<Header>();
             ptr.write(Header {
-                len_lower: s.len() as u32,
-                len_upper: ((s.len() as u64) >> 32) as u16,
-                rc: AtomicUsize::new(0),
+                len: s.len() as u32,
+                rc: AtomicU32::new(0),
             });
             let hd = ThinMut::new(ptr);
             copy_nonoverlapping(s.as_ptr(), hd.str_ptr_mut(), s.len());
@@ -276,10 +281,35 @@ impl IString {
         k.upgrade()
     }
 
+    /// Create an inline string by storing bytes in upper bits
+    /// Safety: String must be < 8 bytes and valid UTF-8
+    unsafe fn new_inline_string(s: &str) -> Self {
+        // 1 byte for the tag(3 bits for tag and rest for the length), 7 bytes for the string
+        let bytes = s.as_bytes();
+        let mut data_bytes = [0u8; 8];
+
+        // Set the length in the first byte (after tag bits)
+        data_bytes[0] = (s.len() << TAG_SIZE_BITS) as u8;
+        data_bytes[1..1 + bytes.len()].copy_from_slice(bytes);
+        let data: usize = usize::from_ne_bytes(data_bytes);
+
+        Self(IValue::new_ptr(data as *mut u8, TypeTag::InlineString))
+    }
+
     /// Converts a `&str` to an `IString` by interning it in the global string cache.
     #[must_use]
     pub fn intern(s: &str) -> Self {
-        Self::intern_with_allocator(s, |layout| unsafe { alloc(layout) })
+        if s.is_empty() {
+            return Self::new();
+        } else if can_inline_string(s) {
+            unsafe { Self::new_inline_string(s) }
+        } else {
+            Self::intern_with_allocator(s, |layout| unsafe { alloc(layout) })
+        }
+    }
+
+    fn is_inline(&self) -> bool {
+        (self.0.ptr_usize() % ALIGNMENT) == TypeTag::InlineString as usize
     }
 
     fn header(&self) -> ThinMut<'_, Header> {
@@ -289,7 +319,13 @@ impl IString {
     /// Returns the length (in bytes) of this string.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.header().len()
+        if self.is_inline() {
+            let data = self.0.ptr_usize() as u64;
+            let len_data = (data & 0xFF) >> TAG_SIZE_BITS;
+            len_data as usize
+        } else {
+            self.header().len()
+        }
     }
 
     /// Returns `true` if this is the empty string "".
@@ -298,16 +334,28 @@ impl IString {
         self.len() == 0
     }
 
+    /// Extract string from inline storage
+    /// Safety: Must be called on inline string(strings are valid UTF-8)
+    unsafe fn extract_inline_str(&self) -> &str {
+        let data_ptr = &self.0 as *const IValue as *const u8;
+        let bytes: &[u8; 8] = transmute(data_ptr);
+        str::from_utf8_unchecked(&bytes[1..self.len() + 1])
+    }
+
     /// Obtains a `&str` from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        self.header().str()
+        if self.is_inline() {
+            unsafe { self.extract_inline_str() }
+        } else {
+            self.header().str()
+        }
     }
 
     /// Obtains a byte slice from this `IString`. This is a cheap operation.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        self.header().bytes()
+        self.as_str().as_bytes()
     }
 
     /// Returns the empty string.
@@ -319,6 +367,8 @@ impl IString {
     pub(crate) fn clone_impl(&self) -> IValue {
         if self.is_empty() {
             Self::new().0
+        } else if self.is_inline() {
+            unsafe { self.0.raw_copy() }
         } else {
             self.header()
                 .rc
@@ -328,7 +378,7 @@ impl IString {
     }
 
     fn drop_impl_with_deallocator<D: FnOnce(*mut u8, Layout)>(&mut self, deallocator: D) {
-        if !self.is_empty() {
+        if !self.is_empty() && !self.is_inline() {
             let hd = self.header();
 
             if is_thread_safe() {
@@ -375,7 +425,7 @@ impl IString {
     }
 
     pub(crate) fn mem_allocated(&self) -> usize {
-        if self.is_empty() {
+        if self.is_empty() || self.is_inline() {
             0
         } else {
             Self::layout(self.len()).unwrap().size()
@@ -519,26 +569,121 @@ impl<A: DefragAllocator> Defrag<A> for IString {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mockalloc::record_allocs;
+
+    fn assert_no_allocs<F: FnOnce()>(f: F) {
+        let alloc_info = record_allocs(f);
+        assert_eq!(
+            alloc_info.num_allocs(),
+            0,
+            "Expected zero allocations, but {} occurred",
+            alloc_info.num_allocs()
+        );
+    }
+
+    #[test]
+    fn test_inline_string_as_str() {
+        assert_no_allocs(|| {
+            let s = IString::intern("hello");
+            assert_eq!(s.as_str(), "hello");
+        });
+    }
 
     #[mockalloc::test]
     fn can_intern() {
-        let x = IString::intern("foo");
+        let x = IString::intern("foofoofoo");
         let y = IString::intern("bar");
-        let z = IString::intern("foo");
+        let z = IString::intern("foofoofoo");
 
         assert_eq!(x.as_ptr(), z.as_ptr());
         assert_ne!(x.as_ptr(), y.as_ptr());
-        assert_eq!(x.as_str(), "foo");
+        assert_eq!(x.as_str(), "foofoofoo");
         assert_eq!(y.as_str(), "bar");
     }
 
-    #[mockalloc::test]
+    #[test]
     fn default_interns_string() {
-        let x = IString::intern("");
-        let y = IString::new();
-        let z = IString::intern("foo");
+        assert_no_allocs(|| {
+            let x = IString::intern("");
+            let y = IString::new();
+            let z = IString::intern("foo");
 
-        assert_eq!(x.as_ptr(), y.as_ptr());
-        assert_ne!(x.as_ptr(), z.as_ptr());
+            assert_eq!(x.as_ptr(), y.as_ptr());
+            assert_ne!(x.as_ptr(), z.as_ptr());
+        });
     }
+
+    #[mockalloc::test]
+    fn test_inline_strings() {
+        // Test strings that should be stored inline (≤ 7 bytes)
+        let short_strings = ["", "a", "hi", "hello", "world", "1234567", "12345678"];
+
+        for s in &short_strings {
+            let istr = IString::intern(s);
+
+            if s.is_empty() {
+                // Empty strings use static header, not inline
+                assert!(!istr.is_inline());
+            } else if s.len() <= INLINE_STRING_MAX_LEN {
+                assert!(istr.is_inline(), "String '{}' should be inline", s);
+                assert_eq!(istr.as_str(), *s);
+                assert_eq!(istr.len(), s.len());
+                assert_eq!(istr.as_bytes(), s.as_bytes());
+
+                // Inline strings should have minimal memory overhead
+                assert_eq!(istr.mem_allocated(), 0);
+            } else {
+                assert!(!istr.is_inline(), "String '{}' should not be inline", s);
+            }
+        }
+    }
+
+    #[mockalloc::test]
+    fn test_heap_strings() {
+        // Test strings that should be stored on heap (> 7 bytes)
+        let long_string = "a".repeat(100);
+        let long_strings = ["12345678", "toolongstring", &long_string];
+
+        for s in &long_strings {
+            let istr = IString::intern(s);
+            assert!(!istr.is_inline(), "String '{}' should not be inline", s);
+            assert_eq!(istr.as_str(), *s);
+            assert_eq!(istr.len(), s.len());
+            assert_eq!(istr.as_bytes(), s.as_bytes());
+
+            // Heap strings should have memory overhead
+            assert!(istr.mem_allocated() > 0);
+        }
+    }
+
+    #[mockalloc::test]
+    fn test_utf8_boundary_safety() {
+        // Test that we don't inline strings that would break UTF-8 boundaries
+        let emoji = "🦀"; // 4 bytes in UTF-8
+        let multi_emoji = "🦀🔥"; // 8 bytes in UTF-8 - too long for inline
+
+        let crab = IString::intern(emoji);
+        assert!(crab.is_inline(), "Single emoji should be inline");
+        assert_eq!(crab.as_str(), emoji);
+
+        let fire_crab = IString::intern(multi_emoji);
+        assert!(!fire_crab.is_inline(), "Two emojis should not be inline");
+        assert_eq!(fire_crab.as_str(), multi_emoji);
+    }
+
+    #[test]
+    fn test_inline_string_cloning() {
+        assert_no_allocs(|| {
+            let original = IString::intern("hello");
+            assert!(original.is_inline());
+
+            let cloned = original.clone();
+            assert!(cloned.is_inline());
+            assert_eq!(original.as_str(), cloned.as_str());
+
+            // Both should point to the same inline data
+            assert_eq!(original.0.ptr_usize(), cloned.0.ptr_usize());
+        });
+    }
+
 }
