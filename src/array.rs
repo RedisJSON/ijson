@@ -1108,6 +1108,147 @@ impl<'a> ArrayIterItem<'a> {
     }
 }
 
+/// Mutable iterator item that can hold either a mutable reference to an IValue or a mutable reference to a primitive type
+/// This allows mutable iteration over both heterogeneous and homogeneous arrays
+#[derive(Debug)]
+pub enum ArrayIterItemMut<'a> {
+    /// Mutable reference to an IValue (for heterogeneous arrays)
+    Heterogeneous(&'a mut IValue),
+    /// Mutable reference to an i8 value
+    I8(&'a mut i8),
+    /// Mutable reference to a u8 value
+    U8(&'a mut u8),
+    /// Mutable reference to an i16 value
+    I16(&'a mut i16),
+    /// Mutable reference to a u16 value
+    U16(&'a mut u16),
+    /// Mutable reference to an i32 value
+    I32(&'a mut i32),
+    /// Mutable reference to a u32 value
+    U32(&'a mut u32),
+    /// Mutable reference to an f32 value
+    F32(&'a mut f32),
+    /// Mutable reference to an i64 value
+    I64(&'a mut i64),
+    /// Mutable reference to a u64 value
+    U64(&'a mut u64),
+    /// Mutable reference to an f64 value
+    F64(&'a mut f64),
+}
+
+impl<'a> ArrayIterItemMut<'a> {
+    /// Get a reference to the underlying value as an IValue
+    /// For primitive types, this creates a temporary IValue
+    pub fn as_ivalue(&self) -> IValue {
+        match self {
+            ArrayIterItemMut::Heterogeneous(val) => (*val).clone(),
+            ArrayIterItemMut::I8(val) => IValue::from(**val),
+            ArrayIterItemMut::U8(val) => IValue::from(**val),
+            ArrayIterItemMut::I16(val) => IValue::from(**val),
+            ArrayIterItemMut::U16(val) => IValue::from(**val),
+            ArrayIterItemMut::I32(val) => IValue::from(**val),
+            ArrayIterItemMut::U32(val) => IValue::from(**val),
+            ArrayIterItemMut::F32(val) => IValue::from(**val),
+            ArrayIterItemMut::I64(val) => IValue::from(**val),
+            ArrayIterItemMut::U64(val) => IValue::from(**val),
+            ArrayIterItemMut::F64(val) => IValue::from(**val),
+        }
+    }
+
+    /// Set the value from an IValue, if the types are compatible
+    /// Returns true if the assignment was successful, false otherwise
+    pub fn set_from_ivalue(&mut self, value: &IValue) -> bool {
+        match self {
+            ArrayIterItemMut::Heterogeneous(val) => {
+                **val = value.clone();
+                true
+            }
+            ArrayIterItemMut::I8(val) => {
+                if let Some(v) = value.to_i64() {
+                    if v >= i8::MIN as i64 && v <= i8::MAX as i64 {
+                        **val = v as i8;
+                        return true;
+                    }
+                }
+                false
+            }
+            ArrayIterItemMut::U8(val) => {
+                if let Some(v) = value.to_u64() {
+                    if v <= u8::MAX as u64 {
+                        **val = v as u8;
+                        return true;
+                    }
+                }
+                false
+            }
+            ArrayIterItemMut::I16(val) => {
+                if let Some(v) = value.to_i64() {
+                    if v >= i16::MIN as i64 && v <= i16::MAX as i64 {
+                        **val = v as i16;
+                        return true;
+                    }
+                }
+                false
+            }
+            ArrayIterItemMut::U16(val) => {
+                if let Some(v) = value.to_u64() {
+                    if v <= u16::MAX as u64 {
+                        **val = v as u16;
+                        return true;
+                    }
+                }
+                false
+            }
+            ArrayIterItemMut::I32(val) => {
+                if let Some(v) = value.to_i64() {
+                    if v >= i32::MIN as i64 && v <= i32::MAX as i64 {
+                        **val = v as i32;
+                        return true;
+                    }
+                }
+                false
+            }
+            ArrayIterItemMut::U32(val) => {
+                if let Some(v) = value.to_u64() {
+                    if v <= u32::MAX as u64 {
+                        **val = v as u32;
+                        return true;
+                    }
+                }
+                false
+            }
+            ArrayIterItemMut::F32(val) => {
+                if let Some(v) = value.to_f64_lossy() {
+                    **val = v as f32;
+                    return true;
+                }
+                false
+            }
+            ArrayIterItemMut::I64(val) => {
+                if let Some(v) = value.to_i64() {
+                    **val = v;
+                    return true;
+                }
+                false
+            }
+            ArrayIterItemMut::U64(val) => {
+                if let Some(v) = value.to_u64() {
+                    **val = v;
+                    return true;
+                }
+                false
+            }
+            ArrayIterItemMut::F64(val) => {
+                if let Some(v) = value.to_f64_lossy() {
+                    **val = v;
+                    return true;
+                }
+                false
+            }
+        }
+    }
+}
+
 impl<'a> AsRef<IValue> for ArrayIterItem<'a> {
     fn as_ref(&self) -> &IValue {
         self.as_ref()
@@ -1185,6 +1326,34 @@ pub enum ArrayIter<'a> {
     F64(std::slice::Iter<'a, f64>),
 }
 
+/// Mutable iterator over array elements, yielding ArrayIterItemMut objects
+/// This allows mutable iteration over both heterogeneous and homogeneous arrays
+#[derive(Debug)]
+pub enum ArrayIterMut<'a> {
+    /// Mutable iterator over heterogeneous array
+    Heterogeneous(std::slice::IterMut<'a, IValue>),
+    /// Mutable iterator over i8 array
+    I8(std::slice::IterMut<'a, i8>),
+    /// Mutable iterator over u8 array
+    U8(std::slice::IterMut<'a, u8>),
+    /// Mutable iterator over i16 array
+    I16(std::slice::IterMut<'a, i16>),
+    /// Mutable iterator over u16 array
+    U16(std::slice::IterMut<'a, u16>),
+    /// Mutable iterator over i32 array
+    I32(std::slice::IterMut<'a, i32>),
+    /// Mutable iterator over u32 array
+    U32(std::slice::IterMut<'a, u32>),
+    /// Mutable iterator over f32 array
+    F32(std::slice::IterMut<'a, f32>),
+    /// Mutable iterator over i64 array
+    I64(std::slice::IterMut<'a, i64>),
+    /// Mutable iterator over u64 array
+    U64(std::slice::IterMut<'a, u64>),
+    /// Mutable iterator over f64 array
+    F64(std::slice::IterMut<'a, f64>),
+}
+
 impl<'a> Iterator for ArrayIter<'a> {
     type Item = ArrayIterItem<'a>;
 
@@ -1208,9 +1377,51 @@ impl<'a> Iterator for ArrayIter<'a> {
     }
 }
 
+impl<'a> Iterator for ArrayIterMut<'a> {
+    type Item = ArrayIterItemMut<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        use ArrayIterMut::*;
+        match self {
+            // For heterogeneous arrays, return mutable references
+            Heterogeneous(iter) => iter.next().map(ArrayIterItemMut::Heterogeneous),
+            // For primitive types, return mutable references to the primitives
+            I8(iter) => iter.next().map(ArrayIterItemMut::I8),
+            U8(iter) => iter.next().map(ArrayIterItemMut::U8),
+            I16(iter) => iter.next().map(ArrayIterItemMut::I16),
+            U16(iter) => iter.next().map(ArrayIterItemMut::U16),
+            I32(iter) => iter.next().map(ArrayIterItemMut::I32),
+            U32(iter) => iter.next().map(ArrayIterItemMut::U32),
+            F32(iter) => iter.next().map(ArrayIterItemMut::F32),
+            I64(iter) => iter.next().map(ArrayIterItemMut::I64),
+            U64(iter) => iter.next().map(ArrayIterItemMut::U64),
+            F64(iter) => iter.next().map(ArrayIterItemMut::F64),
+        }
+    }
+}
+
 impl<'a> ExactSizeIterator for ArrayIter<'a> {
     fn len(&self) -> usize {
         use ArrayIter::*;
+        match self {
+            Heterogeneous(iter) => iter.len(),
+            I8(iter) => iter.len(),
+            U8(iter) => iter.len(),
+            I16(iter) => iter.len(),
+            U16(iter) => iter.len(),
+            I32(iter) => iter.len(),
+            U32(iter) => iter.len(),
+            F32(iter) => iter.len(),
+            I64(iter) => iter.len(),
+            U64(iter) => iter.len(),
+            F64(iter) => iter.len(),
+        }
+    }
+}
+
+impl<'a> ExactSizeIterator for ArrayIterMut<'a> {
+    fn len(&self) -> usize {
+        use ArrayIterMut::*;
         match self {
             Heterogeneous(iter) => iter.len(),
             I8(iter) => iter.len(),
@@ -1287,22 +1498,33 @@ impl<'a> IntoIterator for &'a IArray {
 
 impl IArray {
     /// Returns a mutable iterator over the array elements.
-    /// Only works for heterogeneous arrays (arrays containing IValue objects).
-    /// For typed arrays, use `as_mut_slice()` to get direct access to the underlying slice.
-    pub fn iter_mut(&mut self) -> Option<std::slice::IterMut<'_, IValue>> {
+    /// Works for both heterogeneous arrays (arrays containing IValue objects) and homogeneous arrays (typed arrays).
+    /// For heterogeneous arrays, yields mutable references to IValues.
+    /// For typed arrays, yields mutable references to the primitive types.
+    pub fn iter_mut(&mut self) -> ArrayIterMut<'_> {
+        use ArraySliceMut::*;
         match self.as_mut_slice() {
-            ArraySliceMut::Heterogeneous(slice) => Some(slice.iter_mut()),
-            _ => None,
+            Heterogeneous(slice) => ArrayIterMut::Heterogeneous(slice.iter_mut()),
+            I8(slice) => ArrayIterMut::I8(slice.iter_mut()),
+            U8(slice) => ArrayIterMut::U8(slice.iter_mut()),
+            I16(slice) => ArrayIterMut::I16(slice.iter_mut()),
+            U16(slice) => ArrayIterMut::U16(slice.iter_mut()),
+            I32(slice) => ArrayIterMut::I32(slice.iter_mut()),
+            U32(slice) => ArrayIterMut::U32(slice.iter_mut()),
+            F32(slice) => ArrayIterMut::F32(slice.iter_mut()),
+            I64(slice) => ArrayIterMut::I64(slice.iter_mut()),
+            U64(slice) => ArrayIterMut::U64(slice.iter_mut()),
+            F64(slice) => ArrayIterMut::F64(slice.iter_mut()),
         }
     }
 }
 
 impl<'a> IntoIterator for &'a mut IArray {
-    type Item = &'a mut IValue;
-    type IntoIter = std::slice::IterMut<'a, IValue>;
+    type Item = ArrayIterItemMut<'a>;
+    type IntoIter = ArrayIterMut<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.iter_mut().expect("Mutable iteration is only supported for heterogeneous arrays. Use as_mut_slice() for typed arrays.")
+        self.iter_mut()
     }
 }
 
@@ -1486,11 +1708,14 @@ mod tests {
         let mut hetero_array: IArray = vec![IValue::from(1), IValue::from(2), IValue::from(3)].into();
 
         // Test iter_mut() method
-        if let Some(iter) = hetero_array.iter_mut() {
-            for value in iter {
-                if let Some(n) = value.to_f64_lossy() {
-                    *value = IValue::from(n + 1.0);
+        for mut_item in hetero_array.iter_mut() {
+            match mut_item {
+                ArrayIterItemMut::Heterogeneous(value) => {
+                    if let Some(n) = value.to_f64_lossy() {
+                        *value = IValue::from(n + 1.0);
+                    }
                 }
+                _ => {} // Should not happen for heterogeneous array
             }
         }
 
@@ -1498,27 +1723,103 @@ mod tests {
         assert_eq!(collected, vec![IValue::from(2), IValue::from(3), IValue::from(4)]);
 
         // Test IntoIterator for &mut IArray on heterogeneous array
-        for value in &mut hetero_array {
-            if let Some(n) = value.to_f64_lossy() {
-                *value = IValue::from(n * 2.0);
+        for mut_item in &mut hetero_array {
+            match mut_item {
+                ArrayIterItemMut::Heterogeneous(value) => {
+                    if let Some(n) = value.to_f64_lossy() {
+                        *value = IValue::from(n * 2.0);
+                    }
+                }
+                _ => {} // Should not happen for heterogeneous array
             }
         }
 
         let collected: Vec<IValue> = hetero_array.iter().collect();
         assert_eq!(collected, vec![IValue::from(4), IValue::from(6), IValue::from(8)]);
 
-        // Test that iter_mut() returns None for typed arrays
+        // Test mutable iteration over typed arrays
         let mut i32_array: IArray = vec![1i32, 2i32, 3i32].into();
-        assert!(i32_array.iter_mut().is_none());
+        for mut_item in i32_array.iter_mut() {
+            match mut_item {
+                ArrayIterItemMut::I32(value) => {
+                    *value += 10;
+                }
+                _ => {} // Should not happen for i32 array
+            }
+        }
+
+        // Verify the changes
+        match i32_array.as_slice() {
+            ArraySliceRef::I32(slice) => {
+                assert_eq!(slice, &[11, 12, 13]);
+            }
+            _ => panic!("Expected i32 array"),
+        }
     }
 
     #[test]
-    #[should_panic(expected = "Mutable iteration is only supported for heterogeneous arrays")]
-    fn test_mutable_iteration_panic_on_typed_array() {
+    fn test_mutable_iteration_on_typed_array() {
         let mut i32_array: IArray = vec![1i32, 2i32, 3i32].into();
-        // This should panic
-        for _value in &mut i32_array {
-            // This shouldn't be reached
+
+        // This should now work (no longer panics)
+        let mut count = 0;
+        for mut_item in &mut i32_array {
+            match mut_item {
+                ArrayIterItemMut::I32(value) => {
+                    *value *= 2;
+                    count += 1;
+                }
+                _ => panic!("Expected i32 values"),
+            }
+        }
+
+        assert_eq!(count, 3);
+
+        // Verify the changes
+        match i32_array.as_slice() {
+            ArraySliceRef::I32(slice) => {
+                assert_eq!(slice, &[2, 4, 6]);
+            }
+            _ => panic!("Expected i32 array"),
+        }
+    }
+
+    #[test]
+    fn test_mutable_iteration_different_types() {
+        // Test f64 array
+        let mut f64_array: IArray = vec![1.5f64, 2.5f64, 3.5f64].into();
+        for mut_item in f64_array.iter_mut() {
+            match mut_item {
+                ArrayIterItemMut::F64(value) => {
+                    *value += 0.5;
+                }
+                _ => panic!("Expected f64 values"),
+            }
+        }
+
+        match f64_array.as_slice() {
+            ArraySliceRef::F64(slice) => {
+                assert_eq!(slice, &[2.0, 3.0, 4.0]);
+            }
+            _ => panic!("Expected f64 array"),
+        }
+
+        // Test u8 array
+        let mut u8_array: IArray = vec![10u8, 20u8, 30u8].into();
+        for mut_item in u8_array.iter_mut() {
+            match mut_item {
+                ArrayIterItemMut::U8(value) => {
+                    *value = value.saturating_add(5);
+                }
+                _ => panic!("Expected u8 values"),
+            }
+        }
+
+        match u8_array.as_slice() {
+            ArraySliceRef::U8(slice) => {
+                assert_eq!(slice, &[15, 25, 35]);
+            }
+            _ => panic!("Expected u8 array"),
         }
     }
 
@@ -1546,6 +1847,31 @@ mod tests {
 
         let hetero_f64_values: Vec<IValue> = hetero_from_f64.iter().collect();
         assert_eq!(hetero_f64_values, f64_values);
+    }
+
+    #[test]
+    fn test_typed_array_deserialization() {
+        use serde::Deserialize;
+        
+        // Test that we can deserialize from a typed i32 array directly
+        let i32_array: IArray = vec![1i32, 2i32, 3i32].into();
+        let deserialized_vec: Vec<i32> = Deserialize::deserialize(&i32_array).unwrap();
+        assert_eq!(deserialized_vec, vec![1, 2, 3]);
+
+        // Test with f64 array
+        let f64_array: IArray = vec![1.5f64, 2.5f64, 3.5f64].into();
+        let deserialized_f64: Vec<f64> = Deserialize::deserialize(&f64_array).unwrap();
+        assert_eq!(deserialized_f64, vec![1.5, 2.5, 3.5]);
+
+        // Test with u8 array
+        let u8_array: IArray = vec![10u8, 20u8, 30u8].into();
+        let deserialized_u8: Vec<u8> = Deserialize::deserialize(&u8_array).unwrap();
+        assert_eq!(deserialized_u8, vec![10, 20, 30]);
+
+        // Test that heterogeneous arrays still work
+        let hetero_array: IArray = vec![IValue::from(1), IValue::from(2), IValue::from(3)].into();
+        let deserialized_hetero: Vec<i32> = Deserialize::deserialize(&hetero_array).unwrap();
+        assert_eq!(deserialized_hetero, vec![1, 2, 3]);
     }
 
     #[mockalloc::test]

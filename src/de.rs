@@ -554,6 +554,69 @@ impl<'de> Deserializer<'de> for &'de IString {
     }
 }
 
+/// Implement IntoDeserializer for IValue to support owned value deserialization
+impl IntoDeserializer<'_, Error> for IValue {
+    type Deserializer = OwnedIValueDeserializer;
+
+    fn into_deserializer(self) -> Self::Deserializer {
+        OwnedIValueDeserializer(self)
+    }
+}
+
+/// Deserializer wrapper for owned IValue
+#[derive(Debug)]
+pub struct OwnedIValueDeserializer(IValue);
+
+impl<'de> Deserializer<'de> for OwnedIValueDeserializer {
+    type Error = Error;
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: Visitor<'de>,
+    {
+        use super::value::Destructured::*;
+        use serde::de::value::*;
+
+        // We can't use the reference-based deserializer because of lifetime issues,
+        // so we need to handle the deserialization directly
+        match self.0.destructure() {
+            Null => visitor.visit_unit(),
+            Bool(b) => visitor.visit_bool(b),
+            Number(n) => {
+                if n.has_decimal_point() {
+                    visitor.visit_f64(n.to_f64().unwrap())
+                } else if let Some(i) = n.to_i64() {
+                    visitor.visit_i64(i)
+                } else {
+                    visitor.visit_u64(n.to_u64().unwrap())
+                }
+            }
+            String(s) => visitor.visit_str(s.as_str()),
+            Array(arr) => {
+                // For all arrays, convert to owned values and use SeqDeserializer
+                // This avoids lifetime issues with temporary references
+                let values: Vec<IValue> = arr.iter().map(|item| item.into_owned()).collect();
+                let mut seq_deserializer = SeqDeserializer::new(values.into_iter());
+                visitor.visit_seq(&mut seq_deserializer)
+            }
+            Object(obj) => {
+                // Convert object to owned key-value pairs and use MapDeserializer
+                let pairs: Vec<(IValue, IValue)> = obj.iter()
+                    .map(|(k, v)| (IValue::from(k.as_str()), v.clone()))
+                    .collect();
+                let mut map_deserializer = MapDeserializer::new(pairs.into_iter());
+                visitor.visit_map(&mut map_deserializer)
+            }
+        }
+    }
+
+    forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf option unit unit_struct newtype_struct seq tuple
+        tuple_struct map struct enum identifier ignored_any
+    }
+}
+
 impl<'de> Deserializer<'de> for &'de IArray {
     type Error = Error;
 
@@ -567,7 +630,7 @@ impl<'de> Deserializer<'de> for &'de IArray {
 
         match self.as_slice() {
             ArraySliceRef::Heterogeneous(slice) => {
-                // For heterogeneous arrays, use the slice directly
+                // For heterogeneous arrays, use the slice directly (most efficient)
                 let mut deserializer = ArrayAccess::new(slice);
                 let seq = visitor.visit_seq(&mut deserializer)?;
                 let remaining = deserializer.remaining_len();
@@ -578,13 +641,11 @@ impl<'de> Deserializer<'de> for &'de IArray {
                 }
             }
             _ => {
-                // For typed arrays, we need to convert to heterogeneous representation
-                // This is a limitation of the current deserialization design
-                Err(SError::custom(
-                    "Deserialization from typed arrays is not supported. \
-                     Convert to heterogeneous array first using .iter().collect::<IArray>() \
-                     or access the typed data directly using .as_slice()"
-                ))
+                // For typed arrays, we need to work around serde's lifetime constraints
+                // by creating a temporary heterogeneous array and deserializing from that
+                let values: Vec<IValue> = self.iter().map(|item| item.into_owned()).collect();
+                let mut seq_deserializer = serde::de::value::SeqDeserializer::new(values.into_iter());
+                visitor.visit_seq(&mut seq_deserializer)
             }
         }
     }
