@@ -64,6 +64,97 @@ impl ArrayTag {
             _ => Heterogeneous,
         }
     }
+
+    /// Determines if this type can be promoted to accommodate a value of the given type.
+    /// Returns the promoted type if compatible, or Heterogeneous if incompatible.
+    /// - Same types are compatible
+    /// - Within integers of same signedness: promote to larger size
+    /// - uN can promote to iM if M > N (e.g., u8 -> i16, u16 -> i32, u32 -> i64)
+    /// - iN and uM are incompatible if M >= N (e.g., i16 and u16 are incompatible)
+    /// - Within floats: promote to larger size
+    /// - Integers and floats are incompatible (promotes to heterogeneous)
+    fn promote_with(self, other: ArrayTag) -> ArrayTag {
+        use ArrayTag::*;
+        match (self, other) {
+            _ if self == other => self,
+            (Heterogeneous, _) | (_, Heterogeneous) => Heterogeneous,
+            (I8 | U8 | I16 | U16 | I32 | U32 | I64 | U64, F32 | F64) |
+            (F32 | F64, I8 | U8 | I16 | U16 | I32 | U32 | I64 | U64) => Heterogeneous,
+            (F32 | F64, F32 | F64) => F64,
+            (x, y) if x.is_signed_integer() && y.is_signed_integer() => x.max_signed_integer(y),
+            (x, y) if x.is_unsigned_integer() && y.is_unsigned_integer() => x.max_unsigned_integer(y),
+            (x, y) if x.is_unsigned_integer() && y.is_signed_integer() => x.promote_unsigned(y),
+            (x, y) if x.is_signed_integer() && y.is_unsigned_integer() => y.promote_unsigned(x),
+            _ => Heterogeneous,
+        }
+    }
+
+    fn is_signed_integer(self) -> bool {
+        use ArrayTag::*;
+        matches!(self, I8 | I16 | I32 | I64)
+    }
+
+    fn is_unsigned_integer(self) -> bool {
+        use ArrayTag::*;
+        matches!(self, U8 | U16 | U32 | U64)
+    }
+
+    fn promote_unsigned(self, signed_type: ArrayTag) -> ArrayTag {
+        use ArrayTag::*;
+        match (self, signed_type) {
+            (U8, I8) => I16,
+            (U16, I8 | I16) => I32,
+            (U32, I8 | I16 | I32) => I64,
+            (U8, I16 | I32 | I64) | (U16, I32 | I64) | (U32, I64) => signed_type,
+            _ => Heterogeneous,
+        }
+    }
+
+    fn max_signed_integer(self, other: ArrayTag) -> ArrayTag {
+        use ArrayTag::*;
+        match (self, other) {
+            _ if self == other => self,
+            (I8, I16) | (I16, I8) => I16,
+            (I8 | I16, I32) | (I32, I8 | I16) => I32,
+            (I8 | I16 | I32, I64) | (I64, I8 | I16 | I32) => I64,
+            _ => panic!("max_signed_integer called with non-signed integers"),
+        }
+    }
+
+    fn max_unsigned_integer(self, other: ArrayTag) -> ArrayTag {
+        use ArrayTag::*;
+        match (self, other) {
+            _ if self == other => self,
+            (U8, U16) | (U16, U8) => U16,
+            (U8 | U16, U32) | (U32, U8 | U16) => U32,
+            (U8 | U16 | U32, U64) | (U64, U8 | U16 | U32) => U64,
+            _ => panic!("max_unsigned_integer called with non-unsigned integers"),
+        }
+    }
+
+    /// Determines the ArrayTag for an IValue if it represents a primitive type
+    /// Prefers signed types over unsigned types for positive values to be more conservative
+    fn from_ivalue(value: &IValue) -> ArrayTag {
+        use ArrayTag::*;
+        if let Some(num) = value.as_number() {
+            if num.has_decimal_point() {
+                num.to_f32().map(|_| F32)
+                    .or_else(|| num.to_f64().map(|_| F64))
+            } else {
+                num.to_i8().map(|_| I8)
+                    .or_else(|| num.to_u8().map(|_| U8))
+                    .or_else(|| num.to_i16().map(|_| I16))
+                    .or_else(|| num.to_u16().map(|_| U16))
+                    .or_else(|| num.to_i32().map(|_| I32))
+                    .or_else(|| num.to_u32().map(|_| U32))
+                    .or_else(|| num.to_i64().map(|_| I64))
+                    .or_else(|| num.to_u64().map(|_| U64))
+            }
+            .unwrap_or_else(|| panic!("Number type without primitive representation"))
+        } else {
+            Heterogeneous
+        }
+    }
 }
 
 /// Enum representing different types of array slices that can be returned from typed arrays
@@ -291,6 +382,10 @@ impl Header {
             | (((cap as u64) & Self::CAP_MASK) << Self::CAP_SHIFT);
     }
 
+    fn set_tag(&mut self, tag: ArrayTag) {
+        self.packed = (self.packed & !(Self::TAG_MASK << Self::TAG_SHIFT))
+            | ((tag as u64) & Self::TAG_MASK) << Self::TAG_SHIFT;
+    }
 }
 
 trait HeaderRef<'a>: ThinRefExt<'a, Header> {
@@ -352,12 +447,36 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
     unsafe fn push(&mut self, item: IValue) {
         use ArrayTag::*;
         let index = self.len();
+
+        macro_rules! push_typed {
+            ($tag:ident) => {
+                if let Some(val) = paste::paste!(item.[<to_$tag>]()) {
+                    let array_ptr = self.reborrow().raw_array_ptr_mut().cast::<$tag>();
+                    array_ptr.add(index).write(val);
+                } else {
+                    panic!("Cannot push non-{} value to {} array", stringify!($tag), stringify!($tag));
+                }
+            };
+        }
+
         match self.type_tag() {
-            Heterogeneous => self.reborrow().array_ptr_mut().add(index).write(item),
-            _ => panic!("Can only push IValue items onto heterogeneous arrays"),
+            Heterogeneous => {
+                self.reborrow().array_ptr_mut().add(index).write(item);
+            }
+            I8 => push_typed!(i8),
+            U8 => push_typed!(u8),
+            I16 => push_typed!(i16),
+            U16 => push_typed!(u16),
+            I32 => push_typed!(i32),
+            U32 => push_typed!(u32),
+            F32 => push_typed!(f32),
+            I64 => push_typed!(i64),
+            U64 => push_typed!(u64),
+            F64 => push_typed!(f64),
         }
         self.set_len(index + 1);
     }
+    
     fn pop(&mut self) -> Option<IValue> {
         if self.len() == 0 {
             None
@@ -525,6 +644,85 @@ impl IArray {
         self.header().cap()
     }
 
+    /// Converts this array to a new type, promoting all existing elements.
+    /// This is used for automatic type promotion when incompatible types are added.
+    fn promote_to_type(&mut self, new_tag: ArrayTag) {
+        if self.is_static() || self.header().type_tag() == new_tag {
+            return;
+        }
+
+        let current_len = self.len();
+        if current_len == 0 {
+            let new_cap = self.capacity() * self.header().type_tag().element_size() / new_tag.element_size();
+            unsafe { 
+                self.header_mut().set_cap(new_cap);
+                self.header_mut().set_tag(new_tag);
+            }
+            return;
+        }
+
+        let mut new_array = Self::with_capacity_and_tag(current_len, new_tag);
+        unsafe {
+            let src_hd = self.header();
+            let src_tag = src_hd.type_tag();
+
+            if new_tag == ArrayTag::Heterogeneous {
+                let mut dst_hd = new_array.header_mut();
+                for item in self.iter() {
+                    dst_hd.push(item.into_owned());
+                }
+            } else {
+                self.convert_primitive_array(&mut new_array, src_tag, new_tag, current_len);
+            }
+        }
+
+        *self = new_array;
+    }
+
+    /// Converts primitive array elements from one type to another
+    unsafe fn convert_primitive_array(&self, dst: &mut IArray, src_tag: ArrayTag, dst_tag: ArrayTag, len: usize) {
+        use ArrayTag::*;
+
+        macro_rules! convert_array {
+            ($src_type:ty, $dst_type:ty, $src_variant:ident, $dst_variant:ident) => {
+                if let ArraySliceRef::$src_variant(src_slice) = self.header().items_slice() {
+                    let dst_ptr = dst.header_mut().raw_array_ptr_mut().cast::<$dst_type>();
+                    for (i, &val) in src_slice.iter().enumerate() {
+                        dst_ptr.add(i).write(val as $dst_type);
+                    }
+                    dst.header_mut().set_len(len);
+                }
+            };
+        }
+
+        match (src_tag, dst_tag) {
+            (I8, I16) => convert_array!(i8, i16, I8, I16),
+            (I8, I32) => convert_array!(i8, i32, I8, I32),
+            (I8, I64) => convert_array!(i8, i64, I8, I64),
+            (I16, I32) => convert_array!(i16, i32, I16, I32),
+            (I16, I64) => convert_array!(i16, i64, I16, I64),
+            (I32, I64) => convert_array!(i32, i64, I32, I64),
+
+            (U8, U16) => convert_array!(u8, u16, U8, U16),
+            (U8, U32) => convert_array!(u8, u32, U8, U32),
+            (U8, U64) => convert_array!(u8, u64, U8, U64),
+            (U16, U32) => convert_array!(u16, u32, U16, U32),
+            (U16, U64) => convert_array!(u16, u64, U16, U64),
+            (U32, U64) => convert_array!(u32, u64, U32, U64),
+
+            (U8, I16) => convert_array!(u8, i16, U8, I16),
+            (U8, I32) => convert_array!(u8, i32, U8, I32),
+            (U8, I64) => convert_array!(u8, i64, U8, I64),
+            (U16, I32) => convert_array!(u16, i32, U16, I32),
+            (U16, I64) => convert_array!(u16, i64, U16, I64),
+            (U32, I64) => convert_array!(u32, i64, U32, I64),
+
+            (F32, F64) => convert_array!(f32, f64, F32, F64),
+
+            _ => panic!("Unsupported type promotion from {:?} to {:?}", src_tag, dst_tag),
+        }
+    }
+
     /// Returns the number of items currently stored in the array.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -612,6 +810,13 @@ impl IArray {
     /// arrays, insertions near the front will be slow as it will require shifting
     /// a large number of items.
     pub fn insert(&mut self, index: usize, item: impl Into<IValue>) {
+        let item = item.into();
+        let current_tag = self.header().type_tag();
+
+        if !(current_tag == ArrayTag::Heterogeneous || self.can_push_directly(&item, current_tag)) {
+            self.promote_to_type(current_tag.promote_with(ArrayTag::from_ivalue(&item)));
+        }
+
         self.reserve(1);
 
         unsafe {
@@ -620,12 +825,21 @@ impl IArray {
             assert!(index <= hd.len());
 
             // Safety: We just reserved enough space for at least one extra item
-            hd.push(item.into());
+            hd.push(item);
             if index < hd.len() {
                 use ArraySliceMut::*;
                 match hd.reborrow().items_slice_mut() {
                     Heterogeneous(slice) => slice[index..].rotate_right(1),
-                    _ => panic!("Can only push IValue items onto heterogeneous arrays"),
+                    I8(slice) => slice[index..].rotate_right(1),
+                    U8(slice) => slice[index..].rotate_right(1),
+                    I16(slice) => slice[index..].rotate_right(1),
+                    U16(slice) => slice[index..].rotate_right(1),
+                    I32(slice) => slice[index..].rotate_right(1),
+                    U32(slice) => slice[index..].rotate_right(1),
+                    F32(slice) => slice[index..].rotate_right(1),
+                    I64(slice) => slice[index..].rotate_right(1),
+                    U64(slice) => slice[index..].rotate_right(1),
+                    F64(slice) => slice[index..].rotate_right(1),
                 };
             }
         }
@@ -702,11 +916,38 @@ impl IArray {
 
     /// Pushes a new item onto the back of the array.
     pub fn push(&mut self, item: impl Into<IValue>) {
-        self.reserve(1);
-        // Safety: We just reserved enough space for at least one extra item
-        unsafe {
-            self.header_mut().push(item.into());
+        let item = item.into();
+        let current_tag = self.header().type_tag();
+
+        if !(current_tag == ArrayTag::Heterogeneous || self.can_push_directly(&item, current_tag)) {
+            self.promote_to_type(current_tag.promote_with(ArrayTag::from_ivalue(&item)));
         }
+
+        self.reserve(1);
+        unsafe {
+            self.header_mut().push(item);
+        }
+    }
+
+    /// Check if an item can be pushed directly to a typed array without promotion
+    /// This is a simple check: can the value fit in the array type?
+    fn can_push_directly(&self, item: &IValue, array_tag: ArrayTag) -> bool {
+        use ArrayTag::*;
+        item.as_number().map_or(false, |num| {
+            match array_tag {
+                I8 => num.to_i8().is_some(),
+                U8 => num.to_u8().is_some(),
+                I16 => num.to_i16().is_some(),
+                U16 => num.to_u16().is_some(),
+                I32 => num.to_i32().is_some(),
+                U32 => num.to_u32().is_some(),
+                I64 => num.to_i64().is_some(),
+                U64 => num.to_u64().is_some(),
+                F32 => num.has_decimal_point() && num.to_f32().is_some(),
+                F64 => num.has_decimal_point() && num.to_f64().is_some(),
+                Heterogeneous => true,
+            }
+        })
     }
 
     /// Pops the last item from the array and returns it. If the array is
@@ -903,27 +1144,89 @@ macro_rules! extend_impl {
             fn extend<T: IntoIterator<Item = $ty>>(&mut self, iter: T) {
                 let expected_tag = ArrayTag::from_type::<$ty>();
                 let actual_tag = self.header().type_tag();
-                if actual_tag != expected_tag {
-                    panic!("Type tag mismatch, expected {:?} but found {:?}", expected_tag, actual_tag);
-                }
-                let iter = iter.into_iter();
-                self.reserve(iter.size_hint().0);
 
-                // For typed arrays, store raw primitive values directly
-                unsafe {
-                    let start_index = self.header().len();
-                    let hd = self.header_mut();
-                    let array_ptr = hd.raw_array_ptr_mut().cast::<$ty>();
-                    let mut index = start_index;
+                // If types match exactly, use optimized path
+                if actual_tag == expected_tag {
+                    let iter = iter.into_iter();
+                    self.reserve(iter.size_hint().0);
 
-                    for v in iter {
-                        array_ptr.add(index).write(v);
-                        index += 1;
+                    // For typed arrays, store raw primitive values directly
+                    unsafe {
+                        let start_index = self.header().len();
+                        let hd = self.header_mut();
+                        let array_ptr = hd.raw_array_ptr_mut().cast::<$ty>();
+                        let mut index = start_index;
+
+                        for v in iter {
+                            array_ptr.add(index).write(v);
+                            index += 1;
+                        }
+
+                        // Update length after writing all values
+                        let mut hd = self.header_mut();
+                        hd.set_len(index);
                     }
+                    return;
+                }
 
-                    // Update length after writing all values
-                    let mut hd = self.header_mut();
-                    hd.set_len(index);
+                // Types don't match - check if we can promote or need to fall back to heterogeneous
+                if actual_tag == ArrayTag::Heterogeneous {
+                    // Already heterogeneous, convert items to IValue and use default extend
+                    let iter = iter.into_iter().map(|v| IValue::from(v));
+                    self.reserve(iter.size_hint().0);
+                    for item in iter {
+                        unsafe {
+                            self.header_mut().push(item);
+                        }
+                    }
+                    return;
+                }
+
+                // Check if we can promote the array type to accommodate the new type
+                let promoted_tag = actual_tag.promote_with(expected_tag);
+                if promoted_tag != actual_tag {
+                    self.promote_to_type(promoted_tag);
+
+                    // Now extend with the (possibly promoted) typed array
+                    let iter = iter.into_iter();
+                    self.reserve(iter.size_hint().0);
+
+                    // Use the same optimized path as above, but with the promoted type
+                    if promoted_tag == expected_tag {
+                        unsafe {
+                            let start_index = self.header().len();
+                            let hd = self.header_mut();
+                            let array_ptr = hd.raw_array_ptr_mut().cast::<$ty>();
+                            let mut index = start_index;
+
+                            for v in iter {
+                                array_ptr.add(index).write(v);
+                                index += 1;
+                            }
+
+                            // Update length after writing all values
+                            let mut hd = self.header_mut();
+                            hd.set_len(index);
+                        }
+                    } else {
+                        // Promoted to a different type, convert items to IValue and push
+                        for v in iter {
+                            unsafe {
+                                self.header_mut().push(IValue::from(v));
+                            }
+                        }
+                    }
+                    return;
+                }
+
+                // Can't promote - convert to heterogeneous and extend
+                self.promote_to_type(ArrayTag::Heterogeneous);
+                let iter = iter.into_iter().map(|v| IValue::from(v));
+                self.reserve(iter.size_hint().0);
+                for item in iter {
+                    unsafe {
+                        self.header_mut().push(item);
+                    }
                 }
             }
         })*
@@ -1852,7 +2155,7 @@ mod tests {
     #[test]
     fn test_typed_array_deserialization() {
         use serde::Deserialize;
-        
+
         // Test that we can deserialize from a typed i32 array directly
         let i32_array: IArray = vec![1i32, 2i32, 3i32].into();
         let deserialized_vec: Vec<i32> = Deserialize::deserialize(&i32_array).unwrap();
@@ -1872,6 +2175,449 @@ mod tests {
         let hetero_array: IArray = vec![IValue::from(1), IValue::from(2), IValue::from(3)].into();
         let deserialized_hetero: Vec<i32> = Deserialize::deserialize(&hetero_array).unwrap();
         assert_eq!(deserialized_hetero, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_typed_array_push() {
+        // Test pushing to i32 array
+        let mut i32_array: IArray = vec![1i32, 2i32].into();
+        assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
+
+        i32_array.push(3i32);
+        assert_eq!(i32_array.len(), 3);
+        assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I32(slice) = i32_array.as_slice() {
+            assert_eq!(slice, &[1, 2, 3]);
+        } else {
+            panic!("Expected I32 array slice");
+        }
+
+        // Test pushing to f64 array
+        let mut f64_array: IArray = vec![1.5f64, 2.5f64].into();
+        assert_eq!(f64_array.header().type_tag(), ArrayTag::F64);
+
+        f64_array.push(3.5f64);
+        assert_eq!(f64_array.len(), 3);
+        assert_eq!(f64_array.header().type_tag(), ArrayTag::F64);
+
+        // Verify the values are correct
+        if let ArraySliceRef::F64(slice) = f64_array.as_slice() {
+            assert_eq!(slice, &[1.5, 2.5, 3.5]);
+        } else {
+            panic!("Expected F64 array slice");
+        }
+
+        // Test pushing to u8 array
+        let mut u8_array: IArray = vec![10u8, 20u8].into();
+        assert_eq!(u8_array.header().type_tag(), ArrayTag::U8);
+
+        u8_array.push(30u8);
+        assert_eq!(u8_array.len(), 3);
+        assert_eq!(u8_array.header().type_tag(), ArrayTag::U8);
+
+        // Verify the values are correct
+        if let ArraySliceRef::U8(slice) = u8_array.as_slice() {
+            assert_eq!(slice, &[10, 20, 30]);
+        } else {
+            panic!("Expected U8 array slice");
+        }
+    }
+
+    #[test]
+    fn test_typed_array_type_promotion() {
+        // Test i8 -> i16 promotion when adding i16
+        let mut i8_array: IArray = vec![-5i8, 10i8].into();
+        assert_eq!(i8_array.header().type_tag(), ArrayTag::I8);
+
+        i8_array.push(1000i16);  // This should promote to i16
+        assert_eq!(i8_array.header().type_tag(), ArrayTag::I16);
+        assert_eq!(i8_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I16(slice) = i8_array.as_slice() {
+            assert_eq!(slice, &[-5, 10, 1000]);
+        } else {
+            panic!("Expected I16 array slice after promotion");
+        }
+
+        // Test u8 -> i16 promotion when adding a value that fits in i16
+        // Note: 300u16 gets detected as i16 by our conservative type detection
+        let mut u8_array: IArray = vec![10u8, 20u8].into();
+        assert_eq!(u8_array.header().type_tag(), ArrayTag::U8);
+
+        u8_array.push(300u16);  // This promotes u8 to i16 (300 fits in i16, u8 can promote to i16)
+        assert_eq!(u8_array.header().type_tag(), ArrayTag::I16);
+        assert_eq!(u8_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I16(slice) = u8_array.as_slice() {
+            assert_eq!(slice, &[10, 20, 300]);
+        } else {
+            panic!("Expected I16 array slice after promotion");
+        }
+
+        // Test u8 -> u16 promotion when adding a value that only fits in u16
+        let mut u8_array2: IArray = vec![10u8, 20u8].into();
+        assert_eq!(u8_array2.header().type_tag(), ArrayTag::U8);
+
+        u8_array2.push(40000u16);  // This should promote to u16 (40000 > i16::MAX)
+        assert_eq!(u8_array2.header().type_tag(), ArrayTag::U16);
+        assert_eq!(u8_array2.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::U16(slice) = u8_array2.as_slice() {
+            assert_eq!(slice, &[10, 20, 40000]);
+        } else {
+            panic!("Expected U16 array slice after promotion");
+        }
+
+        // Test u8 -> i16 promotion when adding i8 (mixed unsigned to signed)
+        let mut u8_array2: IArray = vec![10u8, 20u8].into();
+        assert_eq!(u8_array2.header().type_tag(), ArrayTag::U8);
+
+        u8_array2.push(-5i8);  // This should promote to i16 (u8 can fit in i16)
+        assert_eq!(u8_array2.header().type_tag(), ArrayTag::I16);
+        assert_eq!(u8_array2.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I16(slice) = u8_array2.as_slice() {
+            assert_eq!(slice, &[10, 20, -5]);
+        } else {
+            panic!("Expected I16 array slice after u8->i16 promotion");
+        }
+
+        // Test u16 -> i32 promotion when adding i16 (mixed unsigned to signed)
+        let mut u16_array: IArray = vec![100u16, 200u16].into();
+        assert_eq!(u16_array.header().type_tag(), ArrayTag::U16);
+
+        u16_array.push(-1000i16);  // This should promote to i32 (u16 can fit in i32)
+        assert_eq!(u16_array.header().type_tag(), ArrayTag::I32);
+        assert_eq!(u16_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I32(slice) = u16_array.as_slice() {
+            assert_eq!(slice, &[100, 200, -1000]);
+        } else {
+            panic!("Expected I32 array slice after u16->i32 promotion");
+        }
+
+        // Test f32 -> f64 promotion when adding f64
+        let mut f32_array: IArray = vec![1.5f32, 2.5f32].into();
+        assert_eq!(f32_array.header().type_tag(), ArrayTag::F32);
+
+        f32_array.push(3.14159265359f64);  // This should promote to f64
+        assert_eq!(f32_array.header().type_tag(), ArrayTag::F64);
+        assert_eq!(f32_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::F64(slice) = f32_array.as_slice() {
+            assert_eq!(slice[0], 1.5f64);
+            assert_eq!(slice[1], 2.5f64);
+            assert_eq!(slice[2], 3.14159265359f64);
+        } else {
+            panic!("Expected F64 array slice after promotion");
+        }
+    }
+
+    #[test]
+    fn test_typed_array_incompatible_types() {
+        // Test that mixing int and float converts to heterogeneous
+        let mut i32_array: IArray = vec![1i32, 2i32].into();
+        assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
+
+        i32_array.push(3.5f32);  // This should convert to heterogeneous (int vs float)
+        assert_eq!(i32_array.header().type_tag(), ArrayTag::Heterogeneous);
+        assert_eq!(i32_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::Heterogeneous(slice) = i32_array.as_slice() {
+            assert_eq!(slice[0], IValue::from(1i32));
+            assert_eq!(slice[1], IValue::from(2i32));
+            assert_eq!(slice[2], IValue::from(3.5f32));
+        } else {
+            panic!("Expected Heterogeneous array slice after incompatible type");
+        }
+
+        // Test that mixing float and int converts to heterogeneous
+        let mut f32_array: IArray = vec![1.5f32, 2.5f32].into();
+        assert_eq!(f32_array.header().type_tag(), ArrayTag::F32);
+
+        f32_array.push(42i32);  // This should convert to heterogeneous (float vs int)
+        assert_eq!(f32_array.header().type_tag(), ArrayTag::Heterogeneous);
+        assert_eq!(f32_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::Heterogeneous(slice) = f32_array.as_slice() {
+            assert_eq!(slice[0], IValue::from(1.5f32));
+            assert_eq!(slice[1], IValue::from(2.5f32));
+            assert_eq!(slice[2], IValue::from(42i32));
+        } else {
+            panic!("Expected Heterogeneous array slice after incompatible type");
+        }
+
+        // Test that adding non-numeric types also converts to heterogeneous
+        let mut u8_array: IArray = vec![10u8, 20u8].into();
+        assert_eq!(u8_array.header().type_tag(), ArrayTag::U8);
+
+        u8_array.push("hello");  // This should convert to heterogeneous
+        assert_eq!(u8_array.header().type_tag(), ArrayTag::Heterogeneous);
+        assert_eq!(u8_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::Heterogeneous(slice) = u8_array.as_slice() {
+            assert_eq!(slice[0], IValue::from(10u8));
+            assert_eq!(slice[1], IValue::from(20u8));
+            assert_eq!(slice[2], IValue::from("hello"));
+        } else {
+            panic!("Expected Heterogeneous array slice after non-numeric type");
+        }
+
+        // Test that adding boolean also converts to heterogeneous
+        let mut i16_array: IArray = vec![100i16, 200i16].into();
+        assert_eq!(i16_array.header().type_tag(), ArrayTag::I16);
+
+        i16_array.push(true);  // This should convert to heterogeneous
+        assert_eq!(i16_array.header().type_tag(), ArrayTag::Heterogeneous);
+        assert_eq!(i16_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::Heterogeneous(slice) = i16_array.as_slice() {
+            assert_eq!(slice[0], IValue::from(100i16));
+            assert_eq!(slice[1], IValue::from(200i16));
+            assert_eq!(slice[2], IValue::from(true));
+        } else {
+            panic!("Expected Heterogeneous array slice after boolean type");
+        }
+    }
+
+    #[test]
+    fn test_typed_array_insert_with_promotion() {
+        // Test insert with type promotion (compatible signed integers)
+        let mut i8_array: IArray = vec![10i8, 30i8].into();
+        assert_eq!(i8_array.header().type_tag(), ArrayTag::I8);
+
+        i8_array.insert(1, 1000i16);  // This should promote to i16
+        assert_eq!(i8_array.header().type_tag(), ArrayTag::I16);
+        assert_eq!(i8_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I16(slice) = i8_array.as_slice() {
+            assert_eq!(slice, &[10, 1000, 30]);
+        } else {
+            panic!("Expected I16 array slice after promotion");
+        }
+
+        // Test insert with type promotion (i16 + u16 -> i32)
+        let mut i16_array: IArray = vec![100i16, 200i16].into();
+        assert_eq!(i16_array.header().type_tag(), ArrayTag::I16);
+
+        i16_array.insert(1, 40000u16);  // This should promote to i32 (can hold both i16 and u16)
+        assert_eq!(i16_array.header().type_tag(), ArrayTag::I32);
+        assert_eq!(i16_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I32(slice) = i16_array.as_slice() {
+            assert_eq!(slice, &[100, 40000, 200]);
+        } else {
+            panic!("Expected I32 array slice after promotion");
+        }
+
+        // Test insert with incompatible type (int vs float)
+        let mut u32_array: IArray = vec![100u32, 200u32].into();
+        assert_eq!(u32_array.header().type_tag(), ArrayTag::U32);
+
+        u32_array.insert(1, 3.14f32);  // This should convert to heterogeneous
+        assert_eq!(u32_array.header().type_tag(), ArrayTag::Heterogeneous);
+        assert_eq!(u32_array.len(), 3);
+
+        // Verify the values are correct
+        if let ArraySliceRef::Heterogeneous(slice) = u32_array.as_slice() {
+            assert_eq!(slice[0], IValue::from(100u32));
+            assert_eq!(slice[1], IValue::from(3.14f32));
+            assert_eq!(slice[2], IValue::from(200u32));
+        } else {
+            panic!("Expected Heterogeneous array slice after incompatible type");
+        }
+    }
+
+    #[test]
+    fn test_typed_array_extend_with_promotion() {
+        // Test extend with type promotion (i8 -> i16)
+        let mut i8_array: IArray = vec![10i8, 20i8].into();
+        assert_eq!(i8_array.header().type_tag(), ArrayTag::I8);
+
+        i8_array.extend(vec![1000i16, 2000i16]);  // This should promote to i16
+        assert_eq!(i8_array.header().type_tag(), ArrayTag::I16);
+        assert_eq!(i8_array.len(), 4);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I16(slice) = i8_array.as_slice() {
+            assert_eq!(slice, &[10, 20, 1000, 2000]);
+        } else {
+            panic!("Expected I16 array slice after promotion");
+        }
+
+        // Test extend with type promotion (u8 -> u16)
+        let mut u8_array: IArray = vec![10u8, 20u8].into();
+        assert_eq!(u8_array.header().type_tag(), ArrayTag::U8);
+
+        u8_array.extend(vec![40000u16, 50000u16]);  // This should promote to u16
+        assert_eq!(u8_array.header().type_tag(), ArrayTag::U16);
+        assert_eq!(u8_array.len(), 4);
+
+        // Verify the values are correct
+        if let ArraySliceRef::U16(slice) = u8_array.as_slice() {
+            assert_eq!(slice, &[10, 20, 40000, 50000]);
+        } else {
+            panic!("Expected U16 array slice after promotion");
+        }
+
+        // Test extend with mixed signed/unsigned promotion (u8 -> i16)
+        let mut u8_array2: IArray = vec![10u8, 20u8].into();
+        assert_eq!(u8_array2.header().type_tag(), ArrayTag::U8);
+
+        u8_array2.extend(vec![-5i8, -10i8]);  // This should promote to i16
+        assert_eq!(u8_array2.header().type_tag(), ArrayTag::I16);
+        assert_eq!(u8_array2.len(), 4);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I16(slice) = u8_array2.as_slice() {
+            assert_eq!(slice, &[10, 20, -5, -10]);
+        } else {
+            panic!("Expected I16 array slice after u8->i16 promotion");
+        }
+
+        // Test extend with float promotion (f32 -> f64)
+        let mut f32_array: IArray = vec![1.5f32, 2.5f32].into();
+        assert_eq!(f32_array.header().type_tag(), ArrayTag::F32);
+
+        f32_array.extend(vec![3.14159265359f64, 2.71828f64]);  // This should promote to f64
+        assert_eq!(f32_array.header().type_tag(), ArrayTag::F64);
+        assert_eq!(f32_array.len(), 4);
+
+        // Verify the values are correct
+        if let ArraySliceRef::F64(slice) = f32_array.as_slice() {
+            assert_eq!(slice[0], 1.5f64);
+            assert_eq!(slice[1], 2.5f64);
+            assert_eq!(slice[2], 3.14159265359f64);
+            assert_eq!(slice[3], 2.71828f64);
+        } else {
+            panic!("Expected F64 array slice after promotion");
+        }
+    }
+
+    #[test]
+    fn test_typed_array_extend_incompatible_types() {
+        // Test extend with incompatible types (int + float -> heterogeneous)
+        let mut i32_array: IArray = vec![1i32, 2i32].into();
+        assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
+
+        i32_array.extend(vec![3.5f32, 4.5f32]);  // This should convert to heterogeneous
+        assert_eq!(i32_array.header().type_tag(), ArrayTag::Heterogeneous);
+        assert_eq!(i32_array.len(), 4);
+
+        // Verify the values are correct
+        if let ArraySliceRef::Heterogeneous(slice) = i32_array.as_slice() {
+            assert_eq!(slice[0], IValue::from(1i32));
+            assert_eq!(slice[1], IValue::from(2i32));
+            assert_eq!(slice[2], IValue::from(3.5f32));
+            assert_eq!(slice[3], IValue::from(4.5f32));
+        } else {
+            panic!("Expected Heterogeneous array slice after incompatible types");
+        }
+
+        // Test extend with float + int -> heterogeneous
+        let mut f32_array: IArray = vec![1.5f32, 2.5f32].into();
+        assert_eq!(f32_array.header().type_tag(), ArrayTag::F32);
+
+        f32_array.extend(vec![42i32, 84i32]);  // This should convert to heterogeneous
+        assert_eq!(f32_array.header().type_tag(), ArrayTag::Heterogeneous);
+        assert_eq!(f32_array.len(), 4);
+
+        // Verify the values are correct
+        if let ArraySliceRef::Heterogeneous(slice) = f32_array.as_slice() {
+            assert_eq!(slice[0], IValue::from(1.5f32));
+            assert_eq!(slice[1], IValue::from(2.5f32));
+            assert_eq!(slice[2], IValue::from(42i32));
+            assert_eq!(slice[3], IValue::from(84i32));
+        } else {
+            panic!("Expected Heterogeneous array slice after incompatible types");
+        }
+    }
+
+    #[test]
+    fn test_typed_array_extend_same_type() {
+        // Test extend with same type (should use optimized path)
+        let mut i32_array: IArray = vec![1i32, 2i32].into();
+        assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
+
+        i32_array.extend(vec![3i32, 4i32, 5i32]);  // Same type, should stay i32
+        assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
+        assert_eq!(i32_array.len(), 5);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I32(slice) = i32_array.as_slice() {
+            assert_eq!(slice, &[1, 2, 3, 4, 5]);
+        } else {
+            panic!("Expected I32 array slice");
+        }
+    }
+
+    #[test]
+    fn test_extend_does_not_panic_on_type_mismatch() {
+        // Test that extending i8 array with i16 values promotes instead of panicking
+        let mut i8_array: IArray = vec![1i8, 2i8].into();
+        assert_eq!(i8_array.header().type_tag(), ArrayTag::I8);
+
+        // This used to panic, but now should promote to i16
+        i8_array.extend(vec![300i16, 400i16]);
+        assert_eq!(i8_array.header().type_tag(), ArrayTag::I16);
+        assert_eq!(i8_array.len(), 4);
+
+        // Test that extending with incompatible types converts to heterogeneous
+        let mut u32_array: IArray = vec![1u32, 2u32].into();
+        assert_eq!(u32_array.header().type_tag(), ArrayTag::U32);
+
+        // This used to panic, but now should convert to heterogeneous
+        u32_array.extend(vec![3.14f32, 2.71f32]);
+        assert_eq!(u32_array.header().type_tag(), ArrayTag::Heterogeneous);
+        assert_eq!(u32_array.len(), 4);
+    }
+
+    #[test]
+    fn test_typed_array_insert() {
+        // Test inserting into i32 array
+        let mut i32_array: IArray = vec![1i32, 3i32].into();
+        assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
+
+        i32_array.insert(1, 2i32);
+        assert_eq!(i32_array.len(), 3);
+        assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
+
+        // Verify the values are correct
+        if let ArraySliceRef::I32(slice) = i32_array.as_slice() {
+            assert_eq!(slice, &[1, 2, 3]);
+        } else {
+            panic!("Expected I32 array slice");
+        }
+
+        // Test inserting at the beginning
+        i32_array.insert(0, 0i32);
+        if let ArraySliceRef::I32(slice) = i32_array.as_slice() {
+            assert_eq!(slice, &[0, 1, 2, 3]);
+        } else {
+            panic!("Expected I32 array slice");
+        }
+
+        // Test inserting at the end
+        i32_array.insert(4, 4i32);
+        if let ArraySliceRef::I32(slice) = i32_array.as_slice() {
+            assert_eq!(slice, &[0, 1, 2, 3, 4]);
+        } else {
+            panic!("Expected I32 array slice");
+        }
     }
 
     #[mockalloc::test]

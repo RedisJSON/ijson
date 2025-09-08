@@ -272,6 +272,26 @@ impl INumber {
     pub fn to_usize(&self) -> Option<usize> {
         self.to_u64().map(|v| v as _)
     }
+    /// Converts this number to an i8 if it can be represented exactly.
+    #[must_use]
+    pub fn to_i8(&self) -> Option<i8> {
+        self.to_i64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to a u8 if it can be represented exactly.
+    #[must_use]
+    pub fn to_u8(&self) -> Option<u8> {
+        self.to_u64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to an i16 if it can be represented exactly.
+    #[must_use]
+    pub fn to_i16(&self) -> Option<i16> {
+        self.to_i64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to a u16 if it can be represented exactly.
+    #[must_use]
+    pub fn to_u16(&self) -> Option<u16> {
+        self.to_u64().and_then(|x| x.try_into().ok())
+    }
     /// Converts this number to an i32 if it can be represented exactly.
     #[must_use]
     pub fn to_i32(&self) -> Option<i32> {
