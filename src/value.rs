@@ -6,6 +6,7 @@ use std::hash::Hash;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
+use half::{bf16, f16};
 
 use crate::{Defrag, DefragAllocator};
 
@@ -551,6 +552,16 @@ impl IValue {
     pub fn to_f32(&self) -> Option<f32> {
         self.as_number()?.to_f32()
     }
+    /// Converts this value to an f16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_f16(&self) -> Option<f16> {
+        self.as_number()?.to_f16()
+    }
+    /// Converts this value to a bf16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_bf16(&self) -> Option<bf16> {
+        self.as_number()?.to_bf16()
+    }
     /// Converts this value to an i8 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_i8(&self) -> Option<i8> {
@@ -602,6 +613,18 @@ impl IValue {
     #[must_use]
     pub fn to_f32_lossy(&self) -> Option<f32> {
         Some(self.as_number()?.to_f32_lossy())
+    }
+    /// Converts this value to an f16 if it is a number, potentially losing precision
+    /// in the process.
+    #[must_use]
+    pub fn to_f16_lossy(&self) -> Option<f16> {
+        Some(self.as_number()?.to_f16_lossy())
+    }
+    /// Converts this value to an bf16 if it is a number, potentially losing precision
+    /// in the process.
+    #[must_use]
+    pub fn to_bf16_lossy(&self) -> Option<bf16> {
+        Some(self.as_number()?.to_bf16_lossy())
     }
 
     // # String methods
@@ -1020,6 +1043,18 @@ typed_conversions! {
     IObject:
         HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
         BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
+}
+
+impl From<f16> for IValue {
+    fn from(v: f16) -> Self {
+        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
+    }
+}
+
+impl From<bf16> for IValue {
+    fn from(v: bf16) -> Self {
+        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
+    }
 }
 
 impl From<f32> for IValue {
