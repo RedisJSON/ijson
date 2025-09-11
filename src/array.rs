@@ -718,7 +718,9 @@ impl IArray {
 
         let current_len = self.len();
         if current_len == 0 {
-            let new_cap = self.capacity() * self.header().type_tag().element_size() / new_tag.element_size();
+            let payload_bytes = Self::layout(self.capacity(), self.header().type_tag())
+                .unwrap().size() - std::mem::size_of::<Header>();
+            let new_cap = (payload_bytes / new_tag.element_size()).min(Header::CAP_MASK as usize);
             unsafe {
                 self.header_mut().set_cap(new_cap);
                 self.header_mut().set_tag(new_tag);
@@ -2882,6 +2884,57 @@ mod tests {
         } else {
             panic!("Expected U8 slice after first push with pre-capacity");
         }
+    }
+
+    #[mockalloc::test]
+    fn test_empty_promotion_uses_full_layout_capacity_to_u8() {
+        let cap = 3usize;
+        let mut arr = IArray::with_capacity(cap);
+        assert_eq!(arr.len(), 0);
+        assert_eq!(arr.header().type_tag(), ArrayTag::Heterogeneous);
+
+        let total = IArray::layout(cap, ArrayTag::Heterogeneous).expect("layout").size();
+        let payload = total - std::mem::size_of::<Header>();
+        let expected = payload / ArrayTag::U8.element_size();
+
+        arr.push(255u8);
+        assert_eq!(arr.header().type_tag(), ArrayTag::U8);
+        assert_eq!(arr.capacity(), expected);
+        assert!(!arr.is_static());
+    }
+
+    #[mockalloc::test]
+    fn test_empty_promotion_uses_full_layout_capacity_to_f64() {
+        let cap = 3usize;
+        let mut arr = IArray::with_capacity(cap);
+        assert_eq!(arr.len(), 0);
+        assert_eq!(arr.header().type_tag(), ArrayTag::Heterogeneous);
+
+        let total = IArray::layout(cap, ArrayTag::Heterogeneous).expect("layout").size();
+        let payload = total - std::mem::size_of::<Header>();
+        let expected = payload / ArrayTag::F64.element_size();
+
+        arr.push(f64::MAX);
+        assert_eq!(arr.header().type_tag(), ArrayTag::F64);
+        assert_eq!(arr.capacity(), expected);
+        assert!(!arr.is_static());
+    }
+
+    #[mockalloc::test]
+    fn test_empty_typed_promotion_uses_full_layout_capacity_to_f64() {
+        let cap = 3usize;
+        let mut arr = IArray::with_capacity_and_tag(cap, ArrayTag::U8);
+        assert_eq!(arr.len(), 0);
+        assert_eq!(arr.header().type_tag(), ArrayTag::U8);
+
+        let total = IArray::layout(cap, ArrayTag::U8).expect("layout").size();
+        let payload = total - std::mem::size_of::<Header>();
+        let expected = payload / ArrayTag::F64.element_size();
+
+        arr.push(f64::MAX);
+        assert_eq!(arr.header().type_tag(), ArrayTag::F64);
+        assert_eq!(arr.capacity(), expected);
+        assert!(!arr.is_static());
     }
 
     // Too slow for miri
