@@ -2,8 +2,7 @@ use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
 
 use serde::de::{
-    DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess,
-    Unexpected, VariantAccess, Visitor,
+    self, DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess, Unexpected, VariantAccess, Visitor
 };
 use serde::{forward_to_deserialize_any, Deserialize, Deserializer};
 use serde_json::error::Error;
@@ -554,69 +553,6 @@ impl<'de> Deserializer<'de> for &'de IString {
     }
 }
 
-/// Implement IntoDeserializer for IValue to support owned value deserialization
-impl IntoDeserializer<'_, Error> for IValue {
-    type Deserializer = OwnedIValueDeserializer;
-
-    fn into_deserializer(self) -> Self::Deserializer {
-        OwnedIValueDeserializer(self)
-    }
-}
-
-/// Deserializer wrapper for owned IValue
-#[derive(Debug)]
-pub struct OwnedIValueDeserializer(IValue);
-
-impl<'de> Deserializer<'de> for OwnedIValueDeserializer {
-    type Error = Error;
-
-    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
-    where
-        V: Visitor<'de>,
-    {
-        use super::value::Destructured::*;
-        use serde::de::value::*;
-
-        // We can't use the reference-based deserializer because of lifetime issues,
-        // so we need to handle the deserialization directly
-        match self.0.destructure() {
-            Null => visitor.visit_unit(),
-            Bool(b) => visitor.visit_bool(b),
-            Number(n) => {
-                if n.has_decimal_point() {
-                    visitor.visit_f64(n.to_f64().unwrap())
-                } else if let Some(i) = n.to_i64() {
-                    visitor.visit_i64(i)
-                } else {
-                    visitor.visit_u64(n.to_u64().unwrap())
-                }
-            }
-            String(s) => visitor.visit_str(s.as_str()),
-            Array(arr) => {
-                // For all arrays, convert to owned values and use SeqDeserializer
-                // This avoids lifetime issues with temporary references
-                let values: Vec<IValue> = arr.iter().map(|item| item.into_owned()).collect();
-                let mut seq_deserializer = SeqDeserializer::new(values.into_iter());
-                visitor.visit_seq(&mut seq_deserializer)
-            }
-            Object(obj) => {
-                // Convert object to owned key-value pairs and use MapDeserializer
-                let pairs: Vec<(IValue, IValue)> = obj.iter()
-                    .map(|(k, v)| (IValue::from(k.as_str()), v.clone()))
-                    .collect();
-                let mut map_deserializer = MapDeserializer::new(pairs.into_iter());
-                visitor.visit_map(&mut map_deserializer)
-            }
-        }
-    }
-
-    forward_to_deserialize_any! {
-        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
-        bytes byte_buf option unit unit_struct newtype_struct seq tuple
-        tuple_struct map struct enum identifier ignored_any
-    }
-}
-
 impl<'de> Deserializer<'de> for &'de IArray {
     type Error = Error;
 
@@ -628,10 +564,11 @@ impl<'de> Deserializer<'de> for &'de IArray {
         use crate::array::ArraySliceRef;
         let len = self.len();
 
-        match self.as_slice() {
-            ArraySliceRef::Heterogeneous(slice) => {
-                // For heterogeneous arrays, use the slice directly (most efficient)
-                let mut deserializer = ArrayAccess::new(slice);
+        macro_rules! deserialize_typed_array {
+            ($variant:ident, $slice:expr) => {{
+                let mut deserializer = ArrayAccess {
+                    iter: Iter::$variant($slice.iter())
+                };
                 let seq = visitor.visit_seq(&mut deserializer)?;
                 let remaining = deserializer.remaining_len();
                 if remaining == 0 {
@@ -639,14 +576,23 @@ impl<'de> Deserializer<'de> for &'de IArray {
                 } else {
                     Err(SError::invalid_length(len, &"fewer elements in array"))
                 }
-            }
-            _ => {
-                // For typed arrays, we need to work around serde's lifetime constraints
-                // by creating a temporary heterogeneous array and deserializing from that
-                let values: Vec<IValue> = self.iter().map(|item| item.into_owned()).collect();
-                let mut seq_deserializer = serde::de::value::SeqDeserializer::new(values.into_iter());
-                visitor.visit_seq(&mut seq_deserializer)
-            }
+            }};
+        }
+
+        match self.as_slice() {
+            ArraySliceRef::Heterogeneous(slice) => deserialize_typed_array!(Heterogeneous, slice),
+            ArraySliceRef::I8(slice) => deserialize_typed_array!(I8, slice),
+            ArraySliceRef::U8(slice) => deserialize_typed_array!(U8, slice),
+            ArraySliceRef::I16(slice) => deserialize_typed_array!(I16, slice),
+            ArraySliceRef::U16(slice) => deserialize_typed_array!(U16, slice),
+            ArraySliceRef::F16(slice) => deserialize_typed_array!(F16, slice),
+            ArraySliceRef::BF16(slice) => deserialize_typed_array!(BF16, slice),
+            ArraySliceRef::I32(slice) => deserialize_typed_array!(I32, slice),
+            ArraySliceRef::U32(slice) => deserialize_typed_array!(U32, slice),
+            ArraySliceRef::F32(slice) => deserialize_typed_array!(F32, slice),
+            ArraySliceRef::I64(slice) => deserialize_typed_array!(I64, slice),
+            ArraySliceRef::U64(slice) => deserialize_typed_array!(U64, slice),
+            ArraySliceRef::F64(slice) => deserialize_typed_array!(F64, slice),
         }
     }
 
@@ -884,18 +830,42 @@ impl<'de> VariantAccess<'de> for VariantDeserializer<'de> {
 }
 
 struct ArrayAccess<'de> {
-    iter: std::slice::Iter<'de, IValue>,
+    iter: Iter<'de>,
+}
+
+enum Iter<'de> {
+    Heterogeneous(std::slice::Iter<'de, IValue>),
+    I8(std::slice::Iter<'de, i8>),
+    U8(std::slice::Iter<'de, u8>),
+    I16(std::slice::Iter<'de, i16>),
+    U16(std::slice::Iter<'de, u16>),
+    F16(std::slice::Iter<'de, half::f16>),
+    BF16(std::slice::Iter<'de, half::bf16>),
+    I32(std::slice::Iter<'de, i32>),
+    U32(std::slice::Iter<'de, u32>),
+    F32(std::slice::Iter<'de, f32>),
+    I64(std::slice::Iter<'de, i64>),
+    U64(std::slice::Iter<'de, u64>),
+    F64(std::slice::Iter<'de, f64>),
 }
 
 impl<'de> ArrayAccess<'de> {
-    fn new(slice: &'de [IValue]) -> Self {
-        ArrayAccess {
-            iter: slice.iter()
-        }
-    }
-
     fn remaining_len(&self) -> usize {
-        self.iter.len()
+        match &self.iter {
+            Iter::Heterogeneous(it) => it.len(),
+            Iter::I8(it) => it.len(),
+            Iter::U8(it) => it.len(),
+            Iter::I16(it) => it.len(),
+            Iter::U16(it) => it.len(),
+            Iter::F16(it) => it.len(),
+            Iter::BF16(it) => it.len(),
+            Iter::I32(it) => it.len(),
+            Iter::U32(it) => it.len(),
+            Iter::F32(it) => it.len(),
+            Iter::I64(it) => it.len(),
+            Iter::U64(it) => it.len(),
+            Iter::F64(it) => it.len(),
+        }
     }
 }
 
@@ -906,17 +876,72 @@ impl<'de> SeqAccess<'de> for ArrayAccess<'de> {
     where
         T: DeserializeSeed<'de>,
     {
-        match self.iter.next() {
-            Some(value) => seed.deserialize(value).map(Some),
-            None => Ok(None),
+        use serde::de::IntoDeserializer as _;
+        match &mut self.iter {
+            Iter::Heterogeneous(it) => match it.next() {
+                Some(v) => seed.deserialize(v).map(Some),
+                None => Ok(None),
+            },
+            Iter::I8(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::U8(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::I16(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::U16(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            // For f16/bf16, feed as f32 so downstream types (f16/f32/f64) can convert
+            Iter::F16(it) => match it.next() {
+                Some(v) => {
+                    let f: f32 = v.to_f32();
+                    seed.deserialize(f.into_deserializer()).map(Some)
+                }
+                None => Ok(None),
+            },
+            Iter::BF16(it) => match it.next() {
+                Some(v) => {
+                    let f: f32 = v.to_f32();
+                    seed.deserialize(f.into_deserializer()).map(Some)
+                }
+                None => Ok(None),
+            },
+            Iter::I32(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::U32(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::F32(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::I64(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::U64(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::F64(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
         }
     }
 
     fn size_hint(&self) -> Option<usize> {
-        match self.iter.size_hint() {
-            (lower, Some(upper)) if lower == upper => Some(upper),
-            _ => None,
-        }
+        Some(self.remaining_len())
     }
 }
 
