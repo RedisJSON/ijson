@@ -511,7 +511,7 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
                     let array_ptr = self.reborrow().raw_array_ptr_mut().cast::<$tag>();
                     array_ptr.add(index).write(val);
                 } else {
-                    panic!("Cannot push non-{} value to {} array", stringify!($tag), stringify!($tag));
+                    unreachable!("called push_typed! with incompatible type");
                 }
             };
         }
@@ -1223,10 +1223,18 @@ impl Hash for IArray {
             U32(slice) => slice.hash(state),
             I64(slice) => slice.hash(state),
             U64(slice) => slice.hash(state),
-            F16(slice) => slice.iter().map(|f| IValue::from(*f)).collect::<Vec<_>>().hash(state),
-            BF16(slice) => slice.iter().map(|f| IValue::from(*f)).collect::<Vec<_>>().hash(state),
-            F32(slice) => slice.iter().map(|f| IValue::from(*f)).collect::<Vec<_>>().hash(state),
-            F64(slice) => slice.iter().map(|f| IValue::from(*f)).collect::<Vec<_>>().hash(state),
+            F16(slice) => slice.iter().for_each(|f| {
+                f.to_bits().hash(state);
+            }),
+            BF16(slice) => slice.iter().for_each(|f| {
+                f.to_bits().hash(state);
+            }),
+            F32(slice) => slice.iter().for_each(|f| {
+                f.to_bits().hash(state);
+            }),
+            F64(slice) => slice.iter().for_each(|f| {
+                f.to_bits().hash(state);
+            }),
         }
     }
 }
