@@ -6,7 +6,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::iter::FromIterator;
 use std::ops::{Index, IndexMut};
-use std::slice::SliceIndex;
+use std::slice::{from_raw_parts, from_raw_parts_mut, SliceIndex};
 use half::{f16, bf16};
 
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
@@ -188,7 +188,7 @@ impl ArrayTag {
 }
 
 /// Enum representing different types of array slices that can be returned from typed arrays
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum ArraySliceRef<'a> {
     /// Heterogeneous array containing IValue objects
     Heterogeneous(&'a [IValue]),
@@ -297,55 +297,8 @@ impl PartialOrd for ArraySliceRef<'_> {
     }
 }
 
-macro_rules! from_impl {
-    ($(($ty:ty, $variant:ident)),*) => {
-        $(impl<'a> From<&'a [$ty]> for ArraySliceRef<'a> {
-            fn from(slice: &'a [$ty]) -> Self {
-                ArraySliceRef::$variant(slice)
-            }
-        })*
-    };
-}
-
-from_impl!(
-    (i8, I8),
-    (u8, U8),
-    (i16, I16),
-    (u16, U16),
-    (f16, F16),
-    (bf16, BF16),
-    (i32, I32),
-    (u32, U32),
-    (f32, F32),
-    (i64, I64),
-    (u64, U64),
-    (f64, F64),
-    (IValue, Heterogeneous)
-);
-
-impl Debug for ArraySliceRef<'_> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        use ArraySliceRef::*;
-        match self {
-            Heterogeneous(slice) => Debug::fmt(slice, f),
-            I8(slice) => Debug::fmt(slice, f),
-            U8(slice) => Debug::fmt(slice, f),
-            I16(slice) => Debug::fmt(slice, f),
-            U16(slice) => Debug::fmt(slice, f),
-            F16(slice) => Debug::fmt(slice, f),
-            BF16(slice) => Debug::fmt(slice, f),
-            I32(slice) => Debug::fmt(slice, f),
-            U32(slice) => Debug::fmt(slice, f),
-            F32(slice) => Debug::fmt(slice, f),
-            I64(slice) => Debug::fmt(slice, f),
-            U64(slice) => Debug::fmt(slice, f),
-            F64(slice) => Debug::fmt(slice, f),
-        }
-    }
-}
-
 /// Mutable slice of the array contents
-#[derive(Debug)]
+#[derive(PartialEq, Debug)]
 pub enum ArraySliceMut<'a> {
     /// Heterogeneous array containing mutable IValue objects
     Heterogeneous(&'a mut [IValue]),
@@ -374,6 +327,37 @@ pub enum ArraySliceMut<'a> {
     /// Typed array of mutable f64 values
     F64(&'a mut [f64]),
 }
+
+macro_rules! from_impl {
+    ($(($ty:ty, $variant:ident)),*) => {
+        $(impl<'a> From<&'a [$ty]> for ArraySliceRef<'a> {
+            fn from(slice: &'a [$ty]) -> Self {
+                ArraySliceRef::$variant(slice)
+            }
+        })*
+        $(impl<'a> From<&'a mut [$ty]> for ArraySliceMut<'a> {
+            fn from(slice: &'a mut [$ty]) -> Self {
+                ArraySliceMut::$variant(slice)
+            }
+        })*
+    };
+}
+
+from_impl!(
+    (i8, I8),
+    (u8, U8),
+    (i16, I16),
+    (u16, U16),
+    (f16, F16),
+    (bf16, BF16),
+    (i32, I32),
+    (u32, U32),
+    (f32, F32),
+    (i64, I64),
+    (u64, U64),
+    (f64, F64),
+    (IValue, Heterogeneous)
+);
 
 #[repr(C)]
 #[repr(align(8))]
@@ -437,6 +421,7 @@ impl Header {
 }
 
 trait HeaderRef<'a>: ThinRefExt<'a, Header> {
+    #[allow(unused)]
     fn array_ptr(&self) -> *const IValue {
         // Safety: pointers to the end of structs are allowed
         unsafe { self.ptr().add(1).cast::<IValue>() }
@@ -446,25 +431,30 @@ trait HeaderRef<'a>: ThinRefExt<'a, Header> {
         unsafe { self.ptr().add(1).cast::<u8>() }
     }
     fn items_slice(&self) -> ArraySliceRef<'a> {
-        use ArraySliceRef::*;
-        // Safety: Header `len` must be accurate
+        use ArrayTag::*;
+        // Safety: we validate the type tag before accessing
         unsafe {
             match self.type_tag() {
-                ArrayTag::I8 => I8(std::slice::from_raw_parts(self.raw_array_ptr().cast::<i8>(), self.len())),
-                ArrayTag::U8 => U8(std::slice::from_raw_parts(self.raw_array_ptr().cast::<u8>(), self.len())),
-                ArrayTag::I16 => I16(std::slice::from_raw_parts(self.raw_array_ptr().cast::<i16>(), self.len())),
-                ArrayTag::U16 => U16(std::slice::from_raw_parts(self.raw_array_ptr().cast::<u16>(), self.len())),
-                ArrayTag::F16 => F16(std::slice::from_raw_parts(self.raw_array_ptr().cast::<f16>(), self.len())),
-                ArrayTag::BF16 => BF16(std::slice::from_raw_parts(self.raw_array_ptr().cast::<bf16>(), self.len())),
-                ArrayTag::I32 => I32(std::slice::from_raw_parts(self.raw_array_ptr().cast::<i32>(), self.len())),
-                ArrayTag::U32 => U32(std::slice::from_raw_parts(self.raw_array_ptr().cast::<u32>(), self.len())),
-                ArrayTag::I64 => I64(std::slice::from_raw_parts(self.raw_array_ptr().cast::<i64>(), self.len())),
-                ArrayTag::U64 => U64(std::slice::from_raw_parts(self.raw_array_ptr().cast::<u64>(), self.len())),
-                ArrayTag::F32 => F32(std::slice::from_raw_parts(self.raw_array_ptr().cast::<f32>(), self.len())),
-                ArrayTag::F64 => F64(std::slice::from_raw_parts(self.raw_array_ptr().cast::<f64>(), self.len())),
-                _ => Heterogeneous(std::slice::from_raw_parts(self.array_ptr(), self.len())),
+                I8 => self.as_slice_unchecked::<i8>().into(),
+                U8 => self.as_slice_unchecked::<u8>().into(),
+                I16 => self.as_slice_unchecked::<i16>().into(),
+                U16 => self.as_slice_unchecked::<u16>().into(),
+                F16 => self.as_slice_unchecked::<f16>().into(),
+                BF16 => self.as_slice_unchecked::<bf16>().into(),
+                I32 => self.as_slice_unchecked::<i32>().into(),
+                U32 => self.as_slice_unchecked::<u32>().into(),
+                I64 => self.as_slice_unchecked::<i64>().into(),
+                U64 => self.as_slice_unchecked::<u64>().into(),
+                F32 => self.as_slice_unchecked::<f32>().into(),
+                F64 => self.as_slice_unchecked::<f64>().into(),
+                _ => self.as_slice_unchecked::<IValue>().into(),
             }
         }
+    }
+
+    // Safety: The array must contain the expected type, and len must be accurate
+    unsafe fn as_slice_unchecked<T>(&self) -> &'a [T] {
+        from_raw_parts(self.raw_array_ptr().cast::<T>(), self.len())
     }
 }
 
@@ -478,26 +468,31 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
         unsafe { self.ptr_mut().add(1).cast::<u8>() }
     }
     fn items_slice_mut(self) -> ArraySliceMut<'a> {
-        use ArraySliceMut::*;
-        let len = self.len();
-        // Safety: Header `len` must be accurate
+        use ArrayTag::*;
+        // Safety: we validate the type tag before accessing
         unsafe {
             match self.type_tag() {
-                ArrayTag::I8 => I8(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<i8>(), len)),
-                ArrayTag::U8 => U8(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<u8>(), len)),
-                ArrayTag::I16 => I16(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<i16>(), len)),
-                ArrayTag::U16 => U16(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<u16>(), len)),
-                ArrayTag::F16 => F16(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<f16>(), len)),
-                ArrayTag::BF16 => BF16(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<bf16>(), len)),
-                ArrayTag::I32 => I32(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<i32>(), len)),
-                ArrayTag::U32 => U32(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<u32>(), len)),
-                ArrayTag::I64 => I64(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<i64>(), len)),
-                ArrayTag::U64 => U64(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<u64>(), len)),
-                ArrayTag::F32 => F32(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<f32>(), len)),
-                ArrayTag::F64 => F64(std::slice::from_raw_parts_mut(self.raw_array_ptr_mut().cast::<f64>(), len)),
-                _ => Heterogeneous(std::slice::from_raw_parts_mut(self.array_ptr_mut(), len)),
+                I8 => self.as_mut_slice_unchecked::<i8>().into(),
+                U8 => self.as_mut_slice_unchecked::<u8>().into(),
+                I16 => self.as_mut_slice_unchecked::<i16>().into(),
+                U16 => self.as_mut_slice_unchecked::<u16>().into(),
+                F16 => self.as_mut_slice_unchecked::<f16>().into(),
+                BF16 => self.as_mut_slice_unchecked::<bf16>().into(),
+                I32 => self.as_mut_slice_unchecked::<i32>().into(),
+                U32 => self.as_mut_slice_unchecked::<u32>().into(),
+                I64 => self.as_mut_slice_unchecked::<i64>().into(),
+                U64 => self.as_mut_slice_unchecked::<u64>().into(),
+                F32 => self.as_mut_slice_unchecked::<f32>().into(),
+                F64 => self.as_mut_slice_unchecked::<f64>().into(),
+                _ => self.as_mut_slice_unchecked::<IValue>().into(),
             }
         }
+    }
+
+    // Safety: The array must contain the expected type, and len must be accurate
+    unsafe fn as_mut_slice_unchecked<T>(self) -> &'a mut [T] {
+        let len = self.len();
+        from_raw_parts_mut(self.raw_array_ptr_mut().cast::<T>(), len)
     }
 
     // Safety: Space must already be allocated for the item
@@ -551,18 +546,18 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
             unsafe {
                 match array_type {
                     Heterogeneous => Some(self.reborrow().array_ptr_mut().add(index).read()),
-                    I8 => Some(self.reborrow().raw_array_ptr_mut().cast::<i8>().add(index).read()).map(IValue::from),
-                    U8 => Some(self.reborrow().raw_array_ptr_mut().cast::<u8>().add(index).read()).map(IValue::from),
-                    I16 => Some(self.reborrow().raw_array_ptr_mut().cast::<i16>().add(index).read()).map(IValue::from),
-                    U16 => Some(self.reborrow().raw_array_ptr_mut().cast::<u16>().add(index).read()).map(IValue::from),
-                    F16 => Some(self.reborrow().raw_array_ptr_mut().cast::<f16>().add(index).read()).map(IValue::from),
-                    BF16 => Some(self.reborrow().raw_array_ptr_mut().cast::<bf16>().add(index).read()).map(IValue::from),
-                    I32 => Some(self.reborrow().raw_array_ptr_mut().cast::<i32>().add(index).read()).map(IValue::from),
-                    U32 => Some(self.reborrow().raw_array_ptr_mut().cast::<u32>().add(index).read()).map(IValue::from),
-                    F32 => Some(self.reborrow().raw_array_ptr_mut().cast::<f32>().add(index).read()).map(IValue::from),
-                    I64 => Some(self.reborrow().raw_array_ptr_mut().cast::<i64>().add(index).read()).map(IValue::from),
-                    U64 => Some(self.reborrow().raw_array_ptr_mut().cast::<u64>().add(index).read()).map(IValue::from),
-                    F64 => Some(self.reborrow().raw_array_ptr_mut().cast::<f64>().add(index).read()).map(IValue::from),
+                    I8 => Some(self.reborrow().raw_array_ptr_mut().cast::<i8>().add(index).read().into()),
+                    U8 => Some(self.reborrow().raw_array_ptr_mut().cast::<u8>().add(index).read().into()),
+                    I16 => Some(self.reborrow().raw_array_ptr_mut().cast::<i16>().add(index).read().into()),
+                    U16 => Some(self.reborrow().raw_array_ptr_mut().cast::<u16>().add(index).read().into()),
+                    F16 => Some(self.reborrow().raw_array_ptr_mut().cast::<f16>().add(index).read().into()),
+                    BF16 => Some(self.reborrow().raw_array_ptr_mut().cast::<bf16>().add(index).read().into()),
+                    I32 => Some(self.reborrow().raw_array_ptr_mut().cast::<i32>().add(index).read().into()),
+                    U32 => Some(self.reborrow().raw_array_ptr_mut().cast::<u32>().add(index).read().into()),
+                    F32 => Some(self.reborrow().raw_array_ptr_mut().cast::<f32>().add(index).read().into()),
+                    I64 => Some(self.reborrow().raw_array_ptr_mut().cast::<i64>().add(index).read().into()),
+                    U64 => Some(self.reborrow().raw_array_ptr_mut().cast::<u64>().add(index).read().into()),
+                    F64 => Some(self.reborrow().raw_array_ptr_mut().cast::<f64>().add(index).read().into()),
                 }
             }
         }
@@ -747,48 +742,51 @@ impl IArray {
     }
 
     /// Converts primitive array elements from one type to another
+    /// Safety: src_tag must match the actual type of the source array,
+    ///     and dst_tag must be a valid primitive type (not Heterogeneous).
+    ///     The destination type must be able to represent all values of the source type.
+    ///     The destination array must have enough capacity to hold `len` elements.
     unsafe fn convert_primitive_array(&self, dst: &mut IArray, src_tag: ArrayTag, dst_tag: ArrayTag, len: usize) {
         use ArrayTag::*;
 
         macro_rules! convert_array {
-            ($src_type:ty, $dst_type:ty, $src_variant:ident, $dst_variant:ident) => {
-                if let ArraySliceRef::$src_variant(src_slice) = self.header().items_slice() {
-                    let dst_ptr = dst.header_mut().raw_array_ptr_mut().cast::<$dst_type>();
-                    for (i, &val) in src_slice.iter().enumerate() {
-                        dst_ptr.add(i).write(val.into());
-                    }
-                    dst.header_mut().set_len(len);
+            ($src_type:ty, $dst_type:ty) => {{
+                let src_slice = self.header().as_slice_unchecked::<$src_type>();
+                let dst_ptr = dst.header_mut().raw_array_ptr_mut().cast::<$dst_type>();
+                for (i, &val) in src_slice.iter().enumerate() {
+                    dst_ptr.add(i).write(val.into());
                 }
-            };
+                dst.header_mut().set_len(len);
+            }};
         }
 
         match (src_tag, dst_tag) {
-            (I8, I16) => convert_array!(i8, i16, I8, I16),
-            (I8, I32) => convert_array!(i8, i32, I8, I32),
-            (I8, I64) => convert_array!(i8, i64, I8, I64),
-            (I16, I32) => convert_array!(i16, i32, I16, I32),
-            (I16, I64) => convert_array!(i16, i64, I16, I64),
-            (I32, I64) => convert_array!(i32, i64, I32, I64),
+            (I8, I16) => convert_array!(i8, i16),
+            (I8, I32) => convert_array!(i8, i32),
+            (I8, I64) => convert_array!(i8, i64),
+            (I16, I32) => convert_array!(i16, i32),
+            (I16, I64) => convert_array!(i16, i64),
+            (I32, I64) => convert_array!(i32, i64),
 
-            (U8, U16) => convert_array!(u8, u16, U8, U16),
-            (U8, U32) => convert_array!(u8, u32, U8, U32),
-            (U8, U64) => convert_array!(u8, u64, U8, U64),
-            (U16, U32) => convert_array!(u16, u32, U16, U32),
-            (U16, U64) => convert_array!(u16, u64, U16, U64),
-            (U32, U64) => convert_array!(u32, u64, U32, U64),
+            (U8, U16) => convert_array!(u8, u16),
+            (U8, U32) => convert_array!(u8, u32),
+            (U8, U64) => convert_array!(u8, u64),
+            (U16, U32) => convert_array!(u16, u32),
+            (U16, U64) => convert_array!(u16, u64),
+            (U32, U64) => convert_array!(u32, u64),
 
-            (U8, I16) => convert_array!(u8, i16, U8, I16),
-            (U8, I32) => convert_array!(u8, i32, U8, I32),
-            (U8, I64) => convert_array!(u8, i64, U8, I64),
-            (U16, I32) => convert_array!(u16, i32, U16, I32),
-            (U16, I64) => convert_array!(u16, i64, U16, I64),
-            (U32, I64) => convert_array!(u32, i64, U32, I64),
+            (U8, I16) => convert_array!(u8, i16),
+            (U8, I32) => convert_array!(u8, i32),
+            (U8, I64) => convert_array!(u8, i64),
+            (U16, I32) => convert_array!(u16, i32),
+            (U16, I64) => convert_array!(u16, i64),
+            (U32, I64) => convert_array!(u32, i64),
 
-            (F16, F32) => convert_array!(f16, f32, F16, F32),
-            (F16, F64) => convert_array!(f16, f64, F16, F64),
-            (BF16, F32) => convert_array!(bf16, f32, BF16, F32),
-            (BF16, F64) => convert_array!(bf16, f64, BF16, F64),
-            (F32, F64) => convert_array!(f32, f64, F32, F64),
+            (F16, F32) => convert_array!(f16, f32),
+            (F16, F64) => convert_array!(f16, f64),
+            (BF16, F32) => convert_array!(bf16, f32),
+            (BF16, F64) => convert_array!(bf16, f64),
+            (F32, F64) => convert_array!(f32, f64),
 
             _ => panic!("Unsupported type promotion from {:?} to {:?}", src_tag, dst_tag),
         }
@@ -799,8 +797,6 @@ impl IArray {
     pub fn len(&self) -> usize {
         self.header().len()
     }
-
-
 
     /// Returns `true` if the array is empty.
     #[must_use]
@@ -814,6 +810,22 @@ impl IArray {
         self.header().items_slice()
     }
 
+    /// Borrows a slice of the array contents if it is of the specified type.
+    #[must_use]
+    pub fn as_slice_of<T>(&self) -> Option<&[T]> {
+        if self.header().type_tag() != ArrayTag::from_type::<T>() {
+            return None;
+        }
+        Some(unsafe { self.header().as_slice_unchecked::<T>() })
+    }
+
+    /// Borrows a slice of the array contents, unchecked.
+    /// Safety: The caller must ensure that the array actually contains elements of type T.
+    #[must_use]
+    pub unsafe fn as_slice_of_unchecked<T>(&self) -> &[T] {
+        self.header().as_slice_unchecked::<T>()
+    }
+
     /// Borrows a mutable slice of the array contents
     pub fn as_mut_slice(&mut self) -> ArraySliceMut<'_> {
         if self.is_static() {
@@ -821,6 +833,21 @@ impl IArray {
         } else {
             unsafe { self.header_mut().items_slice_mut() }
         }
+    }
+
+    /// Borrows a mutable slice of the array contents if it is of the specified type.
+    pub fn as_mut_slice_of<T>(&mut self) -> Option<&mut [T]> {
+        if self.header().type_tag() != ArrayTag::from_type::<T>() {
+            return None;
+        }
+        Some(unsafe { self.header_mut().as_mut_slice_unchecked::<T>() })
+    }
+
+    /// Borrows a mutable slice of the array contents, unchecked.
+    /// Safety: The caller must ensure that the array actually contains elements of type T
+    ///     and that the array is not static.
+    pub unsafe fn as_mut_slice_of_unchecked<T>(&mut self) -> &mut [T] {
+        self.header_mut().as_mut_slice_unchecked::<T>()
     }
 
     fn resize_internal(&mut self, cap: usize) {
@@ -1093,8 +1120,10 @@ impl IArray {
         let mut res = Self::with_capacity_and_tag(len, tag);
 
         if len > 0 {
-            if let ArraySliceRef::Heterogeneous(src) = hd.items_slice() {
+            if tag == ArrayTag::Heterogeneous {
                 unsafe {
+                    // Safety: we checked that the type is heterogeneous
+                    let src = hd.as_slice_unchecked::<IValue>();
                     // Safety: we cannot be static if len > 0
                     let mut res_hd = res.header_mut();
                     for v in src {
@@ -1132,11 +1161,9 @@ impl IArray {
         } else {
             let tag = self.header().type_tag();
             let layout_size = Self::layout(self.capacity(), tag).unwrap().size();
-            let contained_size = if let ArraySliceRef::Heterogeneous(slice) = self.as_slice() {
+            let contained_size = self.as_slice_of::<IValue>().map(|slice| {
                 slice.iter().map(IValue::mem_allocated).sum()
-            } else {
-                0
-            };
+            }).unwrap_or(0);
             layout_size + contained_size
         }
     }
@@ -1147,24 +1174,22 @@ impl<A: DefragAllocator> Defrag<A> for IArray {
         if self.is_static() {
             return self;
         }
-        if let ArraySliceMut::Heterogeneous(slice) = self.as_mut_slice() {
+        self.as_mut_slice_of::<IValue>().map(|slice| {
             for i in 0..slice.len() {
                 unsafe {
-                    let val = slice.as_ptr().add(i).read();
-                    let val = val.defrag(defrag_allocator);
-                    std::ptr::write(slice.as_ptr().add(i) as *mut IValue, val);
+                    let ptr = slice.as_ptr().add(i);
+                    let val = ptr.read().defrag(defrag_allocator);
+                    std::ptr::write(ptr as *mut IValue, val);
                 }
             }
-        }
-        // else {} typed arrays don't need defragmentation
+        });
 
         unsafe {
             let header = &*self.0.ptr().cast::<Header>();
             let tag = header.type_tag();
             let new_ptr = defrag_allocator.realloc_ptr(
                 self.0.ptr(),
-                Self::layout(header.cap(), tag)
-                    .expect("layout is expected to return a valid value"),
+                Self::layout(header.cap(), tag).unwrap(),
             );
             self.0.set_ptr(new_ptr.cast());
         }
@@ -1426,20 +1451,20 @@ impl<I: SliceIndex<[IValue]>> Index<I> for IArray {
 
     #[inline]
     fn index(&self, index: I) -> &Self::Output {
-        match self.as_slice() {
-            ArraySliceRef::Heterogeneous(slice) => Index::index(slice, index),
-            _ => panic!("Invalid index access"),
-        }
+        self.as_slice_of::<IValue>().map_or_else(
+            || panic!("Invalid index access"),
+            |slice| Index::index(slice, index),
+        )
     }
 }
 
 impl<I: SliceIndex<[IValue]>> IndexMut<I> for IArray {
     #[inline]
     fn index_mut(&mut self, index: I) -> &mut Self::Output {
-        match self.as_mut_slice() {
-            ArraySliceMut::Heterogeneous(slice) => IndexMut::index_mut(slice, index),
-            _ => panic!("Invalid index access"),
-        }
+        self.as_mut_slice_of::<IValue>().map_or_else(
+            || panic!("Invalid index access"),
+            |slice| IndexMut::index_mut(slice, index),
+        )
     }
 }
 
@@ -1867,20 +1892,14 @@ impl IArray {
     /// Only works for heterogeneous arrays (arrays containing IValue objects).
     /// For typed arrays, use `as_slice()` to get direct access to the underlying slice.
     pub fn get(&self, index: usize) -> Option<&IValue> {
-        match self.as_slice() {
-            ArraySliceRef::Heterogeneous(slice) => slice.get(index),
-            _ => None,
-        }
+        self.as_slice_of::<IValue>().and_then(|slice| slice.get(index))
     }
 
     /// Gets a mutable reference to the element at the given index.
     /// Only works for heterogeneous arrays (arrays containing IValue objects).
     /// For typed arrays, use `as_mut_slice()` to get direct access to the underlying slice.
     pub fn get_mut(&mut self, index: usize) -> Option<&mut IValue> {
-        match self.as_mut_slice() {
-            ArraySliceMut::Heterogeneous(slice) => slice.get_mut(index),
-            _ => None,
-        }
+        self.as_mut_slice_of::<IValue>().and_then(|slice| slice.get_mut(index))
     }
 }
 
