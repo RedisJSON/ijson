@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use std::convert::{TryFrom, TryInto};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
+use half::{bf16, f16};
 
 use crate::{Defrag, DefragAllocator};
 
@@ -272,6 +273,26 @@ impl INumber {
     pub fn to_usize(&self) -> Option<usize> {
         self.to_u64().map(|v| v as _)
     }
+    /// Converts this number to an i8 if it can be represented exactly.
+    #[must_use]
+    pub fn to_i8(&self) -> Option<i8> {
+        self.to_i64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to a u8 if it can be represented exactly.
+    #[must_use]
+    pub fn to_u8(&self) -> Option<u8> {
+        self.to_u64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to an i16 if it can be represented exactly.
+    #[must_use]
+    pub fn to_i16(&self) -> Option<i16> {
+        self.to_i64().and_then(|x| x.try_into().ok())
+    }
+    /// Converts this number to a u16 if it can be represented exactly.
+    #[must_use]
+    pub fn to_u16(&self) -> Option<u16> {
+        self.to_u64().and_then(|x| x.try_into().ok())
+    }
     /// Converts this number to an i32 if it can be represented exactly.
     #[must_use]
     pub fn to_i32(&self) -> Option<i32> {
@@ -400,6 +421,40 @@ impl INumber {
                 }
             }
         }
+    }
+    /// Converts this number to an f16, potentially losing precision in the process.
+    #[must_use]
+    pub fn to_f16_lossy(&self) -> f16 {
+        f16::from_f32(self.to_f32_lossy())
+    }
+    /// Converts this number to an f16 if it can be represented exactly.
+    #[must_use]
+    pub fn to_f16(&self) -> Option<f16> {
+        self.to_f32().and_then(|v| {
+            let u = f16::from_f32(v);
+            if v == f32::from(u) {
+                Some(u)
+            } else {
+                None
+            }
+        })
+    }
+    /// Converts this number to a bf16, potentially losing precision in the process.
+    #[must_use]
+    pub fn to_bf16_lossy(&self) -> bf16 {
+        bf16::from_f32(self.to_f32_lossy())
+    }
+    /// Converts this number to a bf16 if it can be represented exactly.
+    #[must_use]
+    pub fn to_bf16(&self) -> Option<bf16> {
+        self.to_f32().and_then(|v| {
+            let u = bf16::from_f32(v);
+            if v == f32::from(u) {
+                Some(u)
+            } else {
+                None
+            }
+        })
     }
 
     fn cmp_impl(&self, other: &Self) -> Ordering {
@@ -545,6 +600,26 @@ impl TryFrom<f32> for INumber {
     fn try_from(v: f32) -> Result<Self, ()> {
         if v.is_finite() {
             Ok(Self::new_f64(v as f64))
+        } else {
+            Err(())
+        }
+    }
+}
+impl TryFrom<f16> for INumber {
+    type Error = ();
+    fn try_from(v: f16) -> Result<Self, ()> {
+        if v.is_finite() {
+            Ok(Self::new_f64(f64::from(v)))
+        } else {
+            Err(())
+        }
+    }
+}
+impl TryFrom<bf16> for INumber {
+    type Error = ();
+    fn try_from(v: bf16) -> Result<Self, ()> {
+        if v.is_finite() {
+            Ok(Self::new_f64(f64::from(v)))
         } else {
             Err(())
         }

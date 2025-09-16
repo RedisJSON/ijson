@@ -6,6 +6,7 @@ use std::hash::Hash;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
+use half::{bf16, f16};
 
 use crate::{Defrag, DefragAllocator};
 
@@ -85,7 +86,7 @@ pub enum Destructured {
 impl Destructured {
     /// Convert to the borrowed form of thie enum.
     #[must_use]
-    pub fn as_ref(&self) -> DestructuredRef {
+    pub fn as_ref(&self) -> DestructuredRef<'_> {
         use DestructuredRef::{Array, Bool, Null, Number, Object, String};
         match self {
             Self::Null => Null,
@@ -326,7 +327,7 @@ impl IValue {
 
     /// Destructures a reference to this value into an enum which can be `match`ed on.
     #[must_use]
-    pub fn destructure_ref(&self) -> DestructuredRef {
+    pub fn destructure_ref(&self) -> DestructuredRef<'_> {
         // Safety: we check the type
         unsafe {
             match self.type_() {
@@ -341,7 +342,7 @@ impl IValue {
     }
 
     /// Destructures a mutable reference to this value into an enum which can be `match`ed on.
-    pub fn destructure_mut(&mut self) -> DestructuredMut {
+    pub fn destructure_mut(&mut self) -> DestructuredMut<'_> {
         // Safety: we check the type
         unsafe {
             match self.type_() {
@@ -551,6 +552,36 @@ impl IValue {
     pub fn to_f32(&self) -> Option<f32> {
         self.as_number()?.to_f32()
     }
+    /// Converts this value to an f16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_f16(&self) -> Option<f16> {
+        self.as_number()?.to_f16()
+    }
+    /// Converts this value to a bf16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_bf16(&self) -> Option<bf16> {
+        self.as_number()?.to_bf16()
+    }
+    /// Converts this value to an i8 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_i8(&self) -> Option<i8> {
+        self.as_number()?.to_i8()
+    }
+    /// Converts this value to a u8 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_u8(&self) -> Option<u8> {
+        self.as_number()?.to_u8()
+    }
+    /// Converts this value to an i16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_i16(&self) -> Option<i16> {
+        self.as_number()?.to_i16()
+    }
+    /// Converts this value to a u16 if it is a number that can be represented exactly.
+    #[must_use]
+    pub fn to_u16(&self) -> Option<u16> {
+        self.as_number()?.to_u16()
+    }
     /// Converts this value to an i32 if it is a number that can be represented exactly.
     #[must_use]
     pub fn to_i32(&self) -> Option<i32> {
@@ -582,6 +613,18 @@ impl IValue {
     #[must_use]
     pub fn to_f32_lossy(&self) -> Option<f32> {
         Some(self.as_number()?.to_f32_lossy())
+    }
+    /// Converts this value to an f16 if it is a number, potentially losing precision
+    /// in the process.
+    #[must_use]
+    pub fn to_f16_lossy(&self) -> Option<f16> {
+        Some(self.as_number()?.to_f16_lossy())
+    }
+    /// Converts this value to an bf16 if it is a number, potentially losing precision
+    /// in the process.
+    #[must_use]
+    pub fn to_bf16_lossy(&self) -> Option<bf16> {
+        Some(self.as_number()?.to_bf16_lossy())
     }
 
     // # String methods
@@ -1002,6 +1045,18 @@ typed_conversions! {
         BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
 }
 
+impl From<f16> for IValue {
+    fn from(v: f16) -> Self {
+        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
+    }
+}
+
+impl From<bf16> for IValue {
+    fn from(v: bf16) -> Self {
+        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
+    }
+}
+
 impl From<f32> for IValue {
     fn from(v: f32) -> Self {
         INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
@@ -1181,12 +1236,12 @@ mod tests {
     #[mockalloc::test]
     fn test_string() {
         for v in 0..10 {
-            let s = v.to_string();
-            let mut x = IValue::from(&s);
+            let mut s = IString::intern(&v.to_string());
+            let mut x = IValue::from(s.clone());
             assert!(x.is_string());
             assert_eq!(x.type_(), ValueType::String);
-            assert_eq!(x.as_string(), Some(&IString::intern(&s)));
-            assert_eq!(x.as_string_mut(), Some(&mut IString::intern(&s)));
+            assert_eq!(x.as_string(), Some(&s));
+            assert_eq!(x.as_string_mut(), Some(&mut s));
             assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
@@ -1219,7 +1274,7 @@ mod tests {
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Array(u) if *u == a));
             assert_eq!(
                 x.mem_allocated(),
-                2 * mem::size_of::<usize>() + a.capacity() * mem::size_of::<IValue>()
+                mem::size_of::<usize>() + ((a.capacity() * mem::size_of::<i32>() + 7) & !7)
             );
         }
     }

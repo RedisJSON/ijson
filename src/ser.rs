@@ -64,7 +64,7 @@ impl Serialize for IArray {
     {
         let mut s = serializer.serialize_seq(Some(self.len()))?;
         for v in self {
-            s.serialize_element(v)?;
+            s.serialize_element(&v)?;
         }
         s.end()
     }

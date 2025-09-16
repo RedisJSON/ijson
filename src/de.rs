@@ -1,10 +1,8 @@
 use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
-use std::slice;
 
 use serde::de::{
-    DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess,
-    Unexpected, VariantAccess, Visitor,
+    DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess, Unexpected, VariantAccess, Visitor
 };
 use serde::{forward_to_deserialize_any, Deserialize, Deserializer};
 use serde_json::error::Error;
@@ -563,14 +561,38 @@ impl<'de> Deserializer<'de> for &'de IArray {
     where
         V: Visitor<'de>,
     {
+        use crate::array::ArraySliceRef;
         let len = self.len();
-        let mut deserializer = ArrayAccess::new(self);
-        let seq = visitor.visit_seq(&mut deserializer)?;
-        let remaining = deserializer.iter.len();
-        if remaining == 0 {
-            Ok(seq)
-        } else {
-            Err(SError::invalid_length(len, &"fewer elements in array"))
+
+        macro_rules! deserialize_typed_array {
+            ($variant:ident, $slice:expr) => {{
+                let mut deserializer = ArrayAccess {
+                    iter: Iter::$variant($slice.iter())
+                };
+                let seq = visitor.visit_seq(&mut deserializer)?;
+                let remaining = deserializer.remaining_len();
+                if remaining == 0 {
+                    Ok(seq)
+                } else {
+                    Err(SError::invalid_length(len, &"fewer elements in array"))
+                }
+            }};
+        }
+
+        match self.as_slice() {
+            ArraySliceRef::Heterogeneous(slice) => deserialize_typed_array!(Heterogeneous, slice),
+            ArraySliceRef::I8(slice) => deserialize_typed_array!(I8, slice),
+            ArraySliceRef::U8(slice) => deserialize_typed_array!(U8, slice),
+            ArraySliceRef::I16(slice) => deserialize_typed_array!(I16, slice),
+            ArraySliceRef::U16(slice) => deserialize_typed_array!(U16, slice),
+            ArraySliceRef::F16(slice) => deserialize_typed_array!(F16, slice),
+            ArraySliceRef::BF16(slice) => deserialize_typed_array!(BF16, slice),
+            ArraySliceRef::I32(slice) => deserialize_typed_array!(I32, slice),
+            ArraySliceRef::U32(slice) => deserialize_typed_array!(U32, slice),
+            ArraySliceRef::F32(slice) => deserialize_typed_array!(F32, slice),
+            ArraySliceRef::I64(slice) => deserialize_typed_array!(I64, slice),
+            ArraySliceRef::U64(slice) => deserialize_typed_array!(U64, slice),
+            ArraySliceRef::F64(slice) => deserialize_typed_array!(F64, slice),
         }
     }
 
@@ -808,12 +830,42 @@ impl<'de> VariantAccess<'de> for VariantDeserializer<'de> {
 }
 
 struct ArrayAccess<'de> {
-    iter: slice::Iter<'de, IValue>,
+    iter: Iter<'de>,
+}
+
+enum Iter<'de> {
+    Heterogeneous(std::slice::Iter<'de, IValue>),
+    I8(std::slice::Iter<'de, i8>),
+    U8(std::slice::Iter<'de, u8>),
+    I16(std::slice::Iter<'de, i16>),
+    U16(std::slice::Iter<'de, u16>),
+    F16(std::slice::Iter<'de, half::f16>),
+    BF16(std::slice::Iter<'de, half::bf16>),
+    I32(std::slice::Iter<'de, i32>),
+    U32(std::slice::Iter<'de, u32>),
+    F32(std::slice::Iter<'de, f32>),
+    I64(std::slice::Iter<'de, i64>),
+    U64(std::slice::Iter<'de, u64>),
+    F64(std::slice::Iter<'de, f64>),
 }
 
 impl<'de> ArrayAccess<'de> {
-    fn new(slice: &'de [IValue]) -> Self {
-        ArrayAccess { iter: slice.iter() }
+    fn remaining_len(&self) -> usize {
+        match &self.iter {
+            Iter::Heterogeneous(it) => it.len(),
+            Iter::I8(it) => it.len(),
+            Iter::U8(it) => it.len(),
+            Iter::I16(it) => it.len(),
+            Iter::U16(it) => it.len(),
+            Iter::F16(it) => it.len(),
+            Iter::BF16(it) => it.len(),
+            Iter::I32(it) => it.len(),
+            Iter::U32(it) => it.len(),
+            Iter::F32(it) => it.len(),
+            Iter::I64(it) => it.len(),
+            Iter::U64(it) => it.len(),
+            Iter::F64(it) => it.len(),
+        }
     }
 }
 
@@ -824,17 +876,72 @@ impl<'de> SeqAccess<'de> for ArrayAccess<'de> {
     where
         T: DeserializeSeed<'de>,
     {
-        match self.iter.next() {
-            Some(value) => seed.deserialize(value).map(Some),
-            None => Ok(None),
+        use serde::de::IntoDeserializer as _;
+        match &mut self.iter {
+            Iter::Heterogeneous(it) => match it.next() {
+                Some(v) => seed.deserialize(v).map(Some),
+                None => Ok(None),
+            },
+            Iter::I8(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::U8(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::I16(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::U16(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            // For f16/bf16, feed as f32 so downstream types (f16/f32/f64) can convert
+            Iter::F16(it) => match it.next() {
+                Some(v) => {
+                    let f: f32 = v.to_f32();
+                    seed.deserialize(f.into_deserializer()).map(Some)
+                }
+                None => Ok(None),
+            },
+            Iter::BF16(it) => match it.next() {
+                Some(v) => {
+                    let f: f32 = v.to_f32();
+                    seed.deserialize(f.into_deserializer()).map(Some)
+                }
+                None => Ok(None),
+            },
+            Iter::I32(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::U32(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::F32(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::I64(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::U64(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
+            Iter::F64(it) => match it.next() {
+                Some(v) => seed.deserialize((*v).into_deserializer()).map(Some),
+                None => Ok(None),
+            },
         }
     }
 
     fn size_hint(&self) -> Option<usize> {
-        match self.iter.size_hint() {
-            (lower, Some(upper)) if lower == upper => Some(upper),
-            _ => None,
-        }
+        Some(self.remaining_len())
     }
 }
 
