@@ -214,9 +214,9 @@ impl<'de> Visitor<'de> for ArrayVisitor {
     where
         V: SeqAccess<'de>,
     {
-        let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0));
+        let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0)).map_err(|_| SError::custom("Failed to allocate array"))?;
         while let Some(v) = visitor.next_element::<IValue>()? {
-            arr.push(v);
+            arr.push(v).map_err(|_| SError::custom("Failed to push to array"))?;
         }
         Ok(arr)
     }

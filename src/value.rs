@@ -1037,12 +1037,20 @@ impl From<bool> for IValue {
 typed_conversions! {
     INumber: i8, u8, i16, u16, i32, u32, i64, u64, isize, usize;
     IString: String, &String, &mut String, &str, &mut str;
-    IArray:
-        Vec<T> where (T: Into<IValue>),
-        &[T] where (T: Into<IValue> + Clone);
     IObject:
         HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
         BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
+}
+
+impl<T: Into<IValue>> From<Vec<T>> for IValue {
+    fn from(v: Vec<T>) -> Self {
+        IArray::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
+    }
+}
+impl<T: Into<IValue> + Clone> From<&[T]> for IValue {
+    fn from(v: &[T]) -> Self {
+        IArray::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
+    }
 }
 
 impl From<f16> for IValue {

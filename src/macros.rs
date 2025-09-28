@@ -94,43 +94,43 @@ macro_rules! ijson_internal {
 
     // Next element is `null`.
     (@array $array:ident , null $($rest:tt)*) => {
-        $array.push(ijson_internal!(null));
+        $array.push(ijson_internal!(null)).unwrap();
         ijson_internal!(@array $array $($rest)*)
     };
 
     // Next element is `true`.
     (@array $array:ident , true $($rest:tt)*) => {
-        $array.push(ijson_internal!(true));
+        $array.push(ijson_internal!(true)).unwrap();
         ijson_internal!(@array $array $($rest)*)
     };
 
     // Next element is `false`.
     (@array $array:ident , false $($rest:tt)*) => {
-        $array.push(ijson_internal!(false));
+        $array.push(ijson_internal!(false)).unwrap();
         ijson_internal!(@array $array $($rest)*)
     };
 
     // Next element is an array.
     (@array $array:ident , [$($arr:tt)*] $($rest:tt)*) => {
-        $array.push(ijson_internal!([$($arr)*]));
+        $array.push(ijson_internal!([$($arr)*])).unwrap();
         ijson_internal!(@array $array $($rest)*)
     };
 
     // Next element is an object.
     (@array $array:ident , {$($obj:tt)*} $($rest:tt)*) => {
-        $array.push(ijson_internal!({$($obj)*}));
+        $array.push(ijson_internal!({$($obj)*})).unwrap();
         ijson_internal!(@array $array $($rest)*)
     };
 
     // Next element is an expression followed by comma.
     (@array $array:ident , $next:expr , $($rest:tt)*) => {
-        $array.push(ijson_internal!($next));
+        $array.push(ijson_internal!($next)).unwrap();
         ijson_internal!(@array $array , $($rest)*)
     };
 
     // Last element is an expression with no trailing comma.
     (@array $array:ident , $last:expr) => {
-        $array.push(ijson_internal!($last));
+        $array.push(ijson_internal!($last)).unwrap();
     };
 
     // Unexpected token after most recent element.
