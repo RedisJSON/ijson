@@ -229,7 +229,7 @@ impl Serializer for ValueSerializer {
 
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
         Ok(SerializeArray {
-            array: IArray::with_capacity(len.unwrap_or(0)),
+            array: IArray::with_capacity(len.unwrap_or(0)).map_err(|_| Error::custom("Failed to allocate array"))?,
         })
     }
 
@@ -254,7 +254,7 @@ impl Serializer for ValueSerializer {
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
         Ok(SerializeArrayVariant {
             name: variant.into(),
-            array: IArray::with_capacity(len),
+            array: IArray::with_capacity(len).map_err(|_| Error::custom("Failed to allocate array"))?,
         })
     }
 
@@ -314,7 +314,7 @@ impl SerializeSeq for SerializeArray {
     where
         T: ?Sized + Serialize,
     {
-        self.array.push(value.serialize(ValueSerializer)?);
+        self.array.push(value.serialize(ValueSerializer)?).map_err(|_| Error::custom("Failed to push to array"))?;
         Ok(())
     }
 
@@ -363,7 +363,7 @@ impl SerializeTupleVariant for SerializeArrayVariant {
     where
         T: ?Sized + Serialize,
     {
-        self.array.push(value.serialize(ValueSerializer)?);
+        self.array.push(value.serialize(ValueSerializer)?).map_err(|_| Error::custom("Failed to push to array"))?;
         Ok(())
     }
 
