@@ -1059,14 +1059,14 @@ impl IArray {
         use ArrayTag::*;
         item.as_number().map_or(false, |num| {
             match array_tag {
-                I8 => num.to_i8().is_some(),
-                U8 => num.to_u8().is_some(),
-                I16 => num.to_i16().is_some(),
-                U16 => num.to_u16().is_some(),
-                I32 => num.to_i32().is_some(),
-                U32 => num.to_u32().is_some(),
-                I64 => num.to_i64().is_some(),
-                U64 => num.to_u64().is_some(),
+                I8 => num.to_i8().is_some() && !num.has_decimal_point(),
+                U8 => num.to_u8().is_some() && !num.has_decimal_point(),
+                I16 => num.to_i16().is_some() && !num.has_decimal_point(),
+                U16 => num.to_u16().is_some() && !num.has_decimal_point(),
+                I32 => num.to_i32().is_some() && !num.has_decimal_point(),
+                U32 => num.to_u32().is_some() && !num.has_decimal_point(),
+                I64 => num.to_i64().is_some() && !num.has_decimal_point(),
+                U64 => num.to_u64().is_some() && !num.has_decimal_point(),
                 F16 => num.has_decimal_point() && num.to_f16().is_some(),
                 BF16 => num.has_decimal_point() && num.to_bf16().is_some(),
                 F32 => num.has_decimal_point() && num.to_f32().is_some(),
@@ -1956,6 +1956,8 @@ impl Default for IArray {
 mod tests {
     use core::panic;
     use std::u8;
+
+    use serde::Deserialize;
 
     use super::*;
 
@@ -2962,6 +2964,16 @@ mod tests {
         assert_eq!(arr.header().type_tag(), ArrayTag::F64);
         assert_eq!(arr.capacity(), expected);
         assert!(!arr.is_static());
+    }
+
+    #[test]
+    fn test_array_deserialize_with_float_that_can_be_represented_as_integer() {
+        let value = "[1, 2.0]";
+        let mut deserializer = serde_json::Deserializer::from_str(value);
+
+        let arr = IValue::deserialize(&mut deserializer).unwrap();
+        let arr = arr.into_array().unwrap();
+        assert_eq!(arr.as_slice().type_tag(), ArrayTag::Heterogeneous);
     }
 
     // Too slow for miri
