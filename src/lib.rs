@@ -18,8 +18,6 @@
 //!   There is no performance benefit to this, but it can help avoid false positives
 //!   from tools like `mockalloc` which try to detect memory leaks during tests.
 #![deny(missing_docs, missing_debug_implementations)]
-#![allow(incomplete_features)]
-#![feature(specialization, allocator_api)]
 
 #[macro_use]
 mod macros;
@@ -30,9 +28,6 @@ pub mod object;
 
 #[cfg(feature = "thread_safe")]
 pub mod string;
-
-use std::alloc::Layout;
-
 #[cfg(feature = "thread_safe")]
 pub use string::IString;
 
@@ -41,12 +36,14 @@ pub mod unsafe_string;
 #[cfg(not(feature = "thread_safe"))]
 pub use unsafe_string::IString;
 
+mod alloc;
 mod thin;
 mod value;
 
 pub use array::IArray;
 pub use number::INumber;
 pub use object::IObject;
+use std::alloc::Layout;
 
 pub use value::{
     BoolMut, Destructured, DestructuredMut, DestructuredRef, IValue, ValueIndex, ValueType,

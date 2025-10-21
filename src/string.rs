@@ -12,10 +12,10 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use dashmap::{DashSet, SharedValue};
 use lazy_static::lazy_static;
 
-use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
-use crate::{Defrag, DefragAllocator};
-
-use super::value::{IValue, TypeTag};
+use crate::{
+    thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt},
+    Defrag, DefragAllocator, IValue, TypeTag,
+};
 
 #[repr(C)]
 #[repr(align(8))]

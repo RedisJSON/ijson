@@ -1,18 +1,20 @@
 //! Functionality relating to the JSON array type
 
-use std::alloc::{alloc, dealloc, realloc, AllocError, Layout, LayoutError};
+use half::{bf16, f16};
+use std::alloc::{alloc, dealloc, realloc, Layout, LayoutError};
 use std::cmp::{self, Ordering, PartialOrd};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::iter::FromIterator;
 use std::ops::{Index, IndexMut};
 use std::slice::{from_raw_parts, from_raw_parts_mut, SliceIndex};
-use half::{f16, bf16};
 
-use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
-use crate::{Defrag, DefragAllocator};
-
-use super::value::{IValue, TypeTag};
+use crate::{
+    alloc::AllocError,
+    thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt},
+    value::TypeTag,
+    Defrag, DefragAllocator, IValue,
+};
 
 /// Tag indicating the type of elements stored in a typed array
 #[repr(u8)]
@@ -87,12 +89,22 @@ impl ArrayTag {
         match (self, other) {
             _ if self == other => self,
             (Heterogeneous, _) | (_, Heterogeneous) => Heterogeneous,
-            (x, y) if x.is_integer() && y.is_float() || x.is_float() && y.is_integer() => Heterogeneous,
+            (x, y) if x.is_integer() && y.is_float() || x.is_float() && y.is_integer() => {
+                Heterogeneous
+            }
             (x, y) if x.is_float() && y.is_float() => unsafe { x.max_float(y) },
-            (x, y) if x.is_signed_integer() && y.is_signed_integer() => unsafe { x.max_signed_integer(y) },
-            (x, y) if x.is_unsigned_integer() && y.is_unsigned_integer() => unsafe { x.max_unsigned_integer(y) },
-            (x, y) if x.is_unsigned_integer() && y.is_signed_integer() => unsafe { x.promote_unsigned(y) },
-            (x, y) if x.is_signed_integer() && y.is_unsigned_integer() => unsafe { y.promote_unsigned(x) },
+            (x, y) if x.is_signed_integer() && y.is_signed_integer() => unsafe {
+                x.max_signed_integer(y)
+            },
+            (x, y) if x.is_unsigned_integer() && y.is_unsigned_integer() => unsafe {
+                x.max_unsigned_integer(y)
+            },
+            (x, y) if x.is_unsigned_integer() && y.is_signed_integer() => unsafe {
+                x.promote_unsigned(y)
+            },
+            (x, y) if x.is_signed_integer() && y.is_unsigned_integer() => unsafe {
+                y.promote_unsigned(x)
+            },
             _ => Heterogeneous,
         }
     }
@@ -171,12 +183,14 @@ impl ArrayTag {
         use ArrayTag::*;
         if let Some(num) = value.as_number() {
             if num.has_decimal_point() {
-                num.to_f16().map(|_| F16)
+                num.to_f16()
+                    .map(|_| F16)
                     .or_else(|| num.to_bf16().map(|_| BF16))
                     .or_else(|| num.to_f32().map(|_| F32))
                     .or_else(|| num.to_f64().map(|_| F64))
             } else {
-                num.to_i8().map(|_| I8)
+                num.to_i8()
+                    .map(|_| I8)
                     .or_else(|| num.to_u8().map(|_| U8))
                     .or_else(|| num.to_i16().map(|_| I16))
                     .or_else(|| num.to_u16().map(|_| U16))
@@ -335,18 +349,20 @@ pub enum ArraySliceMut<'a> {
 }
 
 macro_rules! from_impl {
-    ($(($ty:ty, $variant:ident)),*) => {
-        $(impl<'a> From<&'a [$ty]> for ArraySliceRef<'a> {
-            fn from(slice: &'a [$ty]) -> Self {
-                ArraySliceRef::$variant(slice)
+    ($(($ty:ty, $tag:ident)),*) => {
+        $(
+            impl<'a> From<&'a [$ty]> for ArraySliceRef<'a> {
+                fn from(slice: &'a [$ty]) -> Self {
+                    ArraySliceRef::$tag(slice)
+                }
             }
-        })*
-        $(impl<'a> From<&'a mut [$ty]> for ArraySliceMut<'a> {
-            fn from(slice: &'a mut [$ty]) -> Self {
-                ArraySliceMut::$variant(slice)
+            impl<'a> From<&'a mut [$ty]> for ArraySliceMut<'a> {
+                fn from(slice: &'a mut [$ty]) -> Self {
+                    ArraySliceMut::$tag(slice)
+                }
             }
-        })*
-    };
+        )*
+    }
 }
 
 from_impl!(
@@ -412,13 +428,19 @@ impl Header {
     }
 
     fn set_len(&mut self, len: usize) {
-        assert!(len <= Self::LEN_MASK as usize, "Length exceeds 30-bit limit");
+        assert!(
+            len <= Self::LEN_MASK as usize,
+            "Length exceeds 30-bit limit"
+        );
         self.packed = (self.packed & !(Self::LEN_MASK << Self::LEN_SHIFT))
             | (((len as u64) & Self::LEN_MASK) << Self::LEN_SHIFT);
     }
 
     fn set_cap(&mut self, cap: usize) {
-        assert!(cap <= Self::CAP_MASK as usize, "Capacity exceeds 30-bit limit");
+        assert!(
+            cap <= Self::CAP_MASK as usize,
+            "Capacity exceeds 30-bit limit"
+        );
         self.packed = (self.packed & !(Self::CAP_MASK << Self::CAP_SHIFT))
             | (((cap as u64) & Self::CAP_MASK) << Self::CAP_SHIFT);
     }
@@ -510,31 +532,30 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
         use ArrayTag::*;
         let index = self.len();
 
-        macro_rules! push_typed {
-            ($tag:ident) => {{
-                let val = paste::paste!(item.[<to_$tag>]()).unwrap();
-                let array_ptr = self.reborrow().raw_array_ptr_mut().cast::<$tag>();
-                array_ptr.add(index).write(val);
-            }}
+        macro_rules! push_impl {
+            ($(($tag:ident, $ty:ty)),*) => {
+                match self.type_tag() {
+                    Heterogeneous => self.reborrow().array_ptr_mut().add(index).write(item),
+                    $($tag => self.reborrow().raw_array_ptr_mut().cast::<$ty>().add(index).write(
+                        paste::paste!(item.[<to_$ty>]()).unwrap()),)*
+                }
+            }
         }
 
-        match self.type_tag() {
-            Heterogeneous => {
-                self.reborrow().array_ptr_mut().add(index).write(item);
-            }
-            I8 => push_typed!(i8),
-            U8 => push_typed!(u8),
-            I16 => push_typed!(i16),
-            U16 => push_typed!(u16),
-            F16 => push_typed!(f16),
-            BF16 => push_typed!(bf16),
-            I32 => push_typed!(i32),
-            U32 => push_typed!(u32),
-            F32 => push_typed!(f32),
-            I64 => push_typed!(i64),
-            U64 => push_typed!(u64),
-            F64 => push_typed!(f64),
-        }
+        push_impl!(
+            (I8, i8),
+            (U8, u8),
+            (I16, i16),
+            (U16, u16),
+            (F16, f16),
+            (BF16, bf16),
+            (I32, i32),
+            (U32, u32),
+            (F32, f32),
+            (I64, i64),
+            (U64, u64),
+            (F64, f64)
+        );
         self.set_len(index + 1);
     }
 
@@ -548,25 +569,30 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
             self.set_len(new_len);
             let index = new_len;
 
-            let array_type = self.type_tag();
-            // Safety: We just checked that an item exists
-            unsafe {
-                match array_type {
-                    Heterogeneous => Some(self.reborrow().array_ptr_mut().add(index).read()),
-                    I8 => Some(self.reborrow().raw_array_ptr_mut().cast::<i8>().add(index).read().into()),
-                    U8 => Some(self.reborrow().raw_array_ptr_mut().cast::<u8>().add(index).read().into()),
-                    I16 => Some(self.reborrow().raw_array_ptr_mut().cast::<i16>().add(index).read().into()),
-                    U16 => Some(self.reborrow().raw_array_ptr_mut().cast::<u16>().add(index).read().into()),
-                    F16 => Some(self.reborrow().raw_array_ptr_mut().cast::<f16>().add(index).read().into()),
-                    BF16 => Some(self.reborrow().raw_array_ptr_mut().cast::<bf16>().add(index).read().into()),
-                    I32 => Some(self.reborrow().raw_array_ptr_mut().cast::<i32>().add(index).read().into()),
-                    U32 => Some(self.reborrow().raw_array_ptr_mut().cast::<u32>().add(index).read().into()),
-                    F32 => Some(self.reborrow().raw_array_ptr_mut().cast::<f32>().add(index).read().into()),
-                    I64 => Some(self.reborrow().raw_array_ptr_mut().cast::<i64>().add(index).read().into()),
-                    U64 => Some(self.reborrow().raw_array_ptr_mut().cast::<u64>().add(index).read().into()),
-                    F64 => Some(self.reborrow().raw_array_ptr_mut().cast::<f64>().add(index).read().into()),
-                }
+            macro_rules! pop_impl {
+                ($(($tag:ident, $ty:ty)),*) => {{
+                    // Safety: We just checked that an item exists
+                    let item = match self.type_tag() {
+                        Heterogeneous => unsafe { self.reborrow().array_ptr_mut().add(index).read() },
+                        $($tag => unsafe { self.reborrow().raw_array_ptr_mut().cast::<$ty>().add(index).read().into() },)*
+                    };
+                    Some(item)
+                }}
             }
+            pop_impl!(
+                (I8, i8),
+                (U8, u8),
+                (I16, i16),
+                (U16, u16),
+                (F16, f16),
+                (BF16, bf16),
+                (I32, i32),
+                (U32, u32),
+                (F32, f32),
+                (I64, i64),
+                (U64, u64),
+                (F64, f64)
+            )
         }
     }
 }
@@ -614,8 +640,8 @@ static EMPTY_HEADER: Header = Header { packed: 0 };
 
 impl ArrayTag {
     fn element_size(self) -> usize {
-        use ArrayTag::*;
         use std::mem::size_of;
+        use ArrayTag::*;
         match self {
             Heterogeneous => size_of::<IValue>(),
             I8 => size_of::<i8>(),
@@ -688,7 +714,9 @@ impl IArray {
         if cap == 0 {
             Ok(Self::new())
         } else {
-            Ok(IArray(unsafe { IValue::new_ptr(Self::alloc(cap, tag)?.cast(), TypeTag::ArrayOrFalse) }))
+            Ok(IArray(unsafe {
+                IValue::new_ptr(Self::alloc(cap, tag)?.cast(), TypeTag::ArrayOrFalse)
+            }))
         }
     }
 
@@ -721,7 +749,9 @@ impl IArray {
         let current_len = self.len();
         if current_len == 0 {
             let payload_bytes = Self::layout(self.capacity(), self.header().type_tag())
-                .map_err(|_| AllocError)?.size() - std::mem::size_of::<Header>();
+                .map_err(|_| AllocError)?
+                .size()
+                - std::mem::size_of::<Header>();
             let new_cap = (payload_bytes / new_tag.element_size()).min(Header::CAP_MASK as usize);
             unsafe {
                 self.header_mut().set_cap(new_cap);
@@ -754,7 +784,13 @@ impl IArray {
     ///     and dst_tag must be a valid primitive type (not Heterogeneous).
     ///     The destination type must be able to represent all values of the source type.
     ///     The destination array must have enough capacity to hold `len` elements.
-    unsafe fn convert_primitive_array(&self, dst: &mut IArray, src_tag: ArrayTag, dst_tag: ArrayTag, len: usize) {
+    unsafe fn convert_primitive_array(
+        &self,
+        dst: &mut IArray,
+        src_tag: ArrayTag,
+        dst_tag: ArrayTag,
+        len: usize,
+    ) {
         use ArrayTag::*;
 
         macro_rules! convert_array {
@@ -765,7 +801,7 @@ impl IArray {
                     dst_ptr.add(i).write(val.into());
                 }
                 dst.header_mut().set_len(len);
-            }}
+            }};
         }
 
         match (src_tag, dst_tag) {
@@ -932,7 +968,9 @@ impl IArray {
                     self.promote_to_type(desired_tag)?;
                 }
             }
-        } else if !(current_tag == ArrayTag::Heterogeneous || self.can_push_directly(&item, current_tag)) {
+        } else if !(current_tag == ArrayTag::Heterogeneous
+            || self.can_push_directly(&item, current_tag))
+        {
             self.promote_to_type(current_tag.promote_with(ArrayTag::from_ivalue(&item)))?;
         }
 
@@ -1055,7 +1093,9 @@ impl IArray {
                     self.promote_to_type(desired_tag)?;
                 }
             }
-        } else if !(current_tag == ArrayTag::Heterogeneous || self.can_push_directly(&item, current_tag)) {
+        } else if !(current_tag == ArrayTag::Heterogeneous
+            || self.can_push_directly(&item, current_tag))
+        {
             self.promote_to_type(current_tag.promote_with(ArrayTag::from_ivalue(&item)))?;
         }
 
@@ -1070,22 +1110,20 @@ impl IArray {
     /// This is a simple check: can the value fit in the array type?
     fn can_push_directly(&self, item: &IValue, array_tag: ArrayTag) -> bool {
         use ArrayTag::*;
-        item.as_number().map_or(false, |num| {
-            match array_tag {
-                I8 => num.to_i8().is_some() && !num.has_decimal_point(),
-                U8 => num.to_u8().is_some() && !num.has_decimal_point(),
-                I16 => num.to_i16().is_some() && !num.has_decimal_point(),
-                U16 => num.to_u16().is_some() && !num.has_decimal_point(),
-                I32 => num.to_i32().is_some() && !num.has_decimal_point(),
-                U32 => num.to_u32().is_some() && !num.has_decimal_point(),
-                I64 => num.to_i64().is_some() && !num.has_decimal_point(),
-                U64 => num.to_u64().is_some() && !num.has_decimal_point(),
-                F16 => num.has_decimal_point() && num.to_f16().is_some(),
-                BF16 => num.has_decimal_point() && num.to_bf16().is_some(),
-                F32 => num.has_decimal_point() && num.to_f32().is_some(),
-                F64 => num.has_decimal_point() && num.to_f64().is_some(),
-                Heterogeneous => true,
-            }
+        item.as_number().map_or(false, |num| match array_tag {
+            I8 => num.to_i8().is_some() && !num.has_decimal_point(),
+            U8 => num.to_u8().is_some() && !num.has_decimal_point(),
+            I16 => num.to_i16().is_some() && !num.has_decimal_point(),
+            U16 => num.to_u16().is_some() && !num.has_decimal_point(),
+            I32 => num.to_i32().is_some() && !num.has_decimal_point(),
+            U32 => num.to_u32().is_some() && !num.has_decimal_point(),
+            I64 => num.to_i64().is_some() && !num.has_decimal_point(),
+            U64 => num.to_u64().is_some() && !num.has_decimal_point(),
+            F16 => num.has_decimal_point() && num.to_f16().is_some(),
+            BF16 => num.has_decimal_point() && num.to_bf16().is_some(),
+            F32 => num.has_decimal_point() && num.to_f32().is_some(),
+            F64 => num.has_decimal_point() && num.to_f64().is_some(),
+            Heterogeneous => true,
         })
     }
 
@@ -1176,9 +1214,10 @@ impl IArray {
         } else {
             let tag = self.header().type_tag();
             let layout_size = Self::layout(self.capacity(), tag).unwrap().size();
-            let contained_size = self.as_slice_of::<IValue>().map(|slice| {
-                slice.iter().map(IValue::mem_allocated).sum()
-            }).unwrap_or(0);
+            let contained_size = self
+                .as_slice_of::<IValue>()
+                .map(|slice| slice.iter().map(IValue::mem_allocated).sum())
+                .unwrap_or(0);
             layout_size + contained_size
         }
     }
@@ -1202,10 +1241,8 @@ impl<A: DefragAllocator> Defrag<A> for IArray {
         unsafe {
             let header = &*self.0.ptr().cast::<Header>();
             let tag = header.type_tag();
-            let new_ptr = defrag_allocator.realloc_ptr(
-                self.0.ptr(),
-                Self::layout(header.cap(), tag).unwrap(),
-            );
+            let new_ptr = defrag_allocator
+                .realloc_ptr(self.0.ptr(), Self::layout(header.cap(), tag).unwrap());
             self.0.set_ptr(new_ptr.cast());
         }
         self
@@ -1279,12 +1316,111 @@ impl Hash for IArray {
     }
 }
 
+// impl AsRef<[IValue]> for IArray {
+//     fn as_ref(&self) -> &[IValue] {
+//         self.as_slice()
+//     }
+// }
+
+impl PartialEq for IArray {
+    fn eq(&self, other: &Self) -> bool {
+        if self.0.raw_eq(&other.0) {
+            true
+        } else if self.header().type_tag() != other.header().type_tag() {
+            false
+        } else {
+            use ArraySliceRef::*;
+            match (self.as_slice(), other.as_slice()) {
+                (Heterogeneous(a), Heterogeneous(b)) => a == b,
+                (I8(a), I8(b)) => a == b,
+                (U8(a), U8(b)) => a == b,
+                (I16(a), I16(b)) => a == b,
+                (U16(a), U16(b)) => a == b,
+                (F16(a), F16(b)) => a == b,
+                (BF16(a), BF16(b)) => a == b,
+                (I32(a), I32(b)) => a == b,
+                (U32(a), U32(b)) => a == b,
+                (F32(a), F32(b)) => a == b,
+                (I64(a), I64(b)) => a == b,
+                (U64(a), U64(b)) => a == b,
+                (F64(a), F64(b)) => a == b,
+                _ => false, // Different types should never reach here due to the type_tag check above
+            }
+        }
+    }
+}
+
+impl Eq for IArray {}
+impl PartialOrd for IArray {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        if self.0.raw_eq(&other.0) {
+            Some(Ordering::Equal)
+        } else {
+            self.as_slice().partial_cmp(&other.as_slice())
+        }
+    }
+}
+
+impl<I: SliceIndex<[IValue]>> Index<I> for IArray {
+    type Output = I::Output;
+
+    #[inline]
+    fn index(&self, index: I) -> &Self::Output {
+        self.as_slice_of::<IValue>().map_or_else(
+            || panic!("Invalid index access"),
+            |slice| Index::index(slice, index),
+        )
+    }
+}
+
+impl<I: SliceIndex<[IValue]>> IndexMut<I> for IArray {
+    #[inline]
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        self.as_mut_slice_of::<IValue>().map_or_else(
+            || panic!("Invalid index access"),
+            |slice| IndexMut::index_mut(slice, index),
+        )
+    }
+}
+
+impl Debug for IArray {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        self.as_slice().fmt(f)
+    }
+}
+
+pub(super) mod private {
+    #[doc(hidden)]
+    pub trait Sealed {}
+
+    impl Sealed for crate::IValue {}
+    impl<T: Sealed> Sealed for Option<T> {}
+    impl<T: Sealed> Sealed for &T {}
+
+    impl Sealed for crate::IArray {}
+    impl<T> Sealed for Vec<T> {}
+    impl<T> Sealed for &[T] {}
+
+    impl Sealed for crate::IObject {}
+    impl<K, V> Sealed for std::collections::HashMap<K, V> {}
+    impl<K, V> Sealed for std::collections::BTreeMap<K, V> {}
+
+    impl Sealed for crate::IString {}
+    impl Sealed for String {}
+    impl Sealed for &mut String {}
+    impl Sealed for &str {}
+    impl Sealed for &mut str {}
+
+    impl Sealed for crate::INumber {}
+    impl Sealed for bool {}
+}
+
 trait TryExtend<T> {
     fn try_extend(&mut self, iter: impl IntoIterator<Item = T>) -> Result<(), AllocError>;
 }
 
-impl<U: Into<IValue>> TryExtend<U> for IArray {
-    default fn try_extend(&mut self, iter: impl IntoIterator<Item = U>) -> Result<(), AllocError> {
+impl<U: Into<IValue> + private::Sealed> TryExtend<U> for IArray {
+    fn try_extend(&mut self, iter: impl IntoIterator<Item = U>) -> Result<(), AllocError> {
         let iter = iter.into_iter();
         self.reserve(iter.size_hint().0)?;
         for v in iter {
@@ -1411,8 +1547,8 @@ fn convert_bf16<T: Into<f64>>(value: T) -> bf16 {
 extend_impl_int!(i8, i16, i32, i64, u8, u16, u32, u64);
 extend_impl_float!(f16, bf16, f32, f64);
 
-impl<U: Into<IValue>> FromIterator<U> for IArray {
-    default fn from_iter<T: IntoIterator<Item = U>>(iter: T) -> Self {
+impl<U: Into<IValue> + private::Sealed> FromIterator<U> for IArray {
+    fn from_iter<T: IntoIterator<Item = U>>(iter: T) -> Self {
         let mut res = IArray::new();
         res.try_extend(iter).unwrap();
         res
@@ -1434,96 +1570,21 @@ macro_rules! from_iter_impl {
 
 from_iter_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
 
-// impl AsRef<[IValue]> for IArray {
-//     fn as_ref(&self) -> &[IValue] {
-//         self.as_slice()
-//     }
-// }
-
-impl PartialEq for IArray {
-    fn eq(&self, other: &Self) -> bool {
-        if self.0.raw_eq(&other.0) {
-            true
-        } else if self.header().type_tag() != other.header().type_tag() {
-            false
-        } else {
-            use ArraySliceRef::*;
-            match (self.as_slice(), other.as_slice()) {
-                (Heterogeneous(a), Heterogeneous(b)) => a == b,
-                (I8(a), I8(b)) => a == b,
-                (U8(a), U8(b)) => a == b,
-                (I16(a), I16(b)) => a == b,
-                (U16(a), U16(b)) => a == b,
-                (F16(a), F16(b)) => a == b,
-                (BF16(a), BF16(b)) => a == b,
-                (I32(a), I32(b)) => a == b,
-                (U32(a), U32(b)) => a == b,
-                (F32(a), F32(b)) => a == b,
-                (I64(a), I64(b)) => a == b,
-                (U64(a), U64(b)) => a == b,
-                (F64(a), F64(b)) => a == b,
-                _ => false, // Different types should never reach here due to the type_tag check above
-            }
-        }
-    }
-}
-
-impl Eq for IArray {}
-impl PartialOrd for IArray {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        if self.0.raw_eq(&other.0) {
-            Some(Ordering::Equal)
-        } else {
-            self.as_slice().partial_cmp(&other.as_slice())
-        }
-    }
-}
-
-impl<I: SliceIndex<[IValue]>> Index<I> for IArray {
-    type Output = I::Output;
-
-    #[inline]
-    fn index(&self, index: I) -> &Self::Output {
-        self.as_slice_of::<IValue>().map_or_else(
-            || panic!("Invalid index access"),
-            |slice| Index::index(slice, index),
-        )
-    }
-}
-
-impl<I: SliceIndex<[IValue]>> IndexMut<I> for IArray {
-    #[inline]
-    fn index_mut(&mut self, index: I) -> &mut Self::Output {
-        self.as_mut_slice_of::<IValue>().map_or_else(
-            || panic!("Invalid index access"),
-            |slice| IndexMut::index_mut(slice, index),
-        )
-    }
-}
-
-impl Debug for IArray {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        self.as_slice().fmt(f)
-    }
-}
-
-impl<T: Into<IValue>> TryFrom<Vec<T>> for IArray {
-    default type Error = AllocError;
-    default fn try_from(other: Vec<T>) -> Result<Self, Self::Error> {
-        let mut res = IArray::with_capacity(other.len()).map_err(|e| unsafe { std::mem::transmute_copy(&e) })?;
-        res.try_extend(other.into_iter().map(Into::into)).map_err(|e| unsafe { std::mem::transmute_copy(&e) })?;
-        Ok(res)
+impl<T: Into<IValue> + private::Sealed> From<Vec<T>> for IArray {
+    fn from(other: Vec<T>) -> Self {
+        let mut res = IArray::with_capacity(other.len()).unwrap();
+        res.try_extend(other.into_iter().map(Into::into)).unwrap();
+        res
     }
 }
 
 macro_rules! from_vec_impl {
     ($($ty:ty),*) => {
-        $(impl TryFrom<Vec<$ty>> for IArray {
-            type Error = AllocError;
-            fn try_from(other: Vec<$ty>) -> Result<Self, Self::Error> {
-                let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>())?;
-                res.try_extend(other.into_iter())?;
-                Ok(res)
+        $(impl From<Vec<$ty>> for IArray {
+            fn from(other: Vec<$ty>) -> Self {
+                let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>()).unwrap();
+                TryExtend::<$ty>::try_extend(&mut res, other.into_iter().map(Into::into)).unwrap();
+                res
             }
         })*
     }
@@ -1531,30 +1592,28 @@ macro_rules! from_vec_impl {
 
 from_vec_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
 
-impl<T: Into<IValue> + Clone> TryFrom<&[T]> for IArray {
-    default type Error = AllocError;
-    default fn try_from(other: &[T]) -> Result<Self, Self::Error> {
-        let mut res = IArray::with_capacity(other.len()).map_err(|e| unsafe { std::mem::transmute_copy(&e) })?;
-        res.try_extend(other.iter().cloned().map(Into::into)).map_err(|e| unsafe { std::mem::transmute_copy(&e) })?;
-        Ok(res)
+impl<T: Into<IValue> + Clone + private::Sealed> From<&[T]> for IArray {
+    fn from(other: &[T]) -> Self {
+        let mut res = IArray::with_capacity(other.len()).unwrap();
+        res.try_extend(other.iter().cloned().map(Into::into))
+            .unwrap();
+        res
     }
 }
 
 macro_rules! from_slice_impl {
     ($($ty:ty),*) => {
-        $(impl TryFrom<&[$ty]> for IArray {
-            type Error = AllocError;
-            fn try_from(other: &[$ty]) -> Result<Self, Self::Error> {
-                let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>())?;
-                res.try_extend(other.iter().cloned())?;
-                Ok(res)
+        $(impl From<&[$ty]> for IArray {
+            fn from(other: &[$ty]) -> Self {
+                let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>()).unwrap();
+                TryExtend::<$ty>::try_extend(&mut res, other.iter().cloned().map(Into::into)).unwrap();
+                res
             }
         })*
     }
 }
 
 from_slice_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
-
 
 /// Iterator item that can hold either a reference to an IValue or an owned IValue
 /// This avoids deep copying for heterogeneous arrays while still providing owned values for primitives
@@ -1649,7 +1708,7 @@ impl<'a> ArrayIterItemMut<'a> {
                     }
                     _ => false,
                 }
-            }}
+            }};
         }
 
         macro_rules! set_unsigned_int {
@@ -1661,7 +1720,7 @@ impl<'a> ArrayIterItemMut<'a> {
                     }
                     _ => false,
                 }
-            }}
+            }};
         }
 
         macro_rules! set_float {
@@ -1896,8 +1955,6 @@ impl<'a> ExactSizeIterator for ArrayIterMut<'a> {
     }
 }
 
-
-
 impl IArray {
     /// Returns an iterator over the array elements
     ///
@@ -1930,14 +1987,16 @@ impl IArray {
     /// Only works for heterogeneous arrays (arrays containing IValue objects).
     /// For typed arrays, use `as_slice()` to get direct access to the underlying slice.
     pub fn get(&self, index: usize) -> Option<&IValue> {
-        self.as_slice_of::<IValue>().and_then(|slice| slice.get(index))
+        self.as_slice_of::<IValue>()
+            .and_then(|slice| slice.get(index))
     }
 
     /// Gets a mutable reference to the element at the given index.
     /// Only works for heterogeneous arrays (arrays containing IValue objects).
     /// For typed arrays, use `as_mut_slice()` to get direct access to the underlying slice.
     pub fn get_mut(&mut self, index: usize) -> Option<&mut IValue> {
-        self.as_mut_slice_of::<IValue>().and_then(|slice| slice.get_mut(index))
+        self.as_mut_slice_of::<IValue>()
+            .and_then(|slice| slice.get_mut(index))
     }
 }
 
@@ -1993,6 +2052,7 @@ impl Default for IArray {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
 
     #[test]
     fn test_from_vec_memory_safety() {
@@ -2032,7 +2092,8 @@ mod tests {
 
     #[test]
     fn test_typed_slice() {
-        let hetero_array = IArray::try_from(vec![IValue::NULL, IValue::TRUE, IValue::FALSE]).unwrap_or_default();
+        let hetero_array =
+            IArray::try_from(vec![IValue::NULL, IValue::TRUE, IValue::FALSE]).unwrap_or_default();
         match hetero_array.as_slice() {
             ArraySliceRef::Heterogeneous(slice) => {
                 assert_eq!(slice.len(), 3);
@@ -2068,34 +2129,55 @@ mod tests {
 
     #[test]
     fn test_iteration() {
-        let hetero_array = IArray::try_from(vec![IValue::NULL, IValue::TRUE, IValue::FALSE]).unwrap_or_default();
+        let hetero_array =
+            IArray::try_from(vec![IValue::NULL, IValue::TRUE, IValue::FALSE]).unwrap_or_default();
         let collected: Vec<IValue> = hetero_array.iter().collect();
         assert_eq!(collected, vec![IValue::NULL, IValue::TRUE, IValue::FALSE]);
 
         let i32_array = IArray::try_from(vec![1i32, 2i32, 3i32]).unwrap();
         let collected: Vec<IValue> = i32_array.iter().collect();
-        assert_eq!(collected, vec![IValue::from(1i32), IValue::from(2i32), IValue::from(3i32)]);
+        assert_eq!(
+            collected,
+            vec![IValue::from(1i32), IValue::from(2i32), IValue::from(3i32)]
+        );
 
         let f64_array = IArray::try_from(vec![1.0f64, 2.5f64, 3.14f64]).unwrap();
         let collected: Vec<IValue> = f64_array.iter().collect();
-        assert_eq!(collected, vec![IValue::from(1.0f64), IValue::from(2.5f64), IValue::from(3.14f64)]);
+        assert_eq!(
+            collected,
+            vec![
+                IValue::from(1.0f64),
+                IValue::from(2.5f64),
+                IValue::from(3.14f64)
+            ]
+        );
 
         let values: Vec<IValue> = (&i32_array).into_iter().collect();
-        assert_eq!(values, vec![IValue::from(1i32), IValue::from(2i32), IValue::from(3i32)]);
+        assert_eq!(
+            values,
+            vec![IValue::from(1i32), IValue::from(2i32), IValue::from(3i32)]
+        );
     }
 
     #[test]
     fn test_iter_efficient_behavior() {
         let original_string = IValue::from("test_string");
         let nested_array = IValue::from(vec![IValue::from(1), IValue::from(2)]);
-        let hetero_array = IArray::try_from(vec![original_string.clone(), nested_array.clone(), IValue::NULL]).unwrap_or_default();
+        let hetero_array = IArray::try_from(vec![
+            original_string.clone(),
+            nested_array.clone(),
+            IValue::NULL,
+        ])
+        .unwrap_or_default();
 
         let mut iter = hetero_array.iter();
 
         let first_item = iter.next().unwrap();
         assert_eq!(*first_item, original_string);
 
-        if let (Some(original_str), Some(iter_str)) = (original_string.as_string(), first_item.as_string()) {
+        if let (Some(original_str), Some(iter_str)) =
+            (original_string.as_string(), first_item.as_string())
+        {
             assert_eq!(original_str.as_ptr(), iter_str.as_ptr());
         }
 
@@ -2127,7 +2209,9 @@ mod tests {
 
     #[test]
     fn test_mutable_iteration() {
-        let mut hetero_array = IArray::try_from(vec![IValue::from(1), IValue::from(2), IValue::from(3.5)]).unwrap_or_default();
+        let mut hetero_array =
+            IArray::try_from(vec![IValue::from(1), IValue::from(2), IValue::from(3.5)])
+                .unwrap_or_default();
 
         for mut_item in hetero_array.iter_mut() {
             match mut_item {
@@ -2141,7 +2225,10 @@ mod tests {
         }
 
         let collected: Vec<IValue> = hetero_array.iter().collect();
-        assert_eq!(collected, vec![IValue::from(2), IValue::from(3), IValue::from(4.5)]);
+        assert_eq!(
+            collected,
+            vec![IValue::from(2), IValue::from(3), IValue::from(4.5)]
+        );
 
         for mut_item in &mut hetero_array {
             match mut_item {
@@ -2155,7 +2242,10 @@ mod tests {
         }
 
         let collected: Vec<IValue> = hetero_array.iter().collect();
-        assert_eq!(collected, vec![IValue::from(4), IValue::from(6), IValue::from(9)]);
+        assert_eq!(
+            collected,
+            vec![IValue::from(4), IValue::from(6), IValue::from(9)]
+        );
 
         let mut i32_array = IArray::try_from(vec![1i32, 2i32, 3i32]).unwrap();
         for mut_item in i32_array.iter_mut() {
@@ -2243,10 +2333,20 @@ mod tests {
         let f64_array = IArray::try_from(vec![1.0f64, 2.5f64, 3.14f64]).unwrap();
 
         let i32_values: Vec<IValue> = i32_array.iter().collect();
-        assert_eq!(i32_values, vec![IValue::from(1i32), IValue::from(2i32), IValue::from(3i32)]);
+        assert_eq!(
+            i32_values,
+            vec![IValue::from(1i32), IValue::from(2i32), IValue::from(3i32)]
+        );
 
         let f64_values: Vec<IValue> = f64_array.iter().collect();
-        assert_eq!(f64_values, vec![IValue::from(1.0f64), IValue::from(2.5f64), IValue::from(3.14f64)]);
+        assert_eq!(
+            f64_values,
+            vec![
+                IValue::from(1.0f64),
+                IValue::from(2.5f64),
+                IValue::from(3.14f64)
+            ]
+        );
     }
 
     #[test]
@@ -2265,9 +2365,14 @@ mod tests {
         let deserialized_u8: Vec<u8> = Deserialize::deserialize(&u8_array).unwrap();
         assert_eq!(deserialized_u8, vec![10, 20, 30]);
 
-        let hetero_array = IArray::try_from(vec![IValue::from(1), IValue::from(2), IValue::from(3.5)]).unwrap_or_default();
+        let hetero_array =
+            IArray::try_from(vec![IValue::from(1), IValue::from(2), IValue::from(3.5)])
+                .unwrap_or_default();
         let deserialized_hetero: Vec<IValue> = Deserialize::deserialize(&hetero_array).unwrap();
-        assert_eq!(deserialized_hetero, vec![IValue::from(1), IValue::from(2), IValue::from(3.5)]);
+        assert_eq!(
+            deserialized_hetero,
+            vec![IValue::from(1), IValue::from(2), IValue::from(3.5)]
+        );
     }
 
     #[test]
@@ -2317,7 +2422,7 @@ mod tests {
         let mut i8_array = IArray::try_from(vec![-5i8, 10i8]).unwrap();
         assert_eq!(i8_array.header().type_tag(), ArrayTag::I8);
 
-        i8_array.push(1000i16).unwrap();  // This should promote to i16
+        i8_array.push(1000i16).unwrap(); // This should promote to i16
         assert_eq!(i8_array.header().type_tag(), ArrayTag::I16);
         assert_eq!(i8_array.len(), 3);
 
@@ -2330,7 +2435,7 @@ mod tests {
         let mut u8_array = IArray::try_from(vec![10u8, 20u8]).unwrap();
         assert_eq!(u8_array.header().type_tag(), ArrayTag::U8);
 
-        u8_array.push(u8::MAX as u16 + 1).unwrap();  // promotes u8 to i16 (256 fits in i16, u8 can promote to i16)
+        u8_array.push(u8::MAX as u16 + 1).unwrap(); // promotes u8 to i16 (256 fits in i16, u8 can promote to i16)
         assert_eq!(u8_array.header().type_tag(), ArrayTag::I16);
         assert_eq!(u8_array.len(), 3);
 
@@ -2343,7 +2448,7 @@ mod tests {
         let mut u8_array2 = IArray::try_from(vec![10u8, 20u8]).unwrap();
         assert_eq!(u8_array2.header().type_tag(), ArrayTag::U8);
 
-        u8_array2.push(i16::MAX as u16 + 1).unwrap();  // should promote to u16
+        u8_array2.push(i16::MAX as u16 + 1).unwrap(); // should promote to u16
         assert_eq!(u8_array2.header().type_tag(), ArrayTag::U16);
         assert_eq!(u8_array2.len(), 3);
 
@@ -2356,7 +2461,7 @@ mod tests {
         let mut u8_array2 = IArray::try_from(vec![10u8, 20u8]).unwrap();
         assert_eq!(u8_array2.header().type_tag(), ArrayTag::U8);
 
-        u8_array2.push(-5i8).unwrap();  // should promote to i16
+        u8_array2.push(-5i8).unwrap(); // should promote to i16
         assert_eq!(u8_array2.header().type_tag(), ArrayTag::I16);
         assert_eq!(u8_array2.len(), 3);
 
@@ -2369,7 +2474,7 @@ mod tests {
         let mut u16_array = IArray::try_from(vec![100u16, 200u16]).unwrap();
         assert_eq!(u16_array.header().type_tag(), ArrayTag::U16);
 
-        u16_array.push(-1000i16).unwrap();  // should promote to i32
+        u16_array.push(-1000i16).unwrap(); // should promote to i32
         assert_eq!(u16_array.header().type_tag(), ArrayTag::I32);
         assert_eq!(u16_array.len(), 3);
 
@@ -2382,7 +2487,7 @@ mod tests {
         let mut f32_array = IArray::try_from(vec![1.5f32, 2.5f32]).unwrap();
         assert_eq!(f32_array.header().type_tag(), ArrayTag::F32);
 
-        f32_array.push(3.14159265359f64).unwrap();  // should promote to f64
+        f32_array.push(3.14159265359f64).unwrap(); // should promote to f64
         assert_eq!(f32_array.header().type_tag(), ArrayTag::F64);
         assert_eq!(f32_array.len(), 3);
 
@@ -2400,7 +2505,7 @@ mod tests {
         let mut i32_array = IArray::try_from(vec![1i32, 2i32]).unwrap();
         assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
 
-        i32_array.push(3.5f32).unwrap();  // should convert to heterogeneous (int vs float)
+        i32_array.push(3.5f32).unwrap(); // should convert to heterogeneous (int vs float)
         assert_eq!(i32_array.header().type_tag(), ArrayTag::Heterogeneous);
         assert_eq!(i32_array.len(), 3);
 
@@ -2415,7 +2520,7 @@ mod tests {
         let mut f32_array = IArray::try_from(vec![1.5f32, 2.5f32]).unwrap();
         assert_eq!(f32_array.header().type_tag(), ArrayTag::F32);
 
-        f32_array.push(42i32).unwrap();  // should convert to heterogeneous (float vs int)
+        f32_array.push(42i32).unwrap(); // should convert to heterogeneous (float vs int)
         assert_eq!(f32_array.header().type_tag(), ArrayTag::Heterogeneous);
         assert_eq!(f32_array.len(), 3);
 
@@ -2430,7 +2535,7 @@ mod tests {
         let mut u8_array = IArray::try_from(vec![10u8, 20u8]).unwrap();
         assert_eq!(u8_array.header().type_tag(), ArrayTag::U8);
 
-        u8_array.push("hello").unwrap();  // should convert to heterogeneous
+        u8_array.push("hello").unwrap(); // should convert to heterogeneous
         assert_eq!(u8_array.header().type_tag(), ArrayTag::Heterogeneous);
         assert_eq!(u8_array.len(), 3);
 
@@ -2445,7 +2550,7 @@ mod tests {
         let mut i16_array = IArray::try_from(vec![100i16, 200i16]).unwrap();
         assert_eq!(i16_array.header().type_tag(), ArrayTag::I16);
 
-        i16_array.push(true).unwrap();  // should convert to heterogeneous
+        i16_array.push(true).unwrap(); // should convert to heterogeneous
         assert_eq!(i16_array.header().type_tag(), ArrayTag::Heterogeneous);
         assert_eq!(i16_array.len(), 3);
 
@@ -2463,7 +2568,7 @@ mod tests {
         let mut i8_array = IArray::try_from(vec![10i8, 30i8]).unwrap();
         assert_eq!(i8_array.header().type_tag(), ArrayTag::I8);
 
-        i8_array.insert(1, 1000i16).unwrap();  // should promote to i16
+        i8_array.insert(1, 1000i16).unwrap(); // should promote to i16
         assert_eq!(i8_array.header().type_tag(), ArrayTag::I16);
         assert_eq!(i8_array.len(), 3);
 
@@ -2476,7 +2581,7 @@ mod tests {
         let mut i16_array = IArray::try_from(vec![100i16, 200i16]).unwrap();
         assert_eq!(i16_array.header().type_tag(), ArrayTag::I16);
 
-        i16_array.insert(1, 40000u16).unwrap();  // should promote to i32
+        i16_array.insert(1, 40000u16).unwrap(); // should promote to i32
         assert_eq!(i16_array.header().type_tag(), ArrayTag::I32);
         assert_eq!(i16_array.len(), 3);
 
@@ -2489,7 +2594,7 @@ mod tests {
         let mut u32_array = IArray::try_from(vec![100u32, 200u32]).unwrap();
         assert_eq!(u32_array.header().type_tag(), ArrayTag::U32);
 
-        u32_array.insert(1, 3.14f32).unwrap();  // should convert to heterogeneous
+        u32_array.insert(1, 3.14f32).unwrap(); // should convert to heterogeneous
         assert_eq!(u32_array.header().type_tag(), ArrayTag::Heterogeneous);
         assert_eq!(u32_array.len(), 3);
 
@@ -2507,7 +2612,7 @@ mod tests {
         let mut i8_array = IArray::try_from(vec![10i8, 20i8]).unwrap();
         assert_eq!(i8_array.header().type_tag(), ArrayTag::I8);
 
-        i8_array.try_extend(vec![1000i16, 2000i16]).unwrap();  // should promote to i16
+        i8_array.try_extend(vec![1000i16, 2000i16]).unwrap(); // should promote to i16
         assert_eq!(i8_array.header().type_tag(), ArrayTag::I16);
         assert_eq!(i8_array.len(), 4);
 
@@ -2520,7 +2625,7 @@ mod tests {
         let mut u8_array = IArray::try_from(vec![10u8, 20u8]).unwrap();
         assert_eq!(u8_array.header().type_tag(), ArrayTag::U8);
 
-        u8_array.try_extend(vec![40000u16, 50000u16]).unwrap();  // should promote to u16
+        u8_array.try_extend(vec![40000u16, 50000u16]).unwrap(); // should promote to u16
         assert_eq!(u8_array.header().type_tag(), ArrayTag::U16);
         assert_eq!(u8_array.len(), 4);
 
@@ -2533,7 +2638,7 @@ mod tests {
         let mut u8_array2 = IArray::try_from(vec![10u8, 20u8]).unwrap();
         assert_eq!(u8_array2.header().type_tag(), ArrayTag::U8);
 
-        u8_array2.try_extend(vec![-5i8, -10i8]).unwrap();  // should promote to i16
+        u8_array2.try_extend(vec![-5i8, -10i8]).unwrap(); // should promote to i16
         assert_eq!(u8_array2.header().type_tag(), ArrayTag::I16);
         assert_eq!(u8_array2.len(), 4);
 
@@ -2546,7 +2651,9 @@ mod tests {
         let mut f32_array = IArray::try_from(vec![1.5f32, 2.5f32]).unwrap();
         assert_eq!(f32_array.header().type_tag(), ArrayTag::F32);
 
-        f32_array.try_extend(vec![3.14159265359f64, 2.71828f64]).unwrap();  // should promote to f64
+        f32_array
+            .try_extend(vec![3.14159265359f64, 2.71828f64])
+            .unwrap(); // should promote to f64
         assert_eq!(f32_array.header().type_tag(), ArrayTag::F64);
         assert_eq!(f32_array.len(), 4);
 
@@ -2560,187 +2667,192 @@ mod tests {
         }
     }
 
-
-        #[test]
-        fn test_half_f16_array_basics() {
-            use half::f16;
-            let a = vec![f16::from_f32(1.5), f16::from_f32(2.5), f16::from_f32(3.25)];
-            let mut arr = IArray::new();
-            arr.try_extend(a.clone()).unwrap();
-            assert_eq!(arr.header().type_tag(), ArrayTag::F16);
-            match arr.as_slice() {
-                ArraySliceRef::F16(slice) => {
-                    assert_eq!(slice, a.as_slice());
-                }
-                _ => panic!("Expected F16 slice"),
+    #[test]
+    fn test_half_f16_array_basics() {
+        use half::f16;
+        let a = vec![f16::from_f32(1.5), f16::from_f32(2.5), f16::from_f32(3.25)];
+        let mut arr = IArray::new();
+        arr.try_extend(a.clone()).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F16);
+        match arr.as_slice() {
+            ArraySliceRef::F16(slice) => {
+                assert_eq!(slice, a.as_slice());
             }
+            _ => panic!("Expected F16 slice"),
+        }
+    }
+
+    #[test]
+    fn test_half_bf16_array_basics() {
+        use half::bf16;
+        let a = vec![bf16::MIN, bf16::from_f32(2.5), bf16::from_f32(3.25)];
+        let mut arr = IArray::new();
+        arr.try_extend(a.clone()).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::BF16);
+        match arr.as_slice() {
+            ArraySliceRef::BF16(slice) => {
+                assert_eq!(slice, a.as_slice());
+            }
+            _ => panic!("Expected BF16 slice"),
+        }
+    }
+
+    #[test]
+    fn test_half_promotion_push_to_f32() {
+        use half::{bf16, f16};
+        // f16 + f32 => F32
+        let v = [f16::from_f32(1.5), f16::from_f32(2.5)];
+        let item = f32::MIN;
+        let mut arr: IArray = Vec::from(v).try_into().unwrap();
+        arr.push(item).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F32);
+        if let ArraySliceRef::F32(slice) = arr.as_slice() {
+            let expected = [f32::from(v[0]), f32::from(v[1]), item];
+            assert_eq!(slice, &expected);
+        } else {
+            panic!("Expected F32 slice after f16+f32 promotion");
         }
 
-        #[test]
-        fn test_half_bf16_array_basics() {
-            use half::bf16;
-            let a = vec![bf16::MIN, bf16::from_f32(2.5), bf16::from_f32(3.25)];
-            let mut arr = IArray::new();
-            arr.try_extend(a.clone()).unwrap();
-            assert_eq!(arr.header().type_tag(), ArrayTag::BF16);
-            match arr.as_slice() {
-                ArraySliceRef::BF16(slice) => {
-                    assert_eq!(slice, a.as_slice());
-                }
-                _ => panic!("Expected BF16 slice"),
-            }
+        // bf16 + f32 => F32
+        let vbf = [bf16::MIN, bf16::from_f32(2.5)];
+        let mut arr: IArray = Vec::from(vbf).try_into().unwrap();
+        arr.push(item).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F32);
+        if let ArraySliceRef::F32(slice) = arr.as_slice() {
+            let expected = [f32::from(vbf[0]), f32::from(vbf[1]), item];
+            assert_eq!(slice, &expected);
+        } else {
+            panic!("Expected F32 slice after bf16+f32 promotion");
+        }
+    }
+
+    #[test]
+    fn test_half_promotion_push_to_f64() {
+        use half::{bf16, f16};
+        // f16 + f64 => F64
+        let v = [f16::from_f32(1.5), f16::from_f32(2.5)];
+        let item = f64::MIN;
+        let mut arr: IArray = Vec::from(v).try_into().unwrap();
+        arr.push(item).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F64);
+        if let ArraySliceRef::F64(slice) = arr.as_slice() {
+            let expected = [f32::from(v[0]) as f64, f32::from(v[1]) as f64, item];
+            assert_eq!(slice, &expected);
+        } else {
+            panic!("Expected F64 slice after f16+f64 promotion");
         }
 
-        #[test]
-        fn test_half_promotion_push_to_f32() {
-            use half::{f16, bf16};
-            // f16 + f32 => F32
-            let v = [f16::from_f32(1.5), f16::from_f32(2.5)];
-            let item = f32::MIN;
-            let mut arr: IArray = Vec::from(v).try_into().unwrap();
-            arr.push(item).unwrap();
-            assert_eq!(arr.header().type_tag(), ArrayTag::F32);
-            if let ArraySliceRef::F32(slice) = arr.as_slice() {
-                let expected = [f32::from(v[0]), f32::from(v[1]), item];
-                assert_eq!(slice, &expected);
-            } else {
-                panic!("Expected F32 slice after f16+f32 promotion");
-            }
+        // bf16 + f64 => F64
+        let vbf = [bf16::MIN, bf16::from_f32(2.5)];
+        let mut arr: IArray = Vec::from(vbf).try_into().unwrap();
+        arr.push(item).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F64);
+        if let ArraySliceRef::F64(slice) = arr.as_slice() {
+            let expected = [f32::from(vbf[0]) as f64, f32::from(vbf[1]) as f64, item];
+            assert_eq!(slice, &expected);
+        } else {
+            panic!("Expected F64 slice after bf16+f64 promotion");
+        }
+    }
 
-            // bf16 + f32 => F32
-            let vbf = [bf16::MIN, bf16::from_f32(2.5)];
-            let mut arr: IArray = Vec::from(vbf).try_into().unwrap();
-            arr.push(item).unwrap();
-            assert_eq!(arr.header().type_tag(), ArrayTag::F32);
-            if let ArraySliceRef::F32(slice) = arr.as_slice() {
-                let expected = [f32::from(vbf[0]), f32::from(vbf[1]), item];
-                assert_eq!(slice, &expected);
-            } else {
-                panic!("Expected F32 slice after bf16+f32 promotion");
-            }
+    #[test]
+    fn test_half_cross_half_promotes_to_f32() {
+        use half::{bf16, f16};
+        // f16 + bf16 => F32
+        let v = [f16::from_f32(1.5), f16::from_f32(2.5)];
+        let item = bf16::from_f32(1e20f32);
+        let mut arr: IArray = Vec::from(v).try_into().unwrap();
+        arr.push(item).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F32);
+        if let ArraySliceRef::F32(slice) = arr.as_slice() {
+            let expected = [f32::from(v[0]), f32::from(v[1]), f32::from(item)];
+            assert_eq!(slice, &expected);
+        } else {
+            panic!("Expected F32 slice after f16+bf16 promotion");
         }
 
-        #[test]
-        fn test_half_promotion_push_to_f64() {
-            use half::{f16, bf16};
-            // f16 + f64 => F64
-            let v = [f16::from_f32(1.5), f16::from_f32(2.5)];
-            let item = f64::MIN;
-            let mut arr: IArray = Vec::from(v).try_into().unwrap();
-            arr.push(item).unwrap();
-            assert_eq!(arr.header().type_tag(), ArrayTag::F64);
-            if let ArraySliceRef::F64(slice) = arr.as_slice() {
-                let expected = [f32::from(v[0]) as f64, f32::from(v[1]) as f64, item];
-                assert_eq!(slice, &expected);
-            } else {
-                panic!("Expected F64 slice after f16+f64 promotion");
-            }
+        // bf16 + f16 => F32
+        let vbf = [bf16::from_f32(1e20f32), bf16::from_f32(2.5)];
+        let item = f16::from_f32(1.0) + f16::EPSILON;
+        let mut arr: IArray = Vec::from(vbf).try_into().unwrap();
+        arr.push(item).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F32);
+        if let ArraySliceRef::F32(slice) = arr.as_slice() {
+            let expected = [f32::from(vbf[0]), f32::from(vbf[1]), f32::from(item)];
+            assert_eq!(slice, &expected);
+        } else {
+            panic!("Expected F32 slice after bf16+f16 promotion");
+        }
+    }
 
-            // bf16 + f64 => F64
-            let vbf = [bf16::MIN, bf16::from_f32(2.5)];
-            let mut arr: IArray = Vec::from(vbf).try_into().unwrap();
-            arr.push(item).unwrap();
-            assert_eq!(arr.header().type_tag(), ArrayTag::F64);
-            if let ArraySliceRef::F64(slice) = arr.as_slice() {
-                let expected = [f32::from(vbf[0]) as f64, f32::from(vbf[1]) as f64, item];
-                assert_eq!(slice, &expected);
-            } else {
-                panic!("Expected F64 slice after bf16+f64 promotion");
-            }
+    #[test]
+    fn test_half_mixed_with_integers_becomes_heterogeneous() {
+        use half::{bf16, f16};
+        let mut arr_f16 = IArray::new();
+        arr_f16
+            .try_extend([f16::from_f32(1.5), f16::from_f32(2.5)])
+            .unwrap();
+        arr_f16.push(42i32).unwrap();
+        assert_eq!(arr_f16.header().type_tag(), ArrayTag::Heterogeneous);
+        if let ArraySliceRef::Heterogeneous(slice) = arr_f16.as_slice() {
+            assert_eq!(slice[0], IValue::from(f16::from_f32(1.5)));
+            assert_eq!(slice[1], IValue::from(f16::from_f32(2.5)));
+            assert_eq!(slice[2], IValue::from(42i32));
+        } else {
+            panic!("Expected Heterogeneous slice after mixing f16 with int");
         }
 
-        #[test]
-        fn test_half_cross_half_promotes_to_f32() {
-            use half::{f16, bf16};
-            // f16 + bf16 => F32
-            let v = [f16::from_f32(1.5), f16::from_f32(2.5)];
-            let item = bf16::from_f32(1e20f32);
-            let mut arr: IArray = Vec::from(v).try_into().unwrap();
-            arr.push(item).unwrap();
-            assert_eq!(arr.header().type_tag(), ArrayTag::F32);
-            if let ArraySliceRef::F32(slice) = arr.as_slice() {
-                let expected = [f32::from(v[0]), f32::from(v[1]), f32::from(item)];
-                assert_eq!(slice, &expected);
-            } else {
-                panic!("Expected F32 slice after f16+bf16 promotion");
-            }
+        let mut arr_bf16 = IArray::new();
+        arr_bf16
+            .try_extend([bf16::from_f32(1.5), bf16::from_f32(2.5)])
+            .unwrap();
+        arr_bf16.push(42i32).unwrap();
+        assert_eq!(arr_bf16.header().type_tag(), ArrayTag::Heterogeneous);
+        if let ArraySliceRef::Heterogeneous(slice) = arr_bf16.as_slice() {
+            assert_eq!(slice[0], IValue::from(bf16::from_f32(1.5)));
+            assert_eq!(slice[1], IValue::from(bf16::from_f32(2.5)));
+            assert_eq!(slice[2], IValue::from(42i32));
+        } else {
+            panic!("Expected Heterogeneous slice after mixing bf16 with int");
+        }
+    }
 
-            // bf16 + f16 => F32
-            let vbf = [bf16::from_f32(1e20f32), bf16::from_f32(2.5)];
-            let item = f16::from_f32(1.0) + f16::EPSILON;
-            let mut arr: IArray = Vec::from(vbf).try_into().unwrap();
-            arr.push(item).unwrap();
-            assert_eq!(arr.header().type_tag(), ArrayTag::F32);
-            if let ArraySliceRef::F32(slice) = arr.as_slice() {
-                let expected = [f32::from(vbf[0]), f32::from(vbf[1]), f32::from(item)];
-                assert_eq!(slice, &expected);
-            } else {
-                panic!("Expected F32 slice after bf16+f16 promotion");
-            }
+    #[test]
+    fn test_half_extend_and_insert_promotions() {
+        use half::{bf16, f16};
+        // extend: f16 + f32 => F32
+        let mut arr = IArray::new();
+        arr.try_extend([f16::from_f32(1.5), f16::from_f32(2.5)])
+            .unwrap();
+        arr.try_extend(vec![f32::MIN, f32::MAX]).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F32);
+        if let ArraySliceRef::F32(slice) = arr.as_slice() {
+            let expected = [1.5f32, 2.5f32, f32::MIN, f32::MAX];
+            assert_eq!(slice, &expected);
+        } else {
+            panic!("Expected F32 slice after extend with f32");
         }
 
-        #[test]
-        fn test_half_mixed_with_integers_becomes_heterogeneous() {
-            use half::{f16, bf16};
-            let mut arr_f16 = IArray::new();
-            arr_f16.try_extend([f16::from_f32(1.5), f16::from_f32(2.5)]).unwrap();
-            arr_f16.push(42i32).unwrap();
-            assert_eq!(arr_f16.header().type_tag(), ArrayTag::Heterogeneous);
-            if let ArraySliceRef::Heterogeneous(slice) = arr_f16.as_slice() {
-                assert_eq!(slice[0], IValue::from(f16::from_f32(1.5)));
-                assert_eq!(slice[1], IValue::from(f16::from_f32(2.5)));
-                assert_eq!(slice[2], IValue::from(42i32));
-            } else {
-                panic!("Expected Heterogeneous slice after mixing f16 with int");
-            }
-
-            let mut arr_bf16 = IArray::new();
-            arr_bf16.try_extend([bf16::from_f32(1.5), bf16::from_f32(2.5)]).unwrap();
-            arr_bf16.push(42i32).unwrap();
-            assert_eq!(arr_bf16.header().type_tag(), ArrayTag::Heterogeneous);
-            if let ArraySliceRef::Heterogeneous(slice) = arr_bf16.as_slice() {
-                assert_eq!(slice[0], IValue::from(bf16::from_f32(1.5)));
-                assert_eq!(slice[1], IValue::from(bf16::from_f32(2.5)));
-                assert_eq!(slice[2], IValue::from(42i32));
-            } else {
-                panic!("Expected Heterogeneous slice after mixing bf16 with int");
-            }
+        // insert: bf16 + f64 => F64
+        let mut arr = IArray::new();
+        arr.try_extend([bf16::from_f32(1.5), bf16::from_f32(3.5)])
+            .unwrap();
+        arr.insert(1, f64::MIN).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F64);
+        if let ArraySliceRef::F64(slice) = arr.as_slice() {
+            let expected = [1.5f64, f64::MIN, 3.5f64];
+            assert_eq!(slice, &expected);
+        } else {
+            panic!("Expected F64 slice after insert with f64");
         }
-
-        #[test]
-        fn test_half_extend_and_insert_promotions() {
-            use half::{f16, bf16};
-            // extend: f16 + f32 => F32
-            let mut arr = IArray::new();
-            arr.try_extend([f16::from_f32(1.5), f16::from_f32(2.5)]).unwrap();
-            arr.try_extend(vec![f32::MIN, f32::MAX]).unwrap();
-            assert_eq!(arr.header().type_tag(), ArrayTag::F32);
-            if let ArraySliceRef::F32(slice) = arr.as_slice() {
-                let expected = [1.5f32, 2.5f32, f32::MIN, f32::MAX];
-                assert_eq!(slice, &expected);
-            } else {
-                panic!("Expected F32 slice after extend with f32");
-            }
-
-            // insert: bf16 + f64 => F64
-            let mut arr = IArray::new();
-            arr.try_extend([bf16::from_f32(1.5), bf16::from_f32(3.5)]).unwrap();
-            arr.insert(1, f64::MIN).unwrap();
-            assert_eq!(arr.header().type_tag(), ArrayTag::F64);
-            if let ArraySliceRef::F64(slice) = arr.as_slice() {
-                let expected = [1.5f64, f64::MIN, 3.5f64];
-                assert_eq!(slice, &expected);
-            } else {
-                panic!("Expected F64 slice after insert with f64");
-            }
-        }
+    }
 
     #[test]
     fn test_typed_array_extend_incompatible_types() {
         let mut i32_array = IArray::try_from(vec![1i32, 2i32]).unwrap();
         assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
 
-        i32_array.try_extend(vec![3.5f32, 4.5f32]).unwrap();  // should convert to heterogeneous
+        i32_array.try_extend(vec![3.5f32, 4.5f32]).unwrap(); // should convert to heterogeneous
         assert_eq!(i32_array.header().type_tag(), ArrayTag::Heterogeneous);
         assert_eq!(i32_array.len(), 4);
 
@@ -2757,7 +2869,7 @@ mod tests {
         let mut f32_array = IArray::try_from(vec![1.5f32, 2.5f32]).unwrap();
         assert_eq!(f32_array.header().type_tag(), ArrayTag::F32);
 
-        f32_array.try_extend(vec![42i32, 84i32]).unwrap();  // should convert to heterogeneous
+        f32_array.try_extend(vec![42i32, 84i32]).unwrap(); // should convert to heterogeneous
         assert_eq!(f32_array.header().type_tag(), ArrayTag::Heterogeneous);
         assert_eq!(f32_array.len(), 4);
 
@@ -2777,7 +2889,7 @@ mod tests {
         let mut i32_array = IArray::try_from(vec![1i32, 2i32]).unwrap();
         assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
 
-        i32_array.try_extend(vec![3i32, 4i32, 5i32]).unwrap();  // Same type, should stay i32
+        i32_array.try_extend(vec![3i32, 4i32, 5i32]).unwrap(); // Same type, should stay i32
         assert_eq!(i32_array.header().type_tag(), ArrayTag::I32);
         assert_eq!(i32_array.len(), 5);
 
@@ -2858,26 +2970,36 @@ mod tests {
         x.push(IValue::TRUE).unwrap();
         x.insert(1, IValue::FALSE).unwrap();
 
-        assert_eq!(x.as_slice(), [IValue::NULL, IValue::FALSE, IValue::TRUE].as_slice().into());
+        assert_eq!(
+            x.as_slice(),
+            [IValue::NULL, IValue::FALSE, IValue::TRUE]
+                .as_slice()
+                .into()
+        );
     }
 
     #[mockalloc::test]
     fn can_nest() {
-        let x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE].try_into().unwrap_or_default();
+        let x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE]
+            .try_into()
+            .unwrap_or_default();
         let y: IArray = vec![
             IValue::NULL,
             x.clone().into(),
             IValue::FALSE,
             x.clone().into(),
         ]
-        .try_into().unwrap_or_default();
+        .try_into()
+        .unwrap_or_default();
 
         assert_eq!(&y[1], x.as_ref());
     }
 
     #[mockalloc::test]
     fn can_pop_remove() {
-        let mut x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE].try_into().unwrap_or_default();
+        let mut x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE]
+            .try_into()
+            .unwrap_or_default();
         assert_eq!(x.remove(1), Some(IValue::TRUE));
         assert_eq!(x.pop(), Some(IValue::FALSE));
 
@@ -2886,15 +3008,22 @@ mod tests {
 
     #[mockalloc::test]
     fn can_swap_remove() {
-        let mut x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE].try_into().unwrap_or_default();
+        let mut x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE]
+            .try_into()
+            .unwrap_or_default();
         assert_eq!(x.swap_remove(0), Some(IValue::NULL));
 
-        assert_eq!(x.as_slice(), [IValue::FALSE, IValue::TRUE].as_slice().into());
+        assert_eq!(
+            x.as_slice(),
+            [IValue::FALSE, IValue::TRUE].as_slice().into()
+        );
     }
 
     #[mockalloc::test]
     fn can_index() {
-        let mut x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE].try_into().unwrap_or_default();
+        let mut x: IArray = vec![IValue::NULL, IValue::TRUE, IValue::FALSE]
+            .try_into()
+            .unwrap_or_default();
         assert_eq!(x[1], IValue::TRUE);
         x[1] = IValue::FALSE;
         assert_eq!(x[1], IValue::FALSE);
@@ -2902,8 +3031,13 @@ mod tests {
 
     #[mockalloc::test]
     fn can_truncate_and_shrink() {
-        let mut x: IArray =
-            vec![IValue::NULL, IValue::TRUE, IArray::with_capacity(10).unwrap().into()].try_into().unwrap_or_default();
+        let mut x: IArray = vec![
+            IValue::NULL,
+            IValue::TRUE,
+            IArray::with_capacity(10).unwrap().into(),
+        ]
+        .try_into()
+        .unwrap_or_default();
         x.truncate(2);
         assert_eq!(x.len(), 2);
         assert_eq!(x.capacity(), 3);
@@ -2930,7 +3064,7 @@ mod tests {
         arr.insert(0, 1.25f32).unwrap();
         assert_eq!(arr.header().type_tag(), ArrayTag::F16);
         if let ArraySliceRef::F16(slice) = arr.as_slice() {
-            assert_eq!(slice, &[f16::from_f32(1.25f32)]);
+            assert_eq!(slice, &[half::f16::from_f32(1.25f32)]);
         } else {
             panic!("Expected F16 slice after first insert retag");
         }
@@ -2955,7 +3089,9 @@ mod tests {
         assert_eq!(arr.len(), 0);
         assert_eq!(arr.header().type_tag(), ArrayTag::Heterogeneous);
 
-        let total = IArray::layout(cap, ArrayTag::Heterogeneous).expect("layout").size();
+        let total = IArray::layout(cap, ArrayTag::Heterogeneous)
+            .expect("layout")
+            .size();
         let payload = total - std::mem::size_of::<Header>();
         let expected = payload / ArrayTag::U8.element_size();
 
@@ -2972,7 +3108,9 @@ mod tests {
         assert_eq!(arr.len(), 0);
         assert_eq!(arr.header().type_tag(), ArrayTag::Heterogeneous);
 
-        let total = IArray::layout(cap, ArrayTag::Heterogeneous).expect("layout").size();
+        let total = IArray::layout(cap, ArrayTag::Heterogeneous)
+            .expect("layout")
+            .size();
         let payload = total - std::mem::size_of::<Header>();
         let expected = payload / ArrayTag::F64.element_size();
 

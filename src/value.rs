@@ -1,3 +1,4 @@
+use half::{bf16, f16};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
@@ -6,18 +7,8 @@ use std::hash::Hash;
 use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
-use half::{bf16, f16};
 
-use crate::{Defrag, DefragAllocator};
-
-use super::array::IArray;
-use super::number::INumber;
-use super::object::IObject;
-
-#[cfg(feature = "thread_safe")]
-use super::string::IString;
-#[cfg(not(feature = "thread_safe"))]
-use super::unsafe_string::IString;
+use crate::{array, Defrag, DefragAllocator, IArray, INumber, IObject, IString};
 
 /// Stores an arbitrary JSON value.
 ///
@@ -219,19 +210,20 @@ unsafe impl Sync for IValue {}
 
 impl<A: DefragAllocator> Defrag<A> for IValue {
     fn defrag(self, defrag_allocator: &mut A) -> Self {
+        use Destructured::*;
         match self.destructure() {
-            Destructured::Null => IValue::NULL,
-            Destructured::Bool(val) => {
+            Null => IValue::NULL,
+            Bool(val) => {
                 if val {
                     IValue::TRUE
                 } else {
                     IValue::FALSE
                 }
             }
-            Destructured::Array(array) => array.defrag(defrag_allocator).0,
-            Destructured::Object(obj) => obj.defrag(defrag_allocator).0,
-            Destructured::String(s) => s.defrag(defrag_allocator).0,
-            Destructured::Number(n) => n.defrag(defrag_allocator).0,
+            Array(array) => array.defrag(defrag_allocator).0,
+            Object(obj) => obj.defrag(defrag_allocator).0,
+            String(s) => s.defrag(defrag_allocator).0,
+            Number(n) => n.defrag(defrag_allocator).0,
         }
     }
 }
@@ -315,57 +307,61 @@ impl IValue {
     /// Destructures this value into an enum which can be `match`ed on.
     #[must_use]
     pub fn destructure(self) -> Destructured {
+        use ValueType::*;
         match self.type_() {
-            ValueType::Null => Destructured::Null,
-            ValueType::Bool => Destructured::Bool(self.is_true()),
-            ValueType::Number => Destructured::Number(INumber(self)),
-            ValueType::String => Destructured::String(IString(self)),
-            ValueType::Array => Destructured::Array(IArray(self)),
-            ValueType::Object => Destructured::Object(IObject(self)),
+            Null => Destructured::Null,
+            Bool => Destructured::Bool(self.is_true()),
+            Number => Destructured::Number(INumber(self)),
+            String => Destructured::String(IString(self)),
+            Array => Destructured::Array(IArray(self)),
+            Object => Destructured::Object(IObject(self)),
         }
     }
 
     /// Destructures a reference to this value into an enum which can be `match`ed on.
     #[must_use]
     pub fn destructure_ref(&self) -> DestructuredRef<'_> {
+        use ValueType::*;
         // Safety: we check the type
         unsafe {
             match self.type_() {
-                ValueType::Null => DestructuredRef::Null,
-                ValueType::Bool => DestructuredRef::Bool(self.is_true()),
-                ValueType::Number => DestructuredRef::Number(self.as_number_unchecked()),
-                ValueType::String => DestructuredRef::String(self.as_string_unchecked()),
-                ValueType::Array => DestructuredRef::Array(self.as_array_unchecked()),
-                ValueType::Object => DestructuredRef::Object(self.as_object_unchecked()),
+                Null => DestructuredRef::Null,
+                Bool => DestructuredRef::Bool(self.is_true()),
+                Number => DestructuredRef::Number(self.as_number_unchecked()),
+                String => DestructuredRef::String(self.as_string_unchecked()),
+                Array => DestructuredRef::Array(self.as_array_unchecked()),
+                Object => DestructuredRef::Object(self.as_object_unchecked()),
             }
         }
     }
 
     /// Destructures a mutable reference to this value into an enum which can be `match`ed on.
     pub fn destructure_mut(&mut self) -> DestructuredMut<'_> {
+        use ValueType::*;
         // Safety: we check the type
         unsafe {
             match self.type_() {
-                ValueType::Null => DestructuredMut::Null,
-                ValueType::Bool => DestructuredMut::Bool(BoolMut(self)),
-                ValueType::Number => DestructuredMut::Number(self.as_number_unchecked_mut()),
-                ValueType::String => DestructuredMut::String(self.as_string_unchecked_mut()),
-                ValueType::Array => DestructuredMut::Array(self.as_array_unchecked_mut()),
-                ValueType::Object => DestructuredMut::Object(self.as_object_unchecked_mut()),
+                Null => DestructuredMut::Null,
+                Bool => DestructuredMut::Bool(BoolMut(self)),
+                Number => DestructuredMut::Number(self.as_number_unchecked_mut()),
+                String => DestructuredMut::String(self.as_string_unchecked_mut()),
+                Array => DestructuredMut::Array(self.as_array_unchecked_mut()),
+                Object => DestructuredMut::Object(self.as_object_unchecked_mut()),
             }
         }
     }
 
     /// Reports dynamic memory allocated by this value.
     pub fn mem_allocated(&self) -> usize {
+        use ValueType::*;
         match self.type_() {
             // inline types consume no extra memory
-            ValueType::Null | ValueType::Bool => 0,
+            Null | Bool => 0,
             // Safety: We checked the type
-            ValueType::Number => unsafe { self.as_number_unchecked() }.mem_allocated(),
-            ValueType::String => unsafe { self.as_string_unchecked() }.mem_allocated(),
-            ValueType::Array => unsafe { self.as_array_unchecked() }.mem_allocated(),
-            ValueType::Object => unsafe { self.as_object_unchecked() }.mem_allocated(),
+            Number => unsafe { self.as_number_unchecked() }.mem_allocated(),
+            String => unsafe { self.as_string_unchecked() }.mem_allocated(),
+            Array => unsafe { self.as_array_unchecked() }.mem_allocated(),
+            Object => unsafe { self.as_object_unchecked() }.mem_allocated(),
         }
     }
 
@@ -408,11 +404,11 @@ impl IValue {
     /// Returns `None` for other types.
     #[must_use]
     pub fn len(&self) -> Option<usize> {
+        use ValueType::*;
+        // Safety: we checked the type
         match self.type_() {
-            // Safety: checked type
-            ValueType::Array => Some(unsafe { self.as_array_unchecked().len() }),
-            // Safety: checked type
-            ValueType::Object => Some(unsafe { self.as_object_unchecked().len() }),
+            Array => Some(unsafe { self.as_array_unchecked().len() }),
+            Object => Some(unsafe { self.as_object_unchecked().len() }),
             _ => None,
         }
     }
@@ -421,11 +417,11 @@ impl IValue {
     /// Returns `None` for other types.
     #[must_use]
     pub fn is_empty(&self) -> Option<bool> {
+        use ValueType::*;
+        // Safety: we checked the type
         match self.type_() {
-            // Safety: checked type
-            ValueType::Array => Some(unsafe { self.as_array_unchecked().is_empty() }),
-            // Safety: checked type
-            ValueType::Object => Some(unsafe { self.as_object_unchecked().is_empty() }),
+            Array => Some(unsafe { self.as_array_unchecked().is_empty() }),
+            Object => Some(unsafe { self.as_object_unchecked().is_empty() }),
             _ => None,
         }
     }
@@ -500,23 +496,17 @@ impl IValue {
     /// Returns `None` if it's not a number.
     #[must_use]
     pub fn as_number(&self) -> Option<&INumber> {
-        if self.is_number() {
-            // Safety: INumber is a `#[repr(transparent)]` wrapper around IValue
-            Some(unsafe { self.as_number_unchecked() })
-        } else {
-            None
-        }
+        // Safety: INumber is a `#[repr(transparent)]` wrapper around IValue
+        self.is_number()
+            .then(|| unsafe { self.as_number_unchecked() })
     }
 
     /// Gets a mutable reference to this value as an [`INumber`].
     /// Returns `None` if it's not a number.
     pub fn as_number_mut(&mut self) -> Option<&mut INumber> {
-        if self.is_number() {
-            // Safety: INumber is a `#[repr(transparent)]` wrapper around IValue
-            Some(unsafe { self.as_number_unchecked_mut() })
-        } else {
-            None
-        }
+        // Safety: INumber is a `#[repr(transparent)]` wrapper around IValue
+        self.is_number()
+            .then(|| unsafe { self.as_number_unchecked_mut() })
     }
 
     /// Converts this value to an [`INumber`].
@@ -790,60 +780,64 @@ impl IValue {
 
 impl Clone for IValue {
     fn clone(&self) -> Self {
+        use ValueType::*;
         match self.type_() {
             // Inline types can be trivially copied
-            ValueType::Null | ValueType::Bool => Self { ptr: self.ptr },
+            Null | Bool => Self { ptr: self.ptr },
             // Safety: We checked the type
-            ValueType::Array => unsafe { self.as_array_unchecked() }.clone_impl(),
-            ValueType::Object => unsafe { self.as_object_unchecked() }.clone_impl(),
-            ValueType::String => unsafe { self.as_string_unchecked() }.clone_impl(),
-            ValueType::Number => unsafe { self.as_number_unchecked() }.clone_impl(),
+            Array => unsafe { self.as_array_unchecked() }.clone_impl(),
+            Object => unsafe { self.as_object_unchecked() }.clone_impl(),
+            String => unsafe { self.as_string_unchecked() }.clone_impl(),
+            Number => unsafe { self.as_number_unchecked() }.clone_impl(),
         }
     }
 }
 
 impl Drop for IValue {
     fn drop(&mut self) {
+        use ValueType::*;
         match self.type_() {
             // Inline types can be trivially dropped
-            ValueType::Null | ValueType::Bool => {}
+            Null | Bool => {}
             // Safety: We checked the type
-            ValueType::Array => unsafe { self.as_array_unchecked_mut() }.drop_impl(),
-            ValueType::Object => unsafe { self.as_object_unchecked_mut() }.drop_impl(),
-            ValueType::String => unsafe { self.as_string_unchecked_mut() }.drop_impl(),
-            ValueType::Number => unsafe { self.as_number_unchecked_mut() }.drop_impl(),
+            Array => unsafe { self.as_array_unchecked_mut() }.drop_impl(),
+            Object => unsafe { self.as_object_unchecked_mut() }.drop_impl(),
+            String => unsafe { self.as_string_unchecked_mut() }.drop_impl(),
+            Number => unsafe { self.as_number_unchecked_mut() }.drop_impl(),
         }
     }
 }
 
 impl Hash for IValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        use ValueType::*;
         match self.type_() {
             // Inline and interned types can be trivially hashed
-            ValueType::Null | ValueType::Bool | ValueType::String => self.ptr.hash(state),
+            Null | Bool | String => self.ptr.hash(state),
             // Safety: We checked the type
-            ValueType::Array => unsafe { self.as_array_unchecked() }.hash(state),
+            Array => unsafe { self.as_array_unchecked() }.hash(state),
             // Safety: We checked the type
-            ValueType::Object => unsafe { self.as_object_unchecked() }.hash(state),
+            Object => unsafe { self.as_object_unchecked() }.hash(state),
             // Safety: We checked the type
-            ValueType::Number => unsafe { self.as_number_unchecked() }.hash(state),
+            Number => unsafe { self.as_number_unchecked() }.hash(state),
         }
     }
 }
 
 impl PartialEq for IValue {
     fn eq(&self, other: &Self) -> bool {
+        use ValueType::*;
         let (t1, t2) = (self.type_(), other.type_());
         if t1 == t2 {
             // Safety: Only methods for the appropriate type are called
             unsafe {
                 match t1 {
                     // Inline and interned types can be trivially compared
-                    ValueType::Null | ValueType::Bool => self.ptr == other.ptr,
-                    ValueType::String => self.as_string_unchecked() == other.as_string_unchecked(),
-                    ValueType::Number => self.as_number_unchecked() == other.as_number_unchecked(),
-                    ValueType::Array => self.as_array_unchecked() == other.as_array_unchecked(),
-                    ValueType::Object => self.as_object_unchecked() == other.as_object_unchecked(),
+                    Null | Bool => self.ptr == other.ptr,
+                    String => self.as_string_unchecked() == other.as_string_unchecked(),
+                    Number => self.as_number_unchecked() == other.as_number_unchecked(),
+                    Array => self.as_array_unchecked() == other.as_array_unchecked(),
+                    Object => self.as_object_unchecked() == other.as_object_unchecked(),
                 }
             }
         } else {
@@ -855,24 +849,25 @@ impl PartialEq for IValue {
 impl Eq for IValue {}
 impl PartialOrd for IValue {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        use ValueType::*;
         let (t1, t2) = (self.type_(), other.type_());
         if t1 == t2 {
             // Safety: Only methods for the appropriate type are called
             unsafe {
                 match t1 {
                     // Inline and interned types can be trivially compared
-                    ValueType::Null => Some(Ordering::Equal),
-                    ValueType::Bool => self.is_true().partial_cmp(&other.is_true()),
-                    ValueType::String => self
+                    Null => Some(Ordering::Equal),
+                    Bool => self.is_true().partial_cmp(&other.is_true()),
+                    String => self
                         .as_string_unchecked()
                         .partial_cmp(other.as_string_unchecked()),
-                    ValueType::Number => self
+                    Number => self
                         .as_number_unchecked()
                         .partial_cmp(other.as_number_unchecked()),
-                    ValueType::Array => self
+                    Array => self
                         .as_array_unchecked()
                         .partial_cmp(other.as_array_unchecked()),
-                    ValueType::Object => None,
+                    Object => None,
                 }
             }
         } else {
@@ -996,19 +991,17 @@ impl<I: ValueIndex> IndexMut<I> for IValue {
 
 impl Debug for IValue {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        use ValueType::*;
         unsafe {
+            // Safety: We checked the type
             match self.type_() {
                 // Inline and interned types can be trivially hashed
-                ValueType::Null => f.write_str("null"),
-                ValueType::Bool => Debug::fmt(&self.is_true(), f),
-                // Safety: We checked the type
-                ValueType::String => Debug::fmt(self.as_string_unchecked(), f),
-                // Safety: We checked the type
-                ValueType::Array => Debug::fmt(self.as_array_unchecked(), f),
-                // Safety: We checked the type
-                ValueType::Object => Debug::fmt(self.as_object_unchecked(), f),
-                // Safety: We checked the type
-                ValueType::Number => Debug::fmt(self.as_number_unchecked(), f),
+                Null => f.write_str("null"),
+                Bool => Debug::fmt(&self.is_true(), f),
+                String => Debug::fmt(self.as_string_unchecked(), f),
+                Array => Debug::fmt(self.as_array_unchecked(), f),
+                Object => Debug::fmt(self.as_object_unchecked(), f),
+                Number => Debug::fmt(self.as_number_unchecked(), f),
             }
         }
     }
@@ -1040,41 +1033,18 @@ typed_conversions! {
     IObject:
         HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
         BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
+    IArray:
+        Vec<T> where (T: Into<IValue> + array::private::Sealed),
+        Vec<i8>, Vec<u8>, Vec<i16>, Vec<u16>, Vec<i32>, Vec<u32>,
+        Vec<i64>, Vec<u64>, Vec<isize>, Vec<usize>,
+        Vec<f16>, Vec<bf16>, Vec<f32>, Vec<f64>,
+        &[T] where (T: Into<IValue> + Clone + array::private::Sealed),
+        &[i8], &[u8], &[i16], &[u16], &[i32], &[u32],
+        &[i64], &[u64], &[isize], &[usize],
+        &[f16], &[bf16], &[f32], &[f64];
 }
-
-impl<T: Into<IValue>> From<Vec<T>> for IValue {
-    fn from(v: Vec<T>) -> Self {
-        IArray::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
-    }
-}
-impl<T: Into<IValue> + Clone> From<&[T]> for IValue {
-    fn from(v: &[T]) -> Self {
-        IArray::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
-    }
-}
-
-impl From<f16> for IValue {
-    fn from(v: f16) -> Self {
-        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
-    }
-}
-
-impl From<bf16> for IValue {
-    fn from(v: bf16) -> Self {
-        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
-    }
-}
-
-impl From<f32> for IValue {
-    fn from(v: f32) -> Self {
-        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
-    }
-}
-
-impl From<f64> for IValue {
-    fn from(v: f64) -> Self {
-        INumber::try_from(v).map(Into::into).unwrap_or(IValue::NULL)
-    }
+typed_conversions_fallible! {
+    INumber: f16, bf16, f32, f64;
 }
 
 impl Default for IValue {
