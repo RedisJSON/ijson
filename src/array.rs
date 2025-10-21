@@ -12,7 +12,14 @@ use half::{f16, bf16};
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 use crate::{Defrag, DefragAllocator};
 
+use super::number::INumber;
+use super::object::IObject;
 use super::value::{IValue, TypeTag};
+
+#[cfg(feature = "thread_safe")]
+use super::string::IString;
+#[cfg(not(feature = "thread_safe"))]
+use super::unsafe_string::IString;
 
 /// Tag indicating the type of elements stored in a typed array
 #[repr(u8)]
@@ -1368,23 +1375,37 @@ fn convert_bf16<T: Into<f64>>(value: T) -> bf16 {
 extend_impl_int!(i8, i16, i32, i64, u8, u16, u32, u64);
 extend_impl_float!(f16, bf16, f32, f64);
 
-impl<U: Into<IValue>> Extend<U> for IArray {
-    default fn extend<T: IntoIterator<Item = U>>(&mut self, iter: T) {
-        let iter = iter.into_iter();
-        self.reserve(iter.size_hint().0);
-        for v in iter {
-            self.push(v);
-        }
-    }
+// Explicit implementations for types that impl Into<IValue>
+macro_rules! extend_impl_into_ivalue {
+    ($($ty:ty),*) => {
+        $(impl Extend<$ty> for IArray {
+            fn extend<T: IntoIterator<Item = $ty>>(&mut self, iter: T) {
+                let iter = iter.into_iter();
+                self.reserve(iter.size_hint().0);
+                for v in iter {
+                    self.push(v);
+                }
+            }
+        })*
+    };
 }
 
-impl<U: Into<IValue>> FromIterator<U> for IArray {
-    default fn from_iter<T: IntoIterator<Item = U>>(iter: T) -> Self {
-        let mut res = IArray::new();
-        res.extend(iter);
-        res
-    }
+extend_impl_into_ivalue!(IValue, IString, IObject, IArray, INumber);
+
+// Explicit implementations for types that impl Into<IValue>
+macro_rules! from_iter_impl_into_ivalue {
+    ($($ty:ty),*) => {
+        $(impl FromIterator<$ty> for IArray {
+            fn from_iter<T: IntoIterator<Item = $ty>>(iter: T) -> Self {
+                let mut res = IArray::new();
+                res.extend(iter);
+                res
+            }
+        })*
+    };
 }
+
+from_iter_impl_into_ivalue!(IValue, IString, IObject, IArray, INumber);
 
 macro_rules! from_iter_impl {
     ($($ty:ty),*) => {
@@ -1488,13 +1509,20 @@ macro_rules! from_vec_impl {
 
 from_vec_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
 
-impl<T: Into<IValue>> From<Vec<T>> for IArray {
-    default fn from(other: Vec<T>) -> Self {
-        let mut res = IArray::with_capacity(other.len());
-        res.extend(other.into_iter().map(Into::into));
-        res
-    }
+// Explicit implementations for types that impl Into<IValue>
+macro_rules! from_vec_impl_into_ivalue {
+    ($($ty:ty),*) => {
+        $(impl From<Vec<$ty>> for IArray {
+            fn from(other: Vec<$ty>) -> Self {
+                let mut res = IArray::with_capacity(other.len());
+                res.extend(other.into_iter());
+                res
+            }
+        })*
+    };
 }
+
+from_vec_impl_into_ivalue!(IValue, IString, IObject, IArray, INumber);
 
 macro_rules! from_slice_impl {
     ($($ty:ty),*) => {
@@ -1510,13 +1538,20 @@ macro_rules! from_slice_impl {
 
 from_slice_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
 
-impl<T: Into<IValue> + Clone> From<&[T]> for IArray {
-    default fn from(other: &[T]) -> Self {
-        let mut res = IArray::with_capacity(other.len());
-        res.extend(other.iter().cloned().map(Into::into));
-        res
-    }
+// Explicit implementations for types that impl Into<IValue>
+macro_rules! from_slice_impl_into_ivalue {
+    ($($ty:ty),*) => {
+        $(impl From<&[$ty]> for IArray {
+            fn from(other: &[$ty]) -> Self {
+                let mut res = IArray::with_capacity(other.len());
+                res.extend(other.iter().cloned());
+                res
+            }
+        })*
+    };
 }
+
+from_slice_impl_into_ivalue!(IValue, IString, IObject, IArray, INumber);
 
 /// Iterator item that can hold either a reference to an IValue or an owned IValue
 /// This avoids deep copying for heterogeneous arrays while still providing owned values for primitives

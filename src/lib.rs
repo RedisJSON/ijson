@@ -18,7 +18,6 @@
 //!   There is no performance benefit to this, but it can help avoid false positives
 //!   from tools like `mockalloc` which try to detect memory leaks during tests.
 #![deny(missing_docs, missing_debug_implementations)]
-#![feature(min_specialization)]
 
 #[macro_use]
 mod macros;

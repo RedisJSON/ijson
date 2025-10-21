@@ -1038,8 +1038,8 @@ typed_conversions! {
     INumber: i8, u8, i16, u16, i32, u32, i64, u64, isize, usize;
     IString: String, &String, &mut String, &str, &mut str;
     IArray:
-        Vec<T> where (T: Into<IValue>),
-        &[T] where (T: Into<IValue> + Clone);
+        Vec<IValue>, Vec<IString>, Vec<IObject>, Vec<IArray>, Vec<INumber>,
+        &[IValue], &[IString], &[IObject], &[IArray], &[INumber];
     IObject:
         HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
         BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
