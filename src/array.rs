@@ -66,6 +66,8 @@ impl ArrayTag {
             "half::bfloat::bf16" => BF16,
             "i32" => I32,
             "u32" => U32,
+            "isize" => I64,
+            "usize" => U64,
             "f32" => F32,
             "i64" => I64,
             "u64" => U64,
@@ -1544,7 +1546,7 @@ fn convert_bf16<T: Into<f64>>(value: T) -> bf16 {
     bf16::from_f64(value.into())
 }
 
-extend_impl_int!(i8, i16, i32, i64, u8, u16, u32, u64);
+extend_impl_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 extend_impl_float!(f16, bf16, f32, f64);
 
 impl<U: Into<IValue> + private::Sealed> FromIterator<U> for IArray {
@@ -1578,20 +1580,6 @@ impl<T: Into<IValue> + private::Sealed> From<Vec<T>> for IArray {
     }
 }
 
-macro_rules! from_vec_impl {
-    ($($ty:ty),*) => {
-        $(impl From<Vec<$ty>> for IArray {
-            fn from(other: Vec<$ty>) -> Self {
-                let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>()).unwrap();
-                TryExtend::<$ty>::try_extend(&mut res, other.into_iter().map(Into::into)).unwrap();
-                res
-            }
-        })*
-    }
-}
-
-from_vec_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
-
 impl<T: Into<IValue> + Clone + private::Sealed> From<&[T]> for IArray {
     fn from(other: &[T]) -> Self {
         let mut res = IArray::with_capacity(other.len()).unwrap();
@@ -1602,18 +1590,25 @@ impl<T: Into<IValue> + Clone + private::Sealed> From<&[T]> for IArray {
 }
 
 macro_rules! from_slice_impl {
-    ($($ty:ty),*) => {
-        $(impl From<&[$ty]> for IArray {
+    ($($ty:ty),*) => {$(
+        impl From<Vec<$ty>> for IArray {
+            fn from(other: Vec<$ty>) -> Self {
+                let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>()).unwrap();
+                TryExtend::<$ty>::try_extend(&mut res, other.into_iter().map(Into::into)).unwrap();
+                res
+            }
+        }
+        impl From<&[$ty]> for IArray {
             fn from(other: &[$ty]) -> Self {
                 let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>()).unwrap();
                 TryExtend::<$ty>::try_extend(&mut res, other.iter().cloned().map(Into::into)).unwrap();
                 res
             }
-        })*
-    }
+        }
+    )*}
 }
 
-from_slice_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
+from_slice_impl!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize, f16, bf16, f32, f64);
 
 /// Iterator item that can hold either a reference to an IValue or an owned IValue
 /// This avoids deep copying for heterogeneous arrays while still providing owned values for primitives
