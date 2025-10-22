@@ -1549,28 +1549,62 @@ fn convert_bf16<T: Into<f64>>(value: T) -> bf16 {
 extend_impl_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 extend_impl_float!(f16, bf16, f32, f64);
 
-impl<U: Into<IValue> + private::Sealed> FromIterator<U> for IArray {
-    fn from_iter<T: IntoIterator<Item = U>>(iter: T) -> Self {
+/// Trait for types that can be fallibly constructed from an iterator
+/// This is similar to the standard `FromIterator` trait, but allows for allocation failures
+/// and is specialized for `IArray`.
+pub trait TryFromIterator<T> {
+    /// Attempts to create an instance of `Self` from an iterator of items of type `T`.
+    /// Returns an `AllocError` if allocation fails.
+    /// # Errors
+    /// Returns `AllocError` if memory allocation fails during the construction.
+    fn try_from_iter<U: IntoIterator<Item = T>>(iter: U) -> Result<Self, AllocError>
+    where
+        Self: Sized;
+}
+
+impl<U: Into<IValue> + private::Sealed> TryFromIterator<U> for IArray {
+    fn try_from_iter<T: IntoIterator<Item = U>>(iter: T) -> Result<Self, AllocError> {
         let mut res = IArray::new();
-        res.try_extend(iter).unwrap();
-        res
+        res.try_extend(iter)?;
+        Ok(res)
     }
 }
 
 macro_rules! from_iter_impl {
     ($($ty:ty),*) => {
-        $(impl FromIterator<$ty> for IArray {
-            fn from_iter<T: IntoIterator<Item = $ty>>(iter: T) -> Self {
+        $(impl TryFromIterator<$ty> for IArray {
+            fn try_from_iter<T: IntoIterator<Item = $ty>>(iter: T) -> Result<Self, AllocError> {
                 let iter = iter.into_iter();
-                let mut res = IArray::with_capacity_and_tag(iter.size_hint().0, ArrayTag::from_type::<$ty>()).unwrap();
-                res.try_extend(iter).unwrap();
-                res
+                let mut res = IArray::with_capacity_and_tag(iter.size_hint().0, ArrayTag::from_type::<$ty>())?;
+                res.try_extend(iter)?;
+                Ok(res)
             }
         })*
     }
 }
 
 from_iter_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
+
+/// Extension trait for iterators to collect into an IArray with fallible allocation.
+/// This is similar to the standard `collect` method, but allows for allocation failures.
+pub trait TryCollect<T>: Iterator<Item = T> + Sized {
+    /// Attempts to collect the iterator into a collection `B`.
+    /// Returns an `AllocError` if allocation fails.
+    /// # Errors
+    /// Returns `AllocError` if memory allocation fails during the collection.
+    fn try_collect<B>(self) -> Result<B, AllocError>
+    where
+        B: TryFromIterator<T>;
+}
+
+impl<T, I: Iterator<Item = T>> TryCollect<T> for I {
+    fn try_collect<B>(self) -> Result<B, AllocError>
+    where
+        B: TryFromIterator<T>,
+    {
+        B::try_from_iter(self)
+    }
+}
 
 impl<T: Into<IValue> + private::Sealed> TryFrom<Vec<T>> for IArray {
     type Error = AllocError;
@@ -2956,7 +2990,7 @@ mod tests {
     #[mockalloc::test]
     fn can_collect() {
         let x = vec![IValue::NULL, IValue::TRUE, IValue::FALSE];
-        let y: IArray = x.iter().cloned().collect();
+        let y: IArray = x.iter().cloned().try_collect().unwrap();
 
         assert_eq!(y.as_slice(), x.as_slice().into());
     }

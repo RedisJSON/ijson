@@ -8,7 +8,7 @@ use std::mem;
 use std::ops::{Deref, Index, IndexMut};
 use std::ptr::NonNull;
 
-use crate::{array, Defrag, DefragAllocator, IArray, INumber, IObject, IString};
+use crate::{Defrag, DefragAllocator, IArray, INumber, IObject, IString};
 
 /// Stores an arbitrary JSON value.
 ///
@@ -1037,11 +1037,11 @@ typed_conversions! {
 typed_conversions_fallible! {
     INumber: f16, bf16, f32, f64;
     IArray:
-        Vec<T> where (T: Into<IValue> + array::private::Sealed),
+        Vec<T> where (T: Into<IValue> + crate::array::private::Sealed),
         Vec<i8>, Vec<u8>, Vec<i16>, Vec<u16>, Vec<i32>, Vec<u32>,
         Vec<i64>, Vec<u64>, Vec<isize>, Vec<usize>,
         Vec<f16>, Vec<bf16>, Vec<f32>, Vec<f64>,
-        &[T] where (T: Into<IValue> + Clone + array::private::Sealed),
+        &[T] where (T: Into<IValue> + Clone + crate::array::private::Sealed),
         &[i8], &[u8], &[i16], &[u16], &[i32], &[u32],
         &[i64], &[u64], &[isize], &[usize],
         &[f16], &[bf16], &[f32], &[f64];
@@ -1056,6 +1056,7 @@ impl Default for IValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::array::TryCollect;
 
     #[mockalloc::test]
     fn can_use_literal() {
@@ -1241,7 +1242,7 @@ mod tests {
     #[mockalloc::test]
     fn test_array() {
         for v in 4..20 {
-            let mut a: IArray = (0..v).collect();
+            let mut a: IArray = (0..v).try_collect().unwrap();
             let mut x = IValue::from(a.clone());
             assert!(x.is_array());
             assert_eq!(x.type_(), ValueType::Array);

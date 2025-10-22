@@ -36,7 +36,7 @@ pub mod unsafe_string;
 #[cfg(not(feature = "thread_safe"))]
 pub use unsafe_string::IString;
 
-mod alloc;
+pub mod alloc;
 mod thin;
 mod value;
 

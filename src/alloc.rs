@@ -1,6 +1,11 @@
+//! Module for fallible allocation
+
 use std::error::Error;
 use std::fmt;
 
+/// Error type for fallible allocation
+/// This error is returned when an allocation fails.
+/// It does not contain any additional information.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub struct AllocError;
 

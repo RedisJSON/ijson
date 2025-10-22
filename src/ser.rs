@@ -7,7 +7,7 @@ use serde::{
 };
 use serde_json::error::Error;
 
-use crate::{DestructuredRef, IArray, INumber, IObject, IString, IValue};
+use crate::{array::TryCollect, DestructuredRef, IArray, INumber, IObject, IString, IValue};
 
 impl Serialize for IValue {
     #[inline]
@@ -156,8 +156,12 @@ impl Serializer for ValueSerializer {
     }
 
     fn serialize_bytes(self, value: &[u8]) -> Result<IValue, Self::Error> {
-        let array: IArray = value.iter().copied().collect();
-        Ok(array.into())
+        value
+            .iter()
+            .copied()
+            .try_collect::<IArray>()
+            .map(Into::into)
+            .map_err(|_| Error::custom("Failed to allocate array"))
     }
 
     #[inline]
