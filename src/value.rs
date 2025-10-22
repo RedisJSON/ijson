@@ -1033,6 +1033,9 @@ typed_conversions! {
     IObject:
         HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
         BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
+}
+typed_conversions_fallible! {
+    INumber: f16, bf16, f32, f64;
     IArray:
         Vec<T> where (T: Into<IValue> + array::private::Sealed),
         Vec<i8>, Vec<u8>, Vec<i16>, Vec<u16>, Vec<i32>, Vec<u32>,
@@ -1042,9 +1045,6 @@ typed_conversions! {
         &[i8], &[u8], &[i16], &[u16], &[i32], &[u32],
         &[i64], &[u64], &[isize], &[usize],
         &[f16], &[bf16], &[f32], &[f64];
-}
-typed_conversions_fallible! {
-    INumber: f16, bf16, f32, f64;
 }
 
 impl Default for IValue {

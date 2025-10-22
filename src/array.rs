@@ -1572,37 +1572,40 @@ macro_rules! from_iter_impl {
 
 from_iter_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
 
-impl<T: Into<IValue> + private::Sealed> From<Vec<T>> for IArray {
-    fn from(other: Vec<T>) -> Self {
-        let mut res = IArray::with_capacity(other.len()).unwrap();
-        res.try_extend(other.into_iter().map(Into::into)).unwrap();
-        res
+impl<T: Into<IValue> + private::Sealed> TryFrom<Vec<T>> for IArray {
+    type Error = AllocError;
+    fn try_from(other: Vec<T>) -> Result<Self, Self::Error> {
+        let mut res = IArray::with_capacity(other.len())?;
+        res.try_extend(other.into_iter().map(Into::into))?;
+        Ok(res)
     }
 }
 
-impl<T: Into<IValue> + Clone + private::Sealed> From<&[T]> for IArray {
-    fn from(other: &[T]) -> Self {
-        let mut res = IArray::with_capacity(other.len()).unwrap();
-        res.try_extend(other.iter().cloned().map(Into::into))
-            .unwrap();
-        res
+impl<T: Into<IValue> + Clone + private::Sealed> TryFrom<&[T]> for IArray {
+    type Error = AllocError;
+    fn try_from(other: &[T]) -> Result<Self, Self::Error> {
+        let mut res = IArray::with_capacity(other.len())?;
+        res.try_extend(other.iter().cloned().map(Into::into))?;
+        Ok(res)
     }
 }
 
 macro_rules! from_slice_impl {
     ($($ty:ty),*) => {$(
-        impl From<Vec<$ty>> for IArray {
-            fn from(other: Vec<$ty>) -> Self {
-                let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>()).unwrap();
-                TryExtend::<$ty>::try_extend(&mut res, other.into_iter().map(Into::into)).unwrap();
-                res
+        impl TryFrom<Vec<$ty>> for IArray {
+            type Error = AllocError;
+            fn try_from(other: Vec<$ty>) -> Result<Self, Self::Error> {
+                let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>())?;
+                TryExtend::<$ty>::try_extend(&mut res, other.into_iter().map(Into::into))?;
+                Ok(res)
             }
         }
-        impl From<&[$ty]> for IArray {
-            fn from(other: &[$ty]) -> Self {
-                let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>()).unwrap();
-                TryExtend::<$ty>::try_extend(&mut res, other.iter().cloned().map(Into::into)).unwrap();
-                res
+        impl TryFrom<&[$ty]> for IArray {
+            type Error = AllocError;
+            fn try_from(other: &[$ty]) -> Result<Self, Self::Error> {
+                let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>())?;
+                TryExtend::<$ty>::try_extend(&mut res, other.iter().cloned().map(Into::into))?;
+                Ok(res)
             }
         }
     )*}
