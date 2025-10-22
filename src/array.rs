@@ -1417,7 +1417,14 @@ pub(super) mod private {
     impl Sealed for bool {}
 }
 
-trait TryExtend<T> {
+/// Trait for types that can be fallibly extended from an iterator
+/// This is similar to the standard `Extend` trait, but allows for allocation failures
+/// and is specialized for `IArray`.
+pub trait TryExtend<T> {
+    /// Attempts to extend `self` by appending items from the given iterator.
+    /// Returns an `AllocError` if allocation fails.
+    /// # Errors
+    /// Returns an `AllocError` if memory allocation fails during the extension.
     fn try_extend(&mut self, iter: impl IntoIterator<Item = T>) -> Result<(), AllocError>;
 }
 
