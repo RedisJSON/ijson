@@ -64,6 +64,24 @@ macro_rules! typed_conversions {
         )*
     }
 }
+macro_rules! typed_conversions_fallible {
+    ($(
+        $interm:ty: $(
+            $src:ty
+            $(where ($($gb:tt)*))*
+        ),*;
+    )*) => {
+        $(
+            $(
+                impl $(<$($gb)*>)* From<$src> for IValue {
+                    fn from(other: $src) -> Self {
+                        <$interm>::try_from(other).map(Into::into).unwrap_or(IValue::NULL)
+                    }
+                }
+            )*
+        )*
+    }
+}
 
 /// Construct an [`IValue`] using familiar JSON syntax.
 ///

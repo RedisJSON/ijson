@@ -9,15 +9,14 @@ use std::hash::Hash;
 use std::mem::{self, transmute};
 use std::ops::Deref;
 use std::ptr::{addr_of_mut, copy_nonoverlapping, NonNull};
-use std::sync::atomic::AtomicU32;
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{atomic::AtomicU32, Mutex, MutexGuard, OnceLock};
 
-use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
-use crate::{Defrag, DefragAllocator};
+use crate::{
+    thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt},
+    value::{TypeTag, ALIGNMENT, TAG_SIZE_BITS},
+    Defrag, DefragAllocator, IValue,
+};
 
-use super::value::{IValue, TypeTag, ALIGNMENT, TAG_SIZE_BITS};
-
-#[repr(C)]
 #[repr(align(8))]
 struct Header {
     rc: AtomicU32,
@@ -685,5 +684,4 @@ mod tests {
             assert_eq!(original.0.ptr_usize(), cloned.0.ptr_usize());
         });
     }
-
 }

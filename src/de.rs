@@ -2,21 +2,13 @@ use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
 
 use serde::de::{
-    DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess, Unexpected, VariantAccess, Visitor
+    DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess,
+    Unexpected, VariantAccess, Visitor,
 };
 use serde::{forward_to_deserialize_any, Deserialize, Deserializer};
 use serde_json::error::Error;
 
-use super::array::IArray;
-use super::number::INumber;
-use super::object::IObject;
-
-#[cfg(feature = "thread_safe")]
-use super::string::IString;
-#[cfg(not(feature = "thread_safe"))]
-use super::unsafe_string::IString;
-
-use super::value::{DestructuredRef, IValue};
+use crate::{DestructuredRef, IArray, INumber, IObject, IString, IValue};
 
 impl<'de> Deserialize<'de> for IValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -214,9 +206,11 @@ impl<'de> Visitor<'de> for ArrayVisitor {
     where
         V: SeqAccess<'de>,
     {
-        let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0)).map_err(|_| SError::custom("Failed to allocate array"))?;
+        let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0))
+            .map_err(|_| SError::custom("Failed to allocate array"))?;
         while let Some(v) = visitor.next_element::<IValue>()? {
-            arr.push(v).map_err(|_| SError::custom("Failed to push to array"))?;
+            arr.push(v)
+                .map_err(|_| SError::custom("Failed to push to array"))?;
         }
         Ok(arr)
     }
@@ -567,7 +561,7 @@ impl<'de> Deserializer<'de> for &'de IArray {
         macro_rules! deserialize_typed_array {
             ($variant:ident, $slice:expr) => {{
                 let mut deserializer = ArrayAccess {
-                    iter: Iter::$variant($slice.iter())
+                    iter: Iter::$variant($slice.iter()),
                 };
                 let seq = visitor.visit_seq(&mut deserializer)?;
                 let remaining = deserializer.remaining_len();

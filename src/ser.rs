@@ -1,20 +1,13 @@
-use serde::ser::{
-    Error as _, Impossible, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant,
-    SerializeTuple, SerializeTupleStruct, SerializeTupleVariant,
+use serde::{
+    ser::{
+        Error as _, Impossible, SerializeMap, SerializeSeq, SerializeStruct,
+        SerializeStructVariant, SerializeTuple, SerializeTupleStruct, SerializeTupleVariant,
+    },
+    Serialize, Serializer,
 };
-use serde::{Serialize, Serializer};
 use serde_json::error::Error;
 
-use super::array::IArray;
-use super::number::INumber;
-use super::object::IObject;
-
-#[cfg(feature = "thread_safe")]
-use super::string::IString;
-#[cfg(not(feature = "thread_safe"))]
-use super::unsafe_string::IString;
-
-use super::value::{DestructuredRef, IValue};
+use crate::{array::TryCollect, DestructuredRef, IArray, INumber, IObject, IString, IValue};
 
 impl Serialize for IValue {
     #[inline]
@@ -163,8 +156,12 @@ impl Serializer for ValueSerializer {
     }
 
     fn serialize_bytes(self, value: &[u8]) -> Result<IValue, Self::Error> {
-        let array: IArray = value.iter().copied().collect();
-        Ok(array.into())
+        value
+            .iter()
+            .copied()
+            .try_collect::<IArray>()
+            .map(Into::into)
+            .map_err(|_| Error::custom("Failed to allocate array"))
     }
 
     #[inline]
@@ -229,7 +226,8 @@ impl Serializer for ValueSerializer {
 
     fn serialize_seq(self, len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
         Ok(SerializeArray {
-            array: IArray::with_capacity(len.unwrap_or(0)).map_err(|_| Error::custom("Failed to allocate array"))?,
+            array: IArray::with_capacity(len.unwrap_or(0))
+                .map_err(|_| Error::custom("Failed to allocate array"))?,
         })
     }
 
@@ -254,7 +252,8 @@ impl Serializer for ValueSerializer {
     ) -> Result<Self::SerializeTupleVariant, Self::Error> {
         Ok(SerializeArrayVariant {
             name: variant.into(),
-            array: IArray::with_capacity(len).map_err(|_| Error::custom("Failed to allocate array"))?,
+            array: IArray::with_capacity(len)
+                .map_err(|_| Error::custom("Failed to allocate array"))?,
         })
     }
 
@@ -314,7 +313,9 @@ impl SerializeSeq for SerializeArray {
     where
         T: ?Sized + Serialize,
     {
-        self.array.push(value.serialize(ValueSerializer)?).map_err(|_| Error::custom("Failed to push to array"))?;
+        self.array
+            .push(value.serialize(ValueSerializer)?)
+            .map_err(|_| Error::custom("Failed to push to array"))?;
         Ok(())
     }
 
@@ -363,7 +364,9 @@ impl SerializeTupleVariant for SerializeArrayVariant {
     where
         T: ?Sized + Serialize,
     {
-        self.array.push(value.serialize(ValueSerializer)?).map_err(|_| Error::custom("Failed to push to array"))?;
+        self.array
+            .push(value.serialize(ValueSerializer)?)
+            .map_err(|_| Error::custom("Failed to push to array"))?;
         Ok(())
     }
 
