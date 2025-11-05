@@ -338,7 +338,7 @@ impl IString {
     unsafe fn extract_inline_str(&self) -> &str {
         let data_ptr = &self.0 as *const IValue as *const u8;
         let bytes: &[u8; 8] = transmute(data_ptr);
-        str::from_utf8_unchecked(&bytes[1..self.len() + 1])
+        std::str::from_utf8_unchecked(&bytes[1..self.len() + 1])
     }
 
     /// Obtains a `&str` from this `IString`. This is a cheap operation.
