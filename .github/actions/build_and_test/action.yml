@@ -17,6 +17,7 @@ runs:
         args: -- --check
     
     - name: Build
+      shell: bash
       run: cargo build
 
     - name: Test
