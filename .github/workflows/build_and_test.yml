@@ -1,10 +1,6 @@
 name: Event CI
 
-permissions:
-  contents: read
-
-on:
-  pull_request:
+on: [push, pull_request]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -17,12 +13,27 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
   
-      - name: Install Rust nightly
-        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+      - name: Rustfmt
+        uses: actions-rs/cargo@v1
+        with:
+          command: fmt
+          args: -- --check
+
+      - name: Clippy
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
+          args: --all-features -- -D warnings 
       
       - name: Build
-        run: cargo build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --all-features
   
       - name: Test
-        run: cargo test -- --test-threads=1
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: -- --test-threads=1
         
