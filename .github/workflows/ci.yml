@@ -9,9 +9,21 @@ concurrency:
 jobs:
   build_and_test:
     name: Build and Test
-    uses: ./.github/actions/build_and_test/build_and_test.yml
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Run Build and Test
+        uses: ./.github/actions/build_and_test
   
   fuzz_tests:
     name: Fuzz Tests
-    uses: ./.github/actions/fuzz_tests/fuzz_tests.yml
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Run Fuzz Tests
+        uses: ./.github/actions/fuzz_tests
 

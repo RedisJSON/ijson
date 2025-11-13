@@ -1,0 +1,24 @@
+name: Smoke-Test Fuzz Targets
+description: Run fuzz tests on the project
+
+runs:
+  using: composite
+  steps:
+    - name: Install Nightly Toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: nightly
+        override: true
+
+    - name: Install cargo-fuzz
+      uses: actions-rs/cargo@v1
+      with:
+        command: install
+        args: cargo-fuzz --version 0.13.0
+
+    - name: Run Fuzz Tests
+      shell: bash
+      working-directory: fuzz
+      run: cargo fuzz run fuzz_string --release -- -max_total_time=180
+

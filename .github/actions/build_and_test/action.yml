@@ -1,0 +1,38 @@
+name: Build and Test
+description: Run build and test steps for the project
+
+runs:
+  using: composite
+  steps:
+    - name: Install Toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+        components: rustfmt, clippy
+
+    - name: Cargo Format
+      uses: actions-rs/cargo@v1
+      with:
+        command: fmt
+        args: -- --check
+
+    - name: Clippy
+      uses: actions-rs/cargo@v1
+      with:
+        command: clippy
+        args: --all-features -- -D warnings 
+    
+    - name: Build
+      uses: actions-rs/cargo@v1
+      with:
+        command: build
+        args: --release --all-features
+
+    - name: Test
+      uses: actions-rs/cargo@v1
+      with:
+        command: test
+        args: -- --test-threads=1
+
