@@ -1,0 +1,28 @@
+name: Event CI
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+  
+      - name: Install Rust nightly
+        run: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+      
+      - name: Build
+        run: cargo build
+  
+      - name: Test
+        run: cargo test -- --test-threads=1
+        

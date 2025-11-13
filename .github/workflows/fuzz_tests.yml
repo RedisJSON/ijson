@@ -1,0 +1,32 @@
+name: Smoke-Test Fuzz Targets
+
+on:
+  pull_request:
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+
+    env:
+      CARGO_FUZZ_VERSION: 0.13.0
+      FUZZ_TIME: 180
+
+    strategy:
+      matrix:
+        include:
+          - fuzz_target: fuzz_string
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - run: rustup toolchain install nightly
+    - run: rustup default nightly
+    - uses: actions/cache@v4
+      with:
+        path: ${{ runner.tool_cache }}/cargo-fuzz
+        key: cargo-fuzz-bin-${{ env.CARGO_FUZZ_VERSION }}
+    - run: echo "${{ runner.tool_cache }}/cargo-fuzz/bin" >> $GITHUB_PATH
+    - run: cargo install --root "${{ runner.tool_cache }}/cargo-fuzz" --version ${{ env.CARGO_FUZZ_VERSION }} cargo-fuzz --locked
+
+    - run: cd fuzz
+    - run: cargo fuzz run ${{ matrix.fuzz_target }} -- -max_total_time=${{ env.FUZZ_TIME }} --release

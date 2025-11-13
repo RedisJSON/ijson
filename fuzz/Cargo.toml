@@ -9,13 +9,16 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+arbitrary = { version = "1.3", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dependencies.ijson]
 path = ".."
 
 [[bin]]
-name = "fuzz_tests"
-path = "fuzz_targets/fuzz_tests.rs"
+name = "fuzz_string"
+path = "fuzz_targets/fuzz_string.rs"
 test = false
 doc = false
 bench = false
