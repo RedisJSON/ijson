@@ -1,0 +1,17 @@
+name: CI
+
+on: [pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_test:
+    name: Build and Test
+    uses: ./.github/actions/build_and_test/build_and_test.yml
+  
+  fuzz_tests:
+    name: Fuzz Tests
+    uses: ./.github/actions/fuzz_tests/fuzz_tests.yml
+
