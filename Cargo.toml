@@ -36,6 +36,4 @@ half = "2.0.0"
 mockalloc = "0.1.2"
 ctor = "0.1.16"
 rand = "0.8.4"
-cargo-fuzz = "0.13.0"
-ijson-fuzz = { path = "fuzz" }
 
