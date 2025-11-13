@@ -1,6 +1,6 @@
 name: Event CI
 
-on: [push, pull_request]
+on: [pull_request]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,8 +12,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      
+      - name: Install Toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: stable
+          override: true
+          components: rustfmt, clippy
   
-      - name: Rustfmt
+      - name: Cargo Format
         uses: actions-rs/cargo@v1
         with:
           command: fmt

@@ -1,11 +1,9 @@
 name: Smoke-Test Fuzz Targets
 
-on: [push, pull_request]
+on: [pull_request]
 
 jobs:
   fuzz:
-    runs-on: ubuntu-latest
-
     env:
       CARGO_FUZZ_VERSION: 0.13.0
       FUZZ_TIME: 180
@@ -14,18 +12,23 @@ jobs:
       matrix:
         include:
           - fuzz_target: fuzz_string
-
+    runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-
-    - run: rustup toolchain install nightly
-    - run: rustup default nightly
-    - uses: actions/cache@v4
-      with:
-        path: ${{ runner.tool_cache }}/cargo-fuzz
-        key: cargo-fuzz-bin-${{ env.CARGO_FUZZ_VERSION }}
-    - run: echo "${{ runner.tool_cache }}/cargo-fuzz/bin" >> $GITHUB_PATH
-    - run: cargo install --root "${{ runner.tool_cache }}/cargo-fuzz" --version ${{ env.CARGO_FUZZ_VERSION }} cargo-fuzz --locked
-
-    - run: cd fuzz
-    - run: cargo fuzz run ${{ matrix.fuzz_target }} -- -max_total_time=${{ env.FUZZ_TIME }} --release
+      - name: Setup
+        uses: actions/checkout@v4
+      
+      - uses: actions-rs/toolchain@v1
+        with:
+          profile: minimal
+          toolchain: nightly
+          override: true
+          components: cargo-fuzz
+      
+      - uses: actions-rs/cargo@v1
+        with:
+          command: install
+          args: cargo-fuzz --version ${{ env.CARGO_FUZZ_VERSION }}
+      
+      - name: Fuzz
+        working-directory: fuzz
+        run: cargo fuzz run ${{ matrix.fuzz_target }} --release -- -max_total_time=${{ env.FUZZ_TIME }}
