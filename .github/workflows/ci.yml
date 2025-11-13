@@ -18,12 +18,19 @@ jobs:
         uses: ./.github/actions/build_and_test
   
   fuzz_tests:
-    name: Fuzz Tests
+    name: Fuzz Tests (${{ matrix.fuzz_target }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        fuzz_target:
+          - fuzz_string
+          # Add more fuzz targets here as needed
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
       
       - name: Run Fuzz Tests
         uses: ./.github/actions/fuzz_tests
+        with:
+          fuzz_target: ${{ matrix.fuzz_target }}
 

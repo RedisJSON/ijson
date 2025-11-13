@@ -1,6 +1,19 @@
 name: Smoke-Test Fuzz Targets
 description: Run fuzz tests on the project
 
+inputs:
+  fuzz_target:
+    description: 'The fuzz target to run'
+    required: true
+  fuzz_time:
+    description: 'Maximum time in seconds to run fuzzing'
+    required: false
+    default: '180'
+  cargo_fuzz_version:
+    description: 'Version of cargo-fuzz to install'
+    required: false
+    default: '0.13.0'
+
 runs:
   using: composite
   steps:
@@ -15,10 +28,10 @@ runs:
       uses: actions-rs/cargo@v1
       with:
         command: install
-        args: cargo-fuzz --version 0.13.0
+        args: cargo-fuzz --version ${{ inputs.cargo_fuzz_version }}
 
     - name: Run Fuzz Tests
       shell: bash
       working-directory: fuzz
-      run: cargo fuzz run fuzz_string --release -- -max_total_time=180
+      run: cargo fuzz run ${{ inputs.fuzz_target }} --release -- -max_total_time=${{ inputs.fuzz_time }}
 

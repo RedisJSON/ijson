@@ -4,13 +4,6 @@ description: Run build and test steps for the project
 runs:
   using: composite
   steps:
-    - name: Install Toolchain
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        override: true
-        components: rustfmt, clippy
-
     - name: Cargo Format
       uses: actions-rs/cargo@v1
       with:
