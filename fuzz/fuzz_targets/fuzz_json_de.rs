@@ -28,7 +28,7 @@ impl JsonValue {
                     "0".to_string()
                 }
             }
-            JsonValue::String(s) => serde_json::to_string(s).unwrap_or_else(|_| "\"\"".to_string()),
+            JsonValue::String(s) => s.clone(),
             JsonValue::Array(arr) => {
                 let items: Vec<String> = arr.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", items.join(","))
@@ -37,7 +37,7 @@ impl JsonValue {
                 let items: Vec<String> = obj
                     .iter()
                     .map(|(k, v)| {
-                        let key = serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_string());
+                        let key = k.clone();
                         format!("{}:{}", key, v.to_json_string())
                     })
                     .collect();
@@ -49,6 +49,7 @@ impl JsonValue {
 
 fuzz_target!(|value: JsonValue| {
     let json_string = value.to_json_string();
+    println!("json_string: {}", json_string);
     let mut deserializer = serde_json::Deserializer::from_str(&json_string);
     let _ = IValue::deserialize(&mut deserializer);
 });
