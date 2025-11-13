@@ -17,8 +17,8 @@ serde_json = { workspace = true }
 path = ".."
 
 [[bin]]
-name = "fuzz_string"
-path = "fuzz_targets/fuzz_string.rs"
+name = "fuzz_json_de"
+path = "fuzz_targets/fuzz_json_de.rs"
 test = false
 doc = false
 bench = false

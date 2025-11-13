@@ -23,7 +23,7 @@ jobs:
     strategy:
       matrix:
         fuzz_target:
-          - fuzz_string
+          - fuzz_json_de
           # Add more fuzz targets here as needed
     steps:
       - name: Checkout repository
