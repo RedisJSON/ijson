@@ -1,7 +1,5 @@
 name: Smoke-Test Fuzz Targets
 
-on:
-  workflow_call:
 
 jobs:
   fuzz:
