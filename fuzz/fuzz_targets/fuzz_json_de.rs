@@ -28,7 +28,7 @@ impl JsonValue {
                     "0".to_string()
                 }
             }
-            JsonValue::String(s) => s.clone(),
+            JsonValue::String(s) => format!("\"{}\"", s),
             JsonValue::Array(arr) => {
                 let items: Vec<String> = arr.iter().map(|v| v.to_json_string()).collect();
                 format!("[{}]", items.join(","))
@@ -38,7 +38,7 @@ impl JsonValue {
                     .iter()
                     .map(|(k, v)| {
                         let key = k.clone();
-                        format!("{}:{}", key, v.to_json_string())
+                        format!("\"{}\":{}", key, v.to_json_string())
                     })
                     .collect();
                 format!("{{{}}}", items.join(","))
