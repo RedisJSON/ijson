@@ -1,0 +1,28 @@
+name: Build and Test
+description: Run build and test steps for the project
+
+runs:
+  using: composite
+  steps:
+    - name: Install Toolchain
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: "1.88"
+        components: rustfmt
+
+    - name: Cargo Format
+      uses: actions-rs/cargo@v1
+      with:
+        command: fmt
+        args: -- --check
+    
+    - name: Build
+      shell: bash
+      run: cargo build
+
+    - name: Test
+      uses: actions-rs/cargo@v1
+      with:
+        command: test
+        args: -- --test-threads=1
+
