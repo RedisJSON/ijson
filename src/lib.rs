@@ -36,11 +36,11 @@ pub mod unsafe_string;
 #[cfg(not(feature = "thread_safe"))]
 pub use unsafe_string::IString;
 
-pub mod alloc;
+pub mod error;
 mod thin;
 mod value;
 
-pub use array::IArray;
+pub use array::{FloatType, IArray};
 pub use number::INumber;
 pub use object::IObject;
 use std::alloc::Layout;
@@ -51,7 +51,7 @@ pub use value::{
 
 mod de;
 mod ser;
-pub use de::from_value;
+pub use de::{from_value, IValueDeserSeed};
 pub use ser::to_value;
 
 /// Trait to implement defrag allocator

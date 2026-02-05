@@ -31,6 +31,7 @@ serde_json = { workspace = true }
 ctor = { version = "0.1.16", optional = true }
 paste = "1.0.15"
 half = "2.0.0"
+thiserror = "2.0.18"
 
 [dev-dependencies]
 mockalloc = "0.1.2"
