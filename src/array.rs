@@ -9,8 +9,9 @@ use std::iter::FromIterator;
 use std::ops::{Index, IndexMut};
 use std::slice::{from_raw_parts, from_raw_parts_mut, SliceIndex};
 
+use crate::error::IJsonError;
 use crate::{
-    alloc::AllocError,
+    error::AllocError,
     thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt},
     value::TypeTag,
     Defrag, DefragAllocator, IValue,
@@ -51,6 +52,55 @@ pub enum ArrayTag {
 impl Default for ArrayTag {
     fn default() -> Self {
         Self::Heterogeneous
+    }
+}
+
+/// Enum representing different types of floating-point types
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FloatType {
+    /// F16
+    F16 = 1,
+    /// BF16
+    BF16,
+    /// F32
+    F32,
+    /// F64
+    F64,
+}
+
+impl fmt::Display for FloatType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FloatType::F16 => write!(f, "F16"),
+            FloatType::BF16 => write!(f, "BF16"),
+            FloatType::F32 => write!(f, "F32"),
+            FloatType::F64 => write!(f, "F64"),
+        }
+    }
+}
+
+impl TryFrom<u8> for FloatType {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(FloatType::F16),
+            2 => Ok(FloatType::BF16),
+            3 => Ok(FloatType::F32),
+            4 => Ok(FloatType::F64),
+            _ => Err(()),
+        }
+    }
+}
+
+impl From<FloatType> for ArrayTag {
+    fn from(fp_type: FloatType) -> Self {
+        match fp_type {
+            FloatType::F16 => ArrayTag::F16,
+            FloatType::BF16 => ArrayTag::BF16,
+            FloatType::F32 => ArrayTag::F32,
+            FloatType::F64 => ArrayTag::F64,
+        }
     }
 }
 
@@ -401,11 +451,11 @@ impl Header {
     const TAG_MASK: u64 = 0xF;
     const TAG_SHIFT: u64 = 60;
 
-    const fn new(len: usize, cap: usize, tag: ArrayTag) -> Result<Self, AllocError> {
+    const fn new(len: usize, cap: usize, tag: ArrayTag) -> Result<Self, IJsonError> {
         // assert!(len <= Self::LEN_MASK as usize, "Length exceeds 30-bit limit");
         // assert!(cap <= Self::CAP_MASK as usize, "Capacity exceeds 30-bit limit");
         if len > Self::LEN_MASK as usize || cap > Self::CAP_MASK as usize {
-            return Err(AllocError);
+            return Err(IJsonError::Alloc(AllocError));
         }
 
         let packed = ((len as u64) & Self::LEN_MASK) << Self::LEN_SHIFT
@@ -561,6 +611,26 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
         self.set_len(index + 1);
     }
 
+    // Safety: Space must already be allocated for the item,
+    // and the item must be a number. The array type must be a floating-point type.
+    unsafe fn push_lossy(&mut self, item: IValue) {
+        use ArrayTag::*;
+        let index = self.len();
+
+        macro_rules! push_lossy_impl {
+            ($(($tag:ident, $ty:ty)),*) => {
+                match self.type_tag() {
+                    $($tag => self.reborrow().raw_array_ptr_mut().cast::<$ty>().add(index).write(
+                        paste::paste!(item.[<to_ $ty _lossy>]()).unwrap()),)*
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        push_lossy_impl!((F16, f16), (BF16, bf16), (F32, f32), (F64, f64));
+        self.set_len(index + 1);
+    }
+
     fn pop(&mut self) -> Option<IValue> {
         if self.len() == 0 {
             None
@@ -670,7 +740,7 @@ impl IArray {
             .pad_to_align())
     }
 
-    fn alloc(cap: usize, tag: ArrayTag) -> Result<*mut Header, AllocError> {
+    fn alloc(cap: usize, tag: ArrayTag) -> Result<*mut Header, IJsonError> {
         unsafe {
             let ptr = alloc(Self::layout(cap, tag).map_err(|_| AllocError)?).cast::<Header>();
             ptr.write(Header::new(0, cap, tag)?);
@@ -678,7 +748,7 @@ impl IArray {
         }
     }
 
-    fn realloc(ptr: *mut Header, new_cap: usize) -> Result<*mut Header, AllocError> {
+    fn realloc(ptr: *mut Header, new_cap: usize) -> Result<*mut Header, IJsonError> {
         unsafe {
             let tag = (*ptr).type_tag();
             let old_layout = Self::layout((*ptr).cap(), tag).map_err(|_| AllocError)?;
@@ -706,13 +776,13 @@ impl IArray {
     /// Constructs a new `IArray` with the specified capacity. At least that many items
     /// can be added to the array without reallocating.
     #[must_use]
-    pub fn with_capacity(cap: usize) -> Result<Self, AllocError> {
+    pub fn with_capacity(cap: usize) -> Result<Self, IJsonError> {
         Self::with_capacity_and_tag(cap, ArrayTag::Heterogeneous)
     }
 
     /// Constructs a new `IArray` with the specified capacity and array type.
     #[must_use]
-    fn with_capacity_and_tag(cap: usize, tag: ArrayTag) -> Result<Self, AllocError> {
+    fn with_capacity_and_tag(cap: usize, tag: ArrayTag) -> Result<Self, IJsonError> {
         if cap == 0 {
             Ok(Self::new())
         } else {
@@ -743,7 +813,7 @@ impl IArray {
 
     /// Converts this array to a new type, promoting all existing elements.
     /// This is used for automatic type promotion when incompatible types are added.
-    fn promote_to_type(&mut self, new_tag: ArrayTag) -> Result<(), AllocError> {
+    fn promote_to_type(&mut self, new_tag: ArrayTag) -> Result<(), IJsonError> {
         if self.is_static() || self.header().type_tag() == new_tag {
             return Ok(());
         }
@@ -898,7 +968,7 @@ impl IArray {
         self.header_mut().as_mut_slice_unchecked::<T>()
     }
 
-    fn resize_internal(&mut self, cap: usize) -> Result<(), AllocError> {
+    fn resize_internal(&mut self, cap: usize) -> Result<(), IJsonError> {
         if self.is_static() || cap == 0 {
             let tag = if self.is_static() {
                 ArrayTag::Heterogeneous
@@ -916,7 +986,7 @@ impl IArray {
     }
 
     /// Reserves space for at least this many additional items.
-    pub fn reserve(&mut self, additional: usize) -> Result<(), AllocError> {
+    pub fn reserve(&mut self, additional: usize) -> Result<(), IJsonError> {
         let hd = self.header();
         let current_capacity = hd.cap();
         let desired_capacity = hd.len().checked_add(additional).ok_or(AllocError)?;
@@ -956,7 +1026,7 @@ impl IArray {
     /// on or after this index will be shifted down to accomodate this. For large
     /// arrays, insertions near the front will be slow as it will require shifting
     /// a large number of items.
-    pub fn insert(&mut self, index: usize, item: impl Into<IValue>) -> Result<(), AllocError> {
+    pub fn insert(&mut self, index: usize, item: impl Into<IValue>) -> Result<(), IJsonError> {
         let item = item.into();
         let current_tag = self.header().type_tag();
         let len = self.len();
@@ -1080,8 +1150,46 @@ impl IArray {
         }
     }
 
+    /// Pushes a new item onto the back of the array with a specific floating-point type, potentially losing precision.
+    pub(crate) fn push_with_fp_type(
+        &mut self,
+        item: impl Into<IValue>,
+        fp_type: FloatType,
+    ) -> Result<(), IJsonError> {
+        let desired_tag = fp_type.into();
+        let current_tag = self.header().type_tag();
+        let len = self.len();
+        let item = item.into();
+        let can_fit = || match fp_type {
+            FloatType::F16 => item.to_f16_lossy().map_or(false, |v| v.is_finite()),
+            FloatType::BF16 => item.to_bf16_lossy().map_or(false, |v| v.is_finite()),
+            FloatType::F32 => item.to_f32_lossy().map_or(false, |v| v.is_finite()),
+            FloatType::F64 => item.to_f64_lossy().map_or(false, |v| v.is_finite()),
+        };
+
+        if (desired_tag != current_tag && len > 0) || !can_fit() {
+            return Err(IJsonError::OutOfRange(fp_type));
+        }
+
+        // We can fit the item into the array, so we can push it directly
+
+        if len == 0 {
+            if self.is_static() {
+                *self = IArray::with_capacity_and_tag(4, desired_tag)?;
+            } else {
+                self.promote_to_type(desired_tag)?;
+            }
+        }
+
+        self.reserve(1)?;
+        unsafe {
+            self.header_mut().push_lossy(item);
+        }
+        Ok(())
+    }
+
     /// Pushes a new item onto the back of the array.
-    pub fn push(&mut self, item: impl Into<IValue>) -> Result<(), AllocError> {
+    pub fn push(&mut self, item: impl Into<IValue>) -> Result<(), IJsonError> {
         let item = item.into();
         let current_tag = self.header().type_tag();
         let len = self.len();
@@ -1425,11 +1533,11 @@ pub trait TryExtend<T> {
     /// Returns an `AllocError` if allocation fails.
     /// # Errors
     /// Returns an `AllocError` if memory allocation fails during the extension.
-    fn try_extend(&mut self, iter: impl IntoIterator<Item = T>) -> Result<(), AllocError>;
+    fn try_extend(&mut self, iter: impl IntoIterator<Item = T>) -> Result<(), IJsonError>;
 }
 
 impl<U: Into<IValue> + private::Sealed> TryExtend<U> for IArray {
-    fn try_extend(&mut self, iter: impl IntoIterator<Item = U>) -> Result<(), AllocError> {
+    fn try_extend(&mut self, iter: impl IntoIterator<Item = U>) -> Result<(), IJsonError> {
         let iter = iter.into_iter();
         self.reserve(iter.size_hint().0)?;
         for v in iter {
@@ -1442,7 +1550,7 @@ impl<U: Into<IValue> + private::Sealed> TryExtend<U> for IArray {
 macro_rules! extend_impl_int {
     ($($ty:ty),*) => {
         $(impl TryExtend<$ty> for IArray {
-            fn try_extend(&mut self, iter: impl IntoIterator<Item = $ty>) -> Result<(), AllocError> {
+            fn try_extend(&mut self, iter: impl IntoIterator<Item = $ty>) -> Result<(), IJsonError> {
                 let expected_tag = ArrayTag::from_type::<$ty>();
                 let iter = iter.into_iter();
                 let size_hint = iter.size_hint().0;
@@ -1494,7 +1602,7 @@ macro_rules! extend_impl_int {
 macro_rules! extend_impl_float {
     ($($ty:ty),*) => {
         $(impl TryExtend<$ty> for IArray {
-            fn try_extend(&mut self, iter: impl IntoIterator<Item = $ty>) -> Result<(), AllocError> {
+            fn try_extend(&mut self, iter: impl IntoIterator<Item = $ty>) -> Result<(), IJsonError> {
                 let expected_tag = ArrayTag::from_type::<$ty>();
                 let iter = iter.into_iter();
                 let size_hint = iter.size_hint().0;
@@ -1564,13 +1672,13 @@ pub trait TryFromIterator<T> {
     /// Returns an `AllocError` if allocation fails.
     /// # Errors
     /// Returns `AllocError` if memory allocation fails during the construction.
-    fn try_from_iter<U: IntoIterator<Item = T>>(iter: U) -> Result<Self, AllocError>
+    fn try_from_iter<U: IntoIterator<Item = T>>(iter: U) -> Result<Self, IJsonError>
     where
         Self: Sized;
 }
 
 impl<U: Into<IValue> + private::Sealed> TryFromIterator<U> for IArray {
-    fn try_from_iter<T: IntoIterator<Item = U>>(iter: T) -> Result<Self, AllocError> {
+    fn try_from_iter<T: IntoIterator<Item = U>>(iter: T) -> Result<Self, IJsonError> {
         let mut res = IArray::new();
         res.try_extend(iter)?;
         Ok(res)
@@ -1580,7 +1688,7 @@ impl<U: Into<IValue> + private::Sealed> TryFromIterator<U> for IArray {
 macro_rules! from_iter_impl {
     ($($ty:ty),*) => {
         $(impl TryFromIterator<$ty> for IArray {
-            fn try_from_iter<T: IntoIterator<Item = $ty>>(iter: T) -> Result<Self, AllocError> {
+            fn try_from_iter<T: IntoIterator<Item = $ty>>(iter: T) -> Result<Self, IJsonError> {
                 let iter = iter.into_iter();
                 let mut res = IArray::with_capacity_and_tag(iter.size_hint().0, ArrayTag::from_type::<$ty>())?;
                 res.try_extend(iter)?;
@@ -1599,13 +1707,13 @@ pub trait TryCollect<T>: Iterator<Item = T> + Sized {
     /// Returns an `AllocError` if allocation fails.
     /// # Errors
     /// Returns `AllocError` if memory allocation fails during the collection.
-    fn try_collect<B>(self) -> Result<B, AllocError>
+    fn try_collect<B>(self) -> Result<B, IJsonError>
     where
         B: TryFromIterator<T>;
 }
 
 impl<T, I: Iterator<Item = T>> TryCollect<T> for I {
-    fn try_collect<B>(self) -> Result<B, AllocError>
+    fn try_collect<B>(self) -> Result<B, IJsonError>
     where
         B: TryFromIterator<T>,
     {
@@ -1614,7 +1722,7 @@ impl<T, I: Iterator<Item = T>> TryCollect<T> for I {
 }
 
 impl<T: Into<IValue> + private::Sealed> TryFrom<Vec<T>> for IArray {
-    type Error = AllocError;
+    type Error = IJsonError;
     fn try_from(other: Vec<T>) -> Result<Self, Self::Error> {
         let mut res = IArray::with_capacity(other.len())?;
         res.try_extend(other.into_iter().map(Into::into))?;
@@ -1623,7 +1731,7 @@ impl<T: Into<IValue> + private::Sealed> TryFrom<Vec<T>> for IArray {
 }
 
 impl<T: Into<IValue> + Clone + private::Sealed> TryFrom<&[T]> for IArray {
-    type Error = AllocError;
+    type Error = IJsonError;
     fn try_from(other: &[T]) -> Result<Self, Self::Error> {
         let mut res = IArray::with_capacity(other.len())?;
         res.try_extend(other.iter().cloned().map(Into::into))?;
@@ -1634,7 +1742,7 @@ impl<T: Into<IValue> + Clone + private::Sealed> TryFrom<&[T]> for IArray {
 macro_rules! from_slice_impl {
     ($($ty:ty),*) => {$(
         impl TryFrom<Vec<$ty>> for IArray {
-            type Error = AllocError;
+            type Error = IJsonError;
             fn try_from(other: Vec<$ty>) -> Result<Self, Self::Error> {
                 let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>())?;
                 TryExtend::<$ty>::try_extend(&mut res, other.into_iter().map(Into::into))?;
@@ -1642,7 +1750,7 @@ macro_rules! from_slice_impl {
             }
         }
         impl TryFrom<&[$ty]> for IArray {
-            type Error = AllocError;
+            type Error = IJsonError;
             fn try_from(other: &[$ty]) -> Result<Self, Self::Error> {
                 let mut res = IArray::with_capacity_and_tag(other.len(), ArrayTag::from_type::<$ty>())?;
                 TryExtend::<$ty>::try_extend(&mut res, other.iter().cloned().map(Into::into))?;
@@ -3206,5 +3314,29 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_push_with_fp_type_creates_typed_array() {
+        let mut arr = IArray::new();
+        arr.push_with_fp_type(IValue::from(1.5), FloatType::F16)
+            .unwrap();
+        arr.push_with_fp_type(IValue::from(2.5), FloatType::F16)
+            .unwrap();
+
+        assert_eq!(arr.len(), 2);
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F16(_)));
+    }
+
+    #[test]
+    fn test_push_with_fp_type_overflow_rejected() {
+        let mut arr = IArray::new();
+        arr.push_with_fp_type(IValue::from(1.5), FloatType::F16)
+            .unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F16(_)));
+        arr.push_with_fp_type(IValue::from(100000.0), FloatType::F16)
+            .unwrap_err();
+        assert_eq!(arr.len(), 1);
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F16(_)));
     }
 }

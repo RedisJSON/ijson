@@ -8,14 +8,73 @@ use serde::de::{
 use serde::{forward_to_deserialize_any, Deserialize, Deserializer};
 use serde_json::error::Error;
 
-use crate::{DestructuredRef, IArray, INumber, IObject, IString, IValue};
+use crate::{DestructuredRef, FloatType, IArray, INumber, IObject, IString, IValue};
+
+#[derive(Debug, Clone, Copy)]
+/// Configuration for floating point homogeneous arrays.
+pub struct FPHAConfig {
+    /// Floating point type for homogeneous arrays.
+    pub fpha_type: FloatType,
+    /// If `fallback` is true, arrays that don't fit the fpha_type will fall back to regular push.
+    pub fpha_fallback: bool,
+}
+
+impl FPHAConfig {
+    /// Creates a new [`FPHAConfig`] with the given floating point type.
+    pub fn new(fpha_type: FloatType, fpha_fallback: bool) -> Self {
+        Self {
+            fpha_type,
+            fpha_fallback,
+        }
+    }
+
+    /// Creates a new [`FPHAConfig`] with the given floating point type and fallback behavior.
+    pub fn new_with_type(fpha_type: FloatType) -> Self {
+        Self {
+            fpha_type,
+            fpha_fallback: false,
+        }
+    }
+
+    /// Sets the fallback behavior.
+    pub fn with_fallback(mut self, fallback: bool) -> Self {
+        self.fpha_fallback = fallback;
+        self
+    }
+}
+
+/// Seed for deserializing an [`IValue`].
+#[derive(Debug, Default)]
+pub struct IValueDeserSeed {
+    /// Optional FPHA configuration for homogeneous arrays.
+    pub fpha_config: Option<FPHAConfig>,
+}
+
+impl IValueDeserSeed {
+    /// Creates a new [`IValueDeserSeed`] with the given floating point type enforcment type for homogeneous arrays.
+    pub fn new(fpha_config: Option<FPHAConfig>) -> Self {
+        IValueDeserSeed { fpha_config }
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for IValueDeserSeed {
+    type Value = IValue;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<IValue, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        // Pass hint to a custom visitor
+        deserializer.deserialize_any(ValueVisitor::new(self.fpha_config))
+    }
+}
 
 impl<'de> Deserialize<'de> for IValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(ValueVisitor)
+        deserializer.deserialize_any(ValueVisitor::new(None))
     }
 }
 
@@ -42,7 +101,7 @@ impl<'de> Deserialize<'de> for IArray {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_seq(ArrayVisitor)
+        deserializer.deserialize_seq(ArrayVisitor { fpha_config: None })
     }
 }
 
@@ -51,11 +110,19 @@ impl<'de> Deserialize<'de> for IObject {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(ObjectVisitor)
+        deserializer.deserialize_map(ObjectVisitor { fpha_config: None })
     }
 }
 
-struct ValueVisitor;
+struct ValueVisitor {
+    fpha_config: Option<FPHAConfig>,
+}
+
+impl ValueVisitor {
+    fn new(fpha_config: Option<FPHAConfig>) -> Self {
+        ValueVisitor { fpha_config }
+    }
+}
 
 impl<'de> Visitor<'de> for ValueVisitor {
     type Value = IValue;
@@ -104,7 +171,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     where
         D: Deserializer<'de>,
     {
-        Deserialize::deserialize(deserializer)
+        IValueDeserSeed::new(self.fpha_config).deserialize(deserializer)
     }
 
     #[inline]
@@ -117,14 +184,22 @@ impl<'de> Visitor<'de> for ValueVisitor {
     where
         V: SeqAccess<'de>,
     {
-        ArrayVisitor.visit_seq(visitor).map(Into::into)
+        ArrayVisitor {
+            fpha_config: self.fpha_config,
+        }
+        .visit_seq(visitor)
+        .map(Into::into)
     }
 
     fn visit_map<V>(self, visitor: V) -> Result<IValue, V::Error>
     where
         V: MapAccess<'de>,
     {
-        ObjectVisitor.visit_map(visitor).map(Into::into)
+        ObjectVisitor {
+            fpha_config: self.fpha_config,
+        }
+        .visit_map(visitor)
+        .map(Into::into)
     }
 }
 
@@ -192,7 +267,9 @@ impl<'de> Visitor<'de> for StringVisitor {
     }
 }
 
-struct ArrayVisitor;
+struct ArrayVisitor {
+    fpha_config: Option<FPHAConfig>,
+}
 
 impl<'de> Visitor<'de> for ArrayVisitor {
     type Value = IArray;
@@ -208,15 +285,27 @@ impl<'de> Visitor<'de> for ArrayVisitor {
     {
         let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate array"))?;
-        while let Some(v) = visitor.next_element::<IValue>()? {
-            arr.push(v)
-                .map_err(|_| SError::custom("Failed to push to array"))?;
+        while let Some(v) = visitor.next_element_seed(IValueDeserSeed::new(self.fpha_config))? {
+            // Matching Some(..) twice, to avoind cloning the value :/
+            match self.fpha_config {
+                Some(FPHAConfig {
+                    fpha_type,
+                    fpha_fallback: true,
+                }) => arr
+                    .push_with_fp_type(v.clone(), fpha_type)
+                    .or_else(|_| arr.push(v).map_err(Into::into)),
+                Some(FPHAConfig { fpha_type, .. }) => arr.push_with_fp_type(v, fpha_type),
+                None => arr.push(v).map_err(Into::into),
+            }
+            .map_err(|e| SError::custom(e.to_string()))?;
         }
         Ok(arr)
     }
 }
 
-struct ObjectVisitor;
+struct ObjectVisitor {
+    fpha_config: Option<FPHAConfig>,
+}
 
 impl<'de> Visitor<'de> for ObjectVisitor {
     type Value = IObject;
@@ -230,7 +319,8 @@ impl<'de> Visitor<'de> for ObjectVisitor {
         V: MapAccess<'de>,
     {
         let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0));
-        while let Some((k, v)) = visitor.next_entry::<IString, IValue>()? {
+        while let Some(k) = visitor.next_key::<IString>()? {
+            let v = visitor.next_value_seed(IValueDeserSeed::new(self.fpha_config))?;
             obj.insert(k, v);
         }
         Ok(obj)
@@ -998,4 +1088,130 @@ where
     T: Deserialize<'de>,
 {
     T::deserialize(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::array::ArraySliceRef;
+    use serde::de::DeserializeSeed;
+
+    #[test]
+    fn test_deserialize_with_f64_fp() {
+        let json = r#"[1.5, 2.5, 3.5]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F64)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let value = seed.deserialize(&mut deserializer).unwrap();
+
+        let arr = value.as_array().unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F64(_)));
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn test_deserialize_with_f32_fp() {
+        let json = r#"[1.5, 2.5, 3.5]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let value = seed.deserialize(&mut deserializer).unwrap();
+
+        let arr = value.as_array().unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F32(_)));
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn test_deserialize_with_f16_fp() {
+        let json = r#"[0.5, 1.0, 1.5]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let value = seed.deserialize(&mut deserializer).unwrap();
+
+        let arr = value.as_array().unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F16(_)));
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn test_deserialize_with_bf16_fp() {
+        let json = r#"[0.5, 1.0, 2.0]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::BF16)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let value = seed.deserialize(&mut deserializer).unwrap();
+
+        let arr = value.as_array().unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::BF16(_)));
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn test_deserialize_mixed_array_with_fp() {
+        let json = r#"[1, "string", 3.5]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let _error = seed.deserialize(&mut deserializer).unwrap_err();
+    }
+
+    #[test]
+    fn test_deserialize_integer_array_with_fp() {
+        let json = r#"[1, 2, 3]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let value = seed.deserialize(&mut deserializer).unwrap();
+
+        let arr = value.as_array().unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F32(_)));
+        assert_eq!(arr.len(), 3);
+    }
+
+    #[test]
+    fn test_deserialize_f16_value_overflow_rejected() {
+        let json = r#"[0.5, 100000.0, 1.5]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let _error = seed.deserialize(&mut deserializer).unwrap_err();
+    }
+
+    #[test]
+    fn test_deserialize_bf16_value_overflow_rejected() {
+        let json = r#"[1e39, 2e39]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::BF16)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let _error = seed.deserialize(&mut deserializer).unwrap_err();
+    }
+
+    #[test]
+    fn test_deserialize_f32_value_overflow_rejected() {
+        let json = r#"[1e39, 2e39]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let _error = seed.deserialize(&mut deserializer).unwrap_err();
+    }
+
+    #[test]
+    fn test_ser_deser_roundtrip_preserves_type() {
+        let json = r#"[0.2, 1.0, 1.2]"#;
+
+        for fp_type in [FloatType::F16, FloatType::BF16, FloatType::F32] {
+            let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type)));
+            let mut de = serde_json::Deserializer::from_str(json);
+            let original = seed.deserialize(&mut de).unwrap();
+
+            let serialized = serde_json::to_string(&original).unwrap();
+
+            let reload_seed =
+                IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type).with_fallback(true)));
+            let mut de = serde_json::Deserializer::from_str(&serialized);
+            let roundtripped = reload_seed.deserialize(&mut de).unwrap();
+
+            let arr = roundtripped.as_array().unwrap();
+            assert_eq!(arr.len(), 3);
+            let roundtrip_tag = arr.as_slice().type_tag();
+            assert_eq!(
+                roundtrip_tag,
+                fp_type.into(),
+                "roundtrip should preserve {fp_type}"
+            );
+        }
+    }
 }
