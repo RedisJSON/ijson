@@ -232,25 +232,14 @@ impl ArrayTag {
     /// Determines the ArrayTag for an IValue if it represents a primitive type
     /// Prefers signed types over unsigned types for positive values to be more conservative
     fn from_ivalue(value: &IValue) -> ArrayTag {
-        Self::from_ivalue_with_hint(value, None)
-    }
-
-    /// Determines the ArrayTag for an IValue, using the provided fp_type for floating-point types.
-    ///
-    /// When `fp_type` is `Some`, uses the hinted type directly for floating-point values.
-    fn from_ivalue_with_hint(value: &IValue, fp_type: Option<FloatType>) -> ArrayTag {
         use ArrayTag::*;
         if let Some(num) = value.as_number() {
             if num.has_decimal_point() {
-                fp_type.map(ArrayTag::from).unwrap_or_else(|| {
-                    num.to_f16()
-                        .map(|_| F16)
-                        .or_else(|| num.to_bf16().map(|_| BF16))
-                        .or_else(|| num.to_f32().map(|_| F32))
-                        .or_else(|| num.to_f64().map(|_| F64))
-                        // Safety: We know the value is a decimal number, and f64 can represent any JSON number
-                        .unwrap_or_else(|| unsafe { std::hint::unreachable_unchecked() })
-                })
+                num.to_f16()
+                    .map(|_| F16)
+                    .or_else(|| num.to_bf16().map(|_| BF16))
+                    .or_else(|| num.to_f32().map(|_| F32))
+                    .or_else(|| num.to_f64().map(|_| F64))
             } else {
                 num.to_i8()
                     .map(|_| I8)
@@ -261,9 +250,9 @@ impl ArrayTag {
                     .or_else(|| num.to_u32().map(|_| U32))
                     .or_else(|| num.to_i64().map(|_| I64))
                     .or_else(|| num.to_u64().map(|_| U64))
-                    // Safety: We know the value is a number, and we've checked all possible number types
-                    .unwrap_or_else(|| unsafe { std::hint::unreachable_unchecked() })
             }
+            // Safety: We know the value is a number, and we've checked all possible number types
+            .unwrap_or_else(|| unsafe { std::hint::unreachable_unchecked() })
         } else {
             Heterogeneous
         }
