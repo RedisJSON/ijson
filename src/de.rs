@@ -12,6 +12,7 @@ use crate::error::IJsonError;
 use crate::{DestructuredRef, FloatType, IArray, INumber, IObject, IString, IValue};
 
 #[derive(Debug, Clone, Copy)]
+/// Configuration for floating point homogeneous arrays.
 pub struct FPHAConfig {
     /// Floating point type for homogeneous arrays.
     pub fpha_type: FloatType,
@@ -28,6 +29,7 @@ impl FPHAConfig {
         }
     }
 
+    /// Creates a new [`FPHAConfig`] with the given floating point type and fallback behavior.
     pub fn new_with_type(fpha_type: FloatType) -> Self {
         Self {
             fpha_type,
