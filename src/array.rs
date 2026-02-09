@@ -611,6 +611,26 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
         self.set_len(index + 1);
     }
 
+    // Safety: Space must already be allocated for the item,
+    // and the item must be a number. The array type must be a floating-point type.
+    unsafe fn push_lossy(&mut self, item: IValue) {
+        use ArrayTag::*;
+        let index = self.len();
+
+        macro_rules! push_lossy_impl {
+            ($(($tag:ident, $ty:ty)),*) => {
+                match self.type_tag() {
+                    $($tag => self.reborrow().raw_array_ptr_mut().cast::<$ty>().add(index).write(
+                        paste::paste!(item.[<to_ $ty _lossy>]()).unwrap()),)*
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        push_lossy_impl!((F16, f16), (BF16, bf16), (F32, f32), (F64, f64));
+        self.set_len(index + 1);
+    }
+
     fn pop(&mut self) -> Option<IValue> {
         if self.len() == 0 {
             None
@@ -1130,10 +1150,7 @@ impl IArray {
         }
     }
 
-    /// Pushes a new item onto the back of the array with a specific floating-point type.
-    ///
-    /// If the item cannot be represented in the specified floating-point type,
-    /// returns an error.
+    /// Pushes a new item onto the back of the array with a specific floating-point type, potentially losing precision.
     pub(crate) fn push_with_fp_type(
         &mut self,
         item: impl Into<IValue>,
@@ -1144,10 +1161,10 @@ impl IArray {
         let len = self.len();
         let item = item.into();
         let can_fit = || match fp_type {
-            FloatType::F16 => item.to_f16().is_some(),
-            FloatType::BF16 => item.to_bf16().is_some(),
-            FloatType::F32 => item.to_f32().is_some(),
-            FloatType::F64 => item.to_f64().is_some(),
+            FloatType::F16 => item.to_f16_lossy().map_or(false, |v| v.is_finite()),
+            FloatType::BF16 => item.to_bf16_lossy().map_or(false, |v| v.is_finite()),
+            FloatType::F32 => item.to_f32_lossy().map_or(false, |v| v.is_finite()),
+            FloatType::F64 => item.to_f64_lossy().map_or(false, |v| v.is_finite()),
         };
 
         if (desired_tag != current_tag && len > 0) || !can_fit() {
@@ -1166,7 +1183,7 @@ impl IArray {
 
         self.reserve(1)?;
         unsafe {
-            self.header_mut().push(item);
+            self.header_mut().push_lossy(item);
         }
         Ok(())
     }
@@ -3312,7 +3329,7 @@ mod tests {
     }
 
     #[test]
-    fn test_push_with_fp_type_overflow() {
+    fn test_push_with_fp_type_overflow_rejected() {
         let mut arr = IArray::new();
         arr.push_with_fp_type(IValue::from(1.5), FloatType::F16)
             .unwrap();

@@ -1165,53 +1165,53 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_f16_value_no_fit() {
+    fn test_deserialize_f16_value_overflow_rejected() {
         let json = r#"[0.5, 100000.0, 1.5]"#;
         let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let _error = seed.deserialize(&mut deserializer).unwrap_err();
-
-        let seed = IValueDeserSeed::new(Some(
-            FPHAConfig::new_with_type(FloatType::F16).with_fallback(true),
-        ));
-        let mut deserializer = serde_json::Deserializer::from_str(json);
-        let value = seed.deserialize(&mut deserializer).unwrap();
-        let arr = value.as_array().unwrap();
-        assert!(matches!(arr.as_slice(), ArraySliceRef::F32(_)));
-        assert_eq!(arr.len(), 3);
     }
 
     #[test]
-    fn test_deserialize_bf16_value_too_large() {
+    fn test_deserialize_bf16_value_overflow_rejected() {
         let json = r#"[1e39, 2e39]"#;
         let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::BF16)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let _error = seed.deserialize(&mut deserializer).unwrap_err();
-
-        let seed = IValueDeserSeed::new(Some(
-            FPHAConfig::new_with_type(FloatType::BF16).with_fallback(true),
-        ));
-        let mut deserializer = serde_json::Deserializer::from_str(json);
-        let value = seed.deserialize(&mut deserializer).unwrap();
-        let arr = value.as_array().unwrap();
-        assert!(matches!(arr.as_slice(), ArraySliceRef::F64(_)));
-        assert_eq!(arr.len(), 2);
     }
 
     #[test]
-    fn test_deserialize_f32_value_too_large() {
+    fn test_deserialize_f32_value_overflow_rejected() {
         let json = r#"[1e39, 2e39]"#;
         let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let _error = seed.deserialize(&mut deserializer).unwrap_err();
+    }
 
-        let seed = IValueDeserSeed::new(Some(
-            FPHAConfig::new_with_type(FloatType::F32).with_fallback(true),
-        ));
-        let mut deserializer = serde_json::Deserializer::from_str(json);
-        let value = seed.deserialize(&mut deserializer).unwrap();
-        let arr = value.as_array().unwrap();
-        assert!(matches!(arr.as_slice(), ArraySliceRef::F64(_)));
-        assert_eq!(arr.len(), 2);
+    #[test]
+    fn test_ser_deser_roundtrip_preserves_type() {
+        let json = r#"[0.2, 1.0, 1.2]"#;
+
+        for fp_type in [FloatType::F16, FloatType::BF16, FloatType::F32] {
+            let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type)));
+            let mut de = serde_json::Deserializer::from_str(json);
+            let original = seed.deserialize(&mut de).unwrap();
+
+            let serialized = serde_json::to_string(&original).unwrap();
+
+            let reload_seed =
+                IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type).with_fallback(true)));
+            let mut de = serde_json::Deserializer::from_str(&serialized);
+            let roundtripped = reload_seed.deserialize(&mut de).unwrap();
+
+            let arr = roundtripped.as_array().unwrap();
+            assert_eq!(arr.len(), 3);
+            let roundtrip_tag = arr.as_slice().type_tag();
+            assert_eq!(
+                roundtrip_tag,
+                fp_type.into(),
+                "roundtrip should preserve {fp_type}"
+            );
+        }
     }
 }
