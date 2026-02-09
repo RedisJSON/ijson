@@ -8,19 +8,51 @@ use serde::de::{
 use serde::{forward_to_deserialize_any, Deserialize, Deserializer};
 use serde_json::error::Error;
 
+use crate::error::IJsonError;
 use crate::{DestructuredRef, FloatType, IArray, INumber, IObject, IString, IValue};
 
+#[derive(Debug, Clone, Copy)]
+pub struct FPHAConfig {
+    /// Floating point type for homogeneous arrays.
+    pub fpha_type: FloatType,
+    /// If `fallback` is true, arrays that don't fit the fpha_type will fall back to regular push.
+    pub fpha_fallback: bool,
+}
+
+impl FPHAConfig {
+    /// Creates a new [`FPHAConfig`] with the given floating point type.
+    pub fn new(fpha_type: FloatType, fpha_fallback: bool) -> Self {
+        Self {
+            fpha_type,
+            fpha_fallback,
+        }
+    }
+
+    pub fn new_with_type(fpha_type: FloatType) -> Self {
+        Self {
+            fpha_type,
+            fpha_fallback: false,
+        }
+    }
+
+    /// Sets the fallback behavior.
+    pub fn with_fallback(mut self, fallback: bool) -> Self {
+        self.fpha_fallback = fallback;
+        self
+    }
+}
+
 /// Seed for deserializing an [`IValue`].
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct IValueDeserSeed {
-    /// Optional floating point type enforcment type for homogeneous arrays.
-    pub fpha_type: Option<FloatType>,
+    /// Optional FPHA configuration for homogeneous arrays.
+    pub fpha_config: Option<FPHAConfig>,
 }
 
 impl IValueDeserSeed {
     /// Creates a new [`IValueDeserSeed`] with the given floating point type enforcment type for homogeneous arrays.
-    pub fn new(fpha_type: Option<FloatType>) -> Self {
-        IValueDeserSeed { fpha_type }
+    pub fn new(fpha_config: Option<FPHAConfig>) -> Self {
+        IValueDeserSeed { fpha_config }
     }
 }
 
@@ -32,7 +64,7 @@ impl<'de> DeserializeSeed<'de> for IValueDeserSeed {
         D: Deserializer<'de>,
     {
         // Pass hint to a custom visitor
-        deserializer.deserialize_any(ValueVisitor::new(self.fpha_type))
+        deserializer.deserialize_any(ValueVisitor::new(self.fpha_config))
     }
 }
 
@@ -68,7 +100,7 @@ impl<'de> Deserialize<'de> for IArray {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_seq(ArrayVisitor { fpha_type: None })
+        deserializer.deserialize_seq(ArrayVisitor { fpha_config: None })
     }
 }
 
@@ -77,17 +109,17 @@ impl<'de> Deserialize<'de> for IObject {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(ObjectVisitor { fpha_type: None })
+        deserializer.deserialize_map(ObjectVisitor { fpha_config: None })
     }
 }
 
 struct ValueVisitor {
-    fpha_type: Option<FloatType>,
+    fpha_config: Option<FPHAConfig>,
 }
 
 impl ValueVisitor {
-    fn new(fpha_type: Option<FloatType>) -> Self {
-        ValueVisitor { fpha_type }
+    fn new(fpha_config: Option<FPHAConfig>) -> Self {
+        ValueVisitor { fpha_config }
     }
 }
 
@@ -138,7 +170,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     where
         D: Deserializer<'de>,
     {
-        IValueDeserSeed::new(self.fpha_type).deserialize(deserializer)
+        IValueDeserSeed::new(self.fpha_config).deserialize(deserializer)
     }
 
     #[inline]
@@ -152,7 +184,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
         V: SeqAccess<'de>,
     {
         ArrayVisitor {
-            fpha_type: self.fpha_type,
+            fpha_config: self.fpha_config,
         }
         .visit_seq(visitor)
         .map(Into::into)
@@ -163,7 +195,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
         V: MapAccess<'de>,
     {
         ObjectVisitor {
-            fpha_type: self.fpha_type,
+            fpha_config: self.fpha_config,
         }
         .visit_map(visitor)
         .map(Into::into)
@@ -235,7 +267,7 @@ impl<'de> Visitor<'de> for StringVisitor {
 }
 
 struct ArrayVisitor {
-    fpha_type: Option<FloatType>,
+    fpha_config: Option<FPHAConfig>,
 }
 
 impl<'de> Visitor<'de> for ArrayVisitor {
@@ -252,10 +284,16 @@ impl<'de> Visitor<'de> for ArrayVisitor {
     {
         let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate array"))?;
-        while let Some(v) = visitor.next_element_seed(IValueDeserSeed::new(self.fpha_type))? {
-            match self.fpha_type {
-                Some(fp_type) => arr.push_with_fp_type(v, fp_type),
-                None => arr.push(v),
+        while let Some(v) = visitor.next_element_seed(IValueDeserSeed::new(self.fpha_config))? {
+            match self.fpha_config.map(|c| (c.fpha_type, c.fpha_fallback)) {
+                Some((fp_type, fallback)) => {
+                    arr.push_with_fp_type(v.clone(), fp_type)
+                        .or_else(|_| match self.fpha_config {
+                            Some(c) if fallback => arr.push(v),
+                            _ => Err(IJsonError::OutOfRange(fp_type)),
+                        })
+                }
+                None => arr.push(v).map_err(Into::into),
             }
             .map_err(|e| SError::custom(e.to_string()))?;
         }
@@ -264,7 +302,7 @@ impl<'de> Visitor<'de> for ArrayVisitor {
 }
 
 struct ObjectVisitor {
-    fpha_type: Option<FloatType>,
+    fpha_config: Option<FPHAConfig>,
 }
 
 impl<'de> Visitor<'de> for ObjectVisitor {
@@ -280,7 +318,7 @@ impl<'de> Visitor<'de> for ObjectVisitor {
     {
         let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0));
         while let Some(k) = visitor.next_key::<IString>()? {
-            let v = visitor.next_value_seed(IValueDeserSeed::new(self.fpha_type))?;
+            let v = visitor.next_value_seed(IValueDeserSeed::new(self.fpha_config))?;
             obj.insert(k, v);
         }
         Ok(obj)
@@ -1059,7 +1097,7 @@ mod tests {
     #[test]
     fn test_deserialize_with_f64_fp() {
         let json = r#"[1.5, 2.5, 3.5]"#;
-        let seed = IValueDeserSeed::new(Some(FloatType::F64));
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F64)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let value = seed.deserialize(&mut deserializer).unwrap();
 
@@ -1071,7 +1109,7 @@ mod tests {
     #[test]
     fn test_deserialize_with_f32_fp() {
         let json = r#"[1.5, 2.5, 3.5]"#;
-        let seed = IValueDeserSeed::new(Some(FloatType::F32));
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let value = seed.deserialize(&mut deserializer).unwrap();
 
@@ -1083,7 +1121,7 @@ mod tests {
     #[test]
     fn test_deserialize_with_f16_fp() {
         let json = r#"[0.5, 1.0, 1.5]"#;
-        let seed = IValueDeserSeed::new(Some(FloatType::F16));
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let value = seed.deserialize(&mut deserializer).unwrap();
 
@@ -1095,7 +1133,7 @@ mod tests {
     #[test]
     fn test_deserialize_with_bf16_fp() {
         let json = r#"[0.5, 1.0, 2.0]"#;
-        let seed = IValueDeserSeed::new(Some(FloatType::BF16));
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::BF16)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let value = seed.deserialize(&mut deserializer).unwrap();
 
@@ -1107,7 +1145,7 @@ mod tests {
     #[test]
     fn test_deserialize_mixed_array_with_fp() {
         let json = r#"[1, "string", 3.5]"#;
-        let seed = IValueDeserSeed::new(Some(FloatType::F32));
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let _error = seed.deserialize(&mut deserializer).unwrap_err();
     }
@@ -1115,7 +1153,7 @@ mod tests {
     #[test]
     fn test_deserialize_integer_array_with_fp() {
         let json = r#"[1, 2, 3]"#;
-        let seed = IValueDeserSeed::new(Some(FloatType::F32));
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let value = seed.deserialize(&mut deserializer).unwrap();
 
@@ -1127,24 +1165,51 @@ mod tests {
     #[test]
     fn test_deserialize_f16_value_no_fit() {
         let json = r#"[0.5, 100000.0, 1.5]"#;
-        let seed = IValueDeserSeed::new(Some(FloatType::F16));
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let _error = seed.deserialize(&mut deserializer).unwrap_err();
+
+        let seed = IValueDeserSeed::new(Some(
+            FPHAConfig::new_with_type(FloatType::F16).with_fallback(true),
+        ));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let value = seed.deserialize(&mut deserializer).unwrap();
+        let arr = value.as_array().unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F32(_)));
+        assert_eq!(arr.len(), 3);
     }
 
     #[test]
     fn test_deserialize_bf16_value_too_large() {
         let json = r#"[1e39, 2e39]"#;
-        let seed = IValueDeserSeed::new(Some(FloatType::BF16));
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::BF16)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let _error = seed.deserialize(&mut deserializer).unwrap_err();
+
+        let seed = IValueDeserSeed::new(Some(
+            FPHAConfig::new_with_type(FloatType::BF16).with_fallback(true),
+        ));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let value = seed.deserialize(&mut deserializer).unwrap();
+        let arr = value.as_array().unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F64(_)));
+        assert_eq!(arr.len(), 2);
     }
 
     #[test]
     fn test_deserialize_f32_value_too_large() {
         let json = r#"[1e39, 2e39]"#;
-        let seed = IValueDeserSeed::new(Some(FloatType::F32));
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
         let _error = seed.deserialize(&mut deserializer).unwrap_err();
+
+        let seed = IValueDeserSeed::new(Some(
+            FPHAConfig::new_with_type(FloatType::F32).with_fallback(true),
+        ));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let value = seed.deserialize(&mut deserializer).unwrap();
+        let arr = value.as_array().unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F64(_)));
+        assert_eq!(arr.len(), 2);
     }
 }
