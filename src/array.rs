@@ -79,6 +79,20 @@ impl fmt::Display for FloatType {
     }
 }
 
+impl TryFrom<u8> for FloatType {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(FloatType::F16),
+            2 => Ok(FloatType::BF16),
+            3 => Ok(FloatType::F32),
+            4 => Ok(FloatType::F64),
+            _ => Err(()),
+        }
+    }
+}
+
 impl From<FloatType> for ArrayTag {
     fn from(fp_type: FloatType) -> Self {
         match fp_type {

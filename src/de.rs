@@ -8,7 +8,6 @@ use serde::de::{
 use serde::{forward_to_deserialize_any, Deserialize, Deserializer};
 use serde_json::error::Error;
 
-use crate::error::IJsonError;
 use crate::{DestructuredRef, FloatType, IArray, INumber, IObject, IString, IValue};
 
 #[derive(Debug, Clone, Copy)]
@@ -287,14 +286,15 @@ impl<'de> Visitor<'de> for ArrayVisitor {
         let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate array"))?;
         while let Some(v) = visitor.next_element_seed(IValueDeserSeed::new(self.fpha_config))? {
-            match self.fpha_config.map(|c| (c.fpha_type, c.fpha_fallback)) {
-                Some((fp_type, fallback)) => {
-                    arr.push_with_fp_type(v.clone(), fp_type)
-                        .or_else(|_| match self.fpha_config {
-                            Some(c) if fallback => arr.push(v),
-                            _ => Err(IJsonError::OutOfRange(fp_type)),
-                        })
-                }
+            // Matching Some(..) twice, to avoind cloning the value :/
+            match self.fpha_config {
+                Some(FPHAConfig {
+                    fpha_type,
+                    fpha_fallback: true,
+                }) => arr
+                    .push_with_fp_type(v.clone(), fpha_type)
+                    .or_else(|_| arr.push(v).map_err(Into::into)),
+                Some(FPHAConfig { fpha_type, .. }) => arr.push_with_fp_type(v, fpha_type),
                 None => arr.push(v).map_err(Into::into),
             }
             .map_err(|e| SError::custom(e.to_string()))?;
