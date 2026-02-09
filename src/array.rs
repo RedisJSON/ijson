@@ -59,7 +59,7 @@ impl Default for ArrayTag {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FloatType {
     /// F16
-    F16,
+    F16 = 1,
     /// BF16
     BF16,
     /// F32
