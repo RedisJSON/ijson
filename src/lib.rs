@@ -51,7 +51,7 @@ pub use value::{
 
 mod de;
 mod ser;
-pub use de::{from_value, IValueDeserSeed};
+pub use de::{from_value, IValueDeserSeed, FPHAConfig};
 pub use ser::to_value;
 
 /// Trait to implement defrag allocator
