@@ -51,6 +51,9 @@ pub use value::{
 
 mod de;
 mod ser;
+/// Binary encode/decode for [`IValue`], preserving typed array tags.
+pub mod binary;
+pub use binary::{decode, encode, BinaryDecodeError};
 pub use de::{from_value, FPHAConfig, IValueDeserSeed};
 pub use ser::to_value;
 
