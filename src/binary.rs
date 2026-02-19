@@ -74,6 +74,8 @@ pub enum BinaryDecodeError {
     AllocError,
     /// Nesting depth exceeded the limit.
     DepthLimitExceeded,
+    /// Decompression failed (zstd error).
+    DecompressError,
 }
 
 const MAX_DEPTH: u32 = 128;
@@ -86,6 +88,7 @@ impl fmt::Display for BinaryDecodeError {
             BinaryDecodeError::InvalidUtf8 => write!(f, "invalid UTF-8 in string"),
             BinaryDecodeError::AllocError => write!(f, "memory allocation failed"),
             BinaryDecodeError::DepthLimitExceeded => write!(f, "nesting depth limit exceeded"),
+            BinaryDecodeError::DecompressError => write!(f, "zstd decompression failed"),
         }
     }
 }
@@ -96,6 +99,20 @@ pub fn encode(value: &IValue) -> Vec<u8> {
     let mut out = Vec::new();
     encode_into(value, &mut out);
     out
+}
+
+/// Encodes an [`IValue`] tree and compresses the result with zstd (level 3).
+///
+/// Use [`decode_compressed`] to decode the output.
+pub fn encode_compressed(value: &IValue) -> Vec<u8> {
+    let raw = encode(value);
+    zstd::bulk::compress(&raw, 3).expect("zstd compress")
+}
+
+/// Decodes an [`IValue`] tree from bytes produced by [`encode_compressed`].
+pub fn decode_compressed(bytes: &[u8]) -> Result<IValue, BinaryDecodeError> {
+    let raw = zstd::decode_all(bytes).map_err(|_| BinaryDecodeError::DecompressError)?;
+    decode(&raw)
 }
 
 fn push_tag(tag: Tag, out: &mut Vec<u8>) {
