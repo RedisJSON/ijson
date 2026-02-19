@@ -1,5 +1,6 @@
 use std::fmt;
 
+use bytemuck;
 use half::{bf16, f16};
 
 use crate::array::ArraySliceRef;
@@ -76,6 +77,8 @@ pub enum BinaryDecodeError {
     DepthLimitExceeded,
     /// Decompression failed (zstd error).
     DecompressError,
+    /// Failed to cast slice.
+    CastError,
 }
 
 const MAX_DEPTH: u32 = 128;
@@ -89,6 +92,7 @@ impl fmt::Display for BinaryDecodeError {
             BinaryDecodeError::AllocError => write!(f, "memory allocation failed"),
             BinaryDecodeError::DepthLimitExceeded => write!(f, "nesting depth limit exceeded"),
             BinaryDecodeError::DecompressError => write!(f, "zstd decompression failed"),
+            BinaryDecodeError::CastError => write!(f, "failed to cast slice"),
         }
     }
 }
@@ -106,7 +110,9 @@ pub fn encode(value: &IValue) -> Vec<u8> {
 /// Use [`decode_compressed`] to decode the output.
 pub fn encode_compressed(value: &IValue) -> Vec<u8> {
     let raw = encode(value);
-    zstd::bulk::compress(&raw, 3).expect("zstd compress")
+    zstd::bulk::Compressor::default()
+        .compress(&raw)
+        .expect("zstd compress")
 }
 
 /// Decodes an [`IValue`] tree from bytes produced by [`encode_compressed`].
@@ -164,8 +170,7 @@ fn encode_array(a: &IArray, out: &mut Vec<u8>) {
         ArraySliceRef::I8(s) => {
             push_tag(Tag::ArrayI8, out);
             out.extend_from_slice(&len.to_le_bytes());
-            let bytes = unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, s.len()) };
-            out.extend_from_slice(bytes);
+            out.extend_from_slice(bytemuck::cast_slice::<i8, u8>(s));
         }
         ArraySliceRef::U8(s) => {
             push_tag(Tag::ArrayU8, out);
@@ -350,8 +355,8 @@ fn decode_value(bytes: &[u8], cur: &mut usize, depth: u32) -> Result<IValue, Bin
         Tag::ArrayI8 => {
             let count = read_u32(bytes, cur)? as usize;
             let raw = read_bytes(bytes, cur, count)?;
-            let typed: &[i8] =
-                unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const i8, count) };
+            let typed: &[i8] = bytemuck::try_cast_slice::<u8, i8>(raw)
+                .map_err(|_| BinaryDecodeError::CastError)?;
             IArray::try_from(typed)
                 .map(Into::into)
                 .map_err(|_| BinaryDecodeError::AllocError)
