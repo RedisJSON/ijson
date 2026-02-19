@@ -15,31 +15,12 @@ use crate::{DestructuredRef, FloatType, IArray, INumber, IObject, IString, IValu
 pub struct FPHAConfig {
     /// Floating point type for homogeneous arrays.
     pub fpha_type: FloatType,
-    /// If `fallback` is true, arrays that don't fit the fpha_type will fall back to regular push.
-    pub fpha_fallback: bool,
 }
 
 impl FPHAConfig {
     /// Creates a new [`FPHAConfig`] with the given floating point type.
-    pub fn new(fpha_type: FloatType, fpha_fallback: bool) -> Self {
-        Self {
-            fpha_type,
-            fpha_fallback,
-        }
-    }
-
-    /// Creates a new [`FPHAConfig`] with the given floating point type and fallback behavior.
     pub fn new_with_type(fpha_type: FloatType) -> Self {
-        Self {
-            fpha_type,
-            fpha_fallback: false,
-        }
-    }
-
-    /// Sets the fallback behavior.
-    pub fn with_fallback(mut self, fallback: bool) -> Self {
-        self.fpha_fallback = fallback;
-        self
+        Self { fpha_type }
     }
 }
 
@@ -286,15 +267,8 @@ impl<'de> Visitor<'de> for ArrayVisitor {
         let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate array"))?;
         while let Some(v) = visitor.next_element_seed(IValueDeserSeed::new(self.fpha_config))? {
-            // Matching Some(..) twice, to avoind cloning the value :/
             match self.fpha_config {
-                Some(FPHAConfig {
-                    fpha_type,
-                    fpha_fallback: true,
-                }) => arr
-                    .push_with_fp_type(v.clone(), fpha_type)
-                    .or_else(|_| arr.push(v).map_err(Into::into)),
-                Some(FPHAConfig { fpha_type, .. }) => arr.push_with_fp_type(v, fpha_type),
+                Some(FPHAConfig { fpha_type }) => arr.push_with_fp_type(v, fpha_type),
                 None => arr.push(v).map_err(Into::into),
             }
             .map_err(|e| SError::custom(e.to_string()))?;
@@ -1200,7 +1174,7 @@ mod tests {
             let serialized = serde_json::to_string(&original).unwrap();
 
             let reload_seed =
-                IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type).with_fallback(true)));
+                IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type)));
             let mut de = serde_json::Deserializer::from_str(&serialized);
             let roundtripped = reload_seed.deserialize(&mut de).unwrap();
 
