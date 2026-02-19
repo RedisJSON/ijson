@@ -1173,8 +1173,7 @@ mod tests {
 
             let serialized = serde_json::to_string(&original).unwrap();
 
-            let reload_seed =
-                IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type)));
+            let reload_seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type)));
             let mut de = serde_json::Deserializer::from_str(&serialized);
             let roundtripped = reload_seed.deserialize(&mut de).unwrap();
 

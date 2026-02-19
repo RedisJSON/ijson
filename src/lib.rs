@@ -49,10 +49,10 @@ pub use value::{
     BoolMut, Destructured, DestructuredMut, DestructuredRef, IValue, ValueIndex, ValueType,
 };
 
-mod de;
-mod ser;
 /// Binary encode/decode for [`IValue`], preserving typed array tags.
 pub mod binary;
+mod de;
+mod ser;
 pub use binary::{decode, encode, BinaryDecodeError};
 pub use de::{from_value, FPHAConfig, IValueDeserSeed};
 pub use ser::to_value;
