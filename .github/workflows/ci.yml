@@ -24,7 +24,8 @@ jobs:
       matrix:
         fuzz_target:
           - fuzz_json_de
-          # Add more fuzz targets here as needed
+          - fuzz_binary_decode
+          - fuzz_binary_roundtrip
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
