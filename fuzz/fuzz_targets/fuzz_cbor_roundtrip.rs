@@ -1,6 +1,6 @@
 #![no_main]
 
-use ijson::{binary, IValue};
+use ijson::{cbor, IValue};
 use ijson_fuzz::JsonValue;
 use libfuzzer_sys::fuzz_target;
 use serde::Deserialize;
@@ -12,8 +12,8 @@ fuzz_target!(|value: JsonValue| {
         return;
     };
 
-    let encoded = binary::encode(&original);
-    let decoded = binary::decode(&encoded).expect("encode->decode round-trip must not fail");
+    let encoded = cbor::encode(&original);
+    let decoded = cbor::decode(&encoded).expect("encode->decode round-trip must not fail");
 
     assert_eq!(
         original, decoded,

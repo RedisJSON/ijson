@@ -28,15 +28,15 @@ doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_binary_decode"
-path = "fuzz_targets/fuzz_binary_decode.rs"
+name = "fuzz_cbor_decode"
+path = "fuzz_targets/fuzz_cbor_decode.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "fuzz_binary_roundtrip"
-path = "fuzz_targets/fuzz_binary_roundtrip.rs"
+name = "fuzz_cbor_roundtrip"
+path = "fuzz_targets/fuzz_cbor_roundtrip.rs"
 test = false
 doc = false
 bench = false

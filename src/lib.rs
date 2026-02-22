@@ -49,11 +49,11 @@ pub use value::{
     BoolMut, Destructured, DestructuredMut, DestructuredRef, IValue, ValueIndex, ValueType,
 };
 
-/// Binary encode/decode for [`IValue`], preserving typed array tags.
-pub mod binary;
+/// CBOR encode/decode for [`IValue`] using RFC 8746 typed array tags.
+pub mod cbor;
 mod de;
 mod ser;
-pub use binary::{decode, decode_compressed, encode, encode_compressed, BinaryDecodeError};
+pub use cbor::{decode, decode_compressed, encode, encode_compressed, CborDecodeError};
 pub use de::{from_value, FPHAConfig, IValueDeserSeed};
 pub use ser::to_value;
 
