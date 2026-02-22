@@ -175,8 +175,7 @@ fn typed_le_tag<T: ToLeBytes>(tag: u64, s: &[T]) -> Value {
 
 /// Decodes an [`IValue`] tree from CBOR bytes produced by [`encode`].
 pub fn decode(bytes: &[u8]) -> Result<IValue, CborDecodeError> {
-    let cbor: Value =
-        ciborium::from_reader(bytes).map_err(|_| CborDecodeError::DecodeError)?;
+    let cbor: Value = ciborium::from_reader(bytes).map_err(|_| CborDecodeError::DecodeError)?;
     cbor_to_ivalue(cbor, 0)
 }
 
@@ -193,9 +192,7 @@ fn cbor_to_ivalue(val: Value, depth: u32) -> Result<IValue, CborDecodeError> {
     match val {
         Value::Null => Ok(IValue::NULL),
         Value::Bool(b) => Ok(b.into()),
-        Value::Float(f) => {
-            Ok(INumber::try_from(f).map(Into::into).unwrap_or(IValue::NULL))
-        }
+        Value::Float(f) => Ok(INumber::try_from(f).map(Into::into).unwrap_or(IValue::NULL)),
         Value::Integer(i) => {
             if let Ok(v) = i64::try_from(i.clone()) {
                 Ok(IValue::from(v))
@@ -208,8 +205,7 @@ fn cbor_to_ivalue(val: Value, depth: u32) -> Result<IValue, CborDecodeError> {
         Value::Text(s) => Ok(IString::from(s.as_str()).into()),
         Value::Array(arr) => {
             let hint = arr.len().min(1024);
-            let mut out =
-                IArray::with_capacity(hint).map_err(|_| CborDecodeError::AllocError)?;
+            let mut out = IArray::with_capacity(hint).map_err(|_| CborDecodeError::AllocError)?;
             for v in arr {
                 let iv = cbor_to_ivalue(v, depth + 1)?;
                 out.push(iv).map_err(|_| CborDecodeError::AllocError)?;
@@ -357,7 +353,10 @@ mod tests {
         let v: IValue = arr.into();
         let result = round_trip(&v);
         let result_arr = result.as_array().unwrap();
-        assert!(matches!(result_arr.as_slice(), ArraySliceRef::Heterogeneous(_)));
+        assert!(matches!(
+            result_arr.as_slice(),
+            ArraySliceRef::Heterogeneous(_)
+        ));
         assert_eq!(result_arr.len(), 4);
     }
 
@@ -369,7 +368,10 @@ mod tests {
         let json = r#"[1.5, 2.5, 3.5]"#;
         let mut de = serde_json::Deserializer::from_str(json);
         let v = seed.deserialize(&mut de).unwrap();
-        assert!(matches!(v.as_array().unwrap().as_slice(), ArraySliceRef::F32(_)));
+        assert!(matches!(
+            v.as_array().unwrap().as_slice(),
+            ArraySliceRef::F32(_)
+        ));
 
         let result = round_trip(&v);
         let arr = result.as_array().unwrap();
@@ -388,7 +390,10 @@ mod tests {
         let json = r#"[0.5, 1.0, 1.5]"#;
         let mut de = serde_json::Deserializer::from_str(json);
         let v = seed.deserialize(&mut de).unwrap();
-        assert!(matches!(v.as_array().unwrap().as_slice(), ArraySliceRef::F16(_)));
+        assert!(matches!(
+            v.as_array().unwrap().as_slice(),
+            ArraySliceRef::F16(_)
+        ));
 
         let result = round_trip(&v);
         let arr = result.as_array().unwrap();
@@ -461,7 +466,10 @@ mod tests {
 
         let bytes = encode_compressed(&v);
         let result = decode_compressed(&bytes).expect("decode_compressed should succeed");
-        assert!(matches!(result.as_array().unwrap().as_slice(), ArraySliceRef::F32(_)));
+        assert!(matches!(
+            result.as_array().unwrap().as_slice(),
+            ArraySliceRef::F32(_)
+        ));
     }
 
     #[test]
@@ -471,6 +479,9 @@ mod tests {
         let cbor_bytes = encode(&v);
         // 42 fits in a single CBOR byte (major type 0, value 24 triggers 1-byte header + 1-byte value)
         // Either way it's much smaller than the custom binary's fixed 9 bytes.
-        assert!(cbor_bytes.len() < 9, "expected CBOR to be smaller than 9-byte fixed encoding");
+        assert!(
+            cbor_bytes.len() < 9,
+            "expected CBOR to be smaller than 9-byte fixed encoding"
+        );
     }
 }
