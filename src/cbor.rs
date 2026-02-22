@@ -285,6 +285,9 @@ where
     T: FromLeBytes,
     IArray: TryFrom<Vec<T>>,
 {
+    if bytes.len() % elem_size != 0 {
+        return Err(CborDecodeError::CastError);
+    }
     let mut vec: Vec<T> = Vec::with_capacity(bytes.len() / elem_size);
     for chunk in bytes.chunks_exact(elem_size) {
         vec.push(T::from_le_bytes_slice(chunk));
@@ -482,6 +485,38 @@ mod tests {
         assert!(
             cbor_bytes.len() < 9,
             "expected CBOR to be smaller than 9-byte fixed encoding"
+        );
+    }
+
+    #[test]
+    fn test_misaligned_typed_array_is_rejected() {
+        // Hand-craft valid CBOR: Tag(85, Bytes[13 bytes]).
+        // 13 bytes is not divisible by 4 (F32 element size), so decode must
+        // return an error rather than silently truncating to 3 elements.
+        //
+        // CBOR layout:
+        //   0xD8 0x55       — tag 85 (RFC 8746 F32-LE), 2-byte form (tag >= 24)
+        //   0x4D            — byte string, length 13 (0x40 | 13)
+        //   [0u8; 13]       — 13 zero bytes (misaligned: 13 % 4 != 0)
+        let mut bytes = vec![0xD8, 0x55, 0x4D];
+        bytes.extend_from_slice(&[0u8; 13]);
+        assert_eq!(
+            decode(&bytes),
+            Err(CborDecodeError::CastError),
+            "F32 typed array with 13 bytes (not a multiple of 4) must be rejected"
+        );
+    }
+
+    #[test]
+    fn test_misaligned_f16_array_is_rejected() {
+        // Tag 84 (F16-LE), byte string of 5 bytes (not divisible by 2).
+        // 0xD8 0x54 — tag 84; 0x45 — byte string length 5
+        let mut bytes = vec![0xD8, 0x54, 0x45];
+        bytes.extend_from_slice(&[0u8; 5]);
+        assert_eq!(
+            decode(&bytes),
+            Err(CborDecodeError::CastError),
+            "F16 typed array with 5 bytes (not a multiple of 2) must be rejected"
         );
     }
 }
