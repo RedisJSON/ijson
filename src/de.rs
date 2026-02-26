@@ -1177,7 +1177,14 @@ mod tests {
 
         // Inner arrays should still be typed f16
         assert!(matches!(
-            arr[0].as_object().unwrap().get("embedding").unwrap().as_array().unwrap().as_slice(),
+            arr[0]
+                .as_object()
+                .unwrap()
+                .get("embedding")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .as_slice(),
             ArraySliceRef::F16(_)
         ));
     }
