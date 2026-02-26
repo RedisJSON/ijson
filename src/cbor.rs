@@ -7,27 +7,22 @@
 //! [`decode_compressed`] for zstd-compressed CBOR.
 
 use std::fmt;
+use std::mem::size_of;
 
+use bytemuck::Pod;
 use ciborium::value::{Integer, Value};
+use ciborium_ll::tag;
 use half::{bf16, f16};
 
 use crate::array::ArraySliceRef;
 use crate::{DestructuredRef, IArray, INumber, IObject, IString, IValue};
 
-// RFC 8746 typed array tags (little-endian variants where applicable).
-// Bit layout within the tag byte: 0b010_f_s_e_ll
-//   f=0 integer, f=1 float | s=0 unsigned, s=1 signed | e=1 little-endian | ll = width
-const TAG_U8: u64 = 64; // uint8 (endianness irrelevant)
-const TAG_I8: u64 = 72; // sint8 (endianness irrelevant)
-const TAG_U16_LE: u64 = 69;
-const TAG_I16_LE: u64 = 77;
-const TAG_F16_LE: u64 = 84; // IEEE 754 binary16 LE
-const TAG_U32_LE: u64 = 70;
-const TAG_I32_LE: u64 = 78;
-const TAG_F32_LE: u64 = 85; // IEEE 754 binary32 LE
-const TAG_U64_LE: u64 = 71;
-const TAG_I64_LE: u64 = 79;
-const TAG_F64_LE: u64 = 86; // IEEE 754 binary64 LE
+use tag::{
+    TYPED_F16_LE as TAG_F16_LE, TYPED_F32_LE as TAG_F32_LE, TYPED_F64_LE as TAG_F64_LE,
+    TYPED_I16_LE as TAG_I16_LE, TYPED_I32_LE as TAG_I32_LE, TYPED_I64_LE as TAG_I64_LE,
+    TYPED_I8 as TAG_I8, TYPED_U16_LE as TAG_U16_LE, TYPED_U32_LE as TAG_U32_LE,
+    TYPED_U64_LE as TAG_U64_LE, TYPED_U8 as TAG_U8,
+};
 
 /// Private CBOR tag for BF16 arrays (no RFC 8746 standard tag exists for BF16).
 const TAG_BF16_LE: u64 = 0x10000;
@@ -137,38 +132,11 @@ fn object_to_cbor(o: &IObject) -> Value {
     )
 }
 
-trait ToLeBytes {
-    fn to_le_bytes_vec(&self) -> impl AsRef<[u8]>;
-}
-
-macro_rules! impl_to_le_bytes {
-    ($ty:ty) => {
-        impl ToLeBytes for $ty {
-            fn to_le_bytes_vec(&self) -> impl AsRef<[u8]> {
-                self.to_le_bytes()
-            }
-        }
-    };
-}
-
-impl_to_le_bytes!(i8);
-impl_to_le_bytes!(i16);
-impl_to_le_bytes!(u16);
-impl_to_le_bytes!(f16);
-impl_to_le_bytes!(bf16);
-impl_to_le_bytes!(i32);
-impl_to_le_bytes!(u32);
-impl_to_le_bytes!(f32);
-impl_to_le_bytes!(i64);
-impl_to_le_bytes!(u64);
-impl_to_le_bytes!(f64);
-
-fn typed_le_tag<T: ToLeBytes>(tag: u64, s: &[T]) -> Value {
-    let mut bytes = Vec::new();
-    for v in s {
-        bytes.extend_from_slice(v.to_le_bytes_vec().as_ref());
-    }
-    Value::Tag(tag, Box::new(Value::Bytes(bytes)))
+fn typed_le_tag<T: Pod>(tag: u64, s: &[T]) -> Value {
+    Value::Tag(
+        tag,
+        Box::new(Value::Bytes(bytemuck::cast_slice(s).to_vec())),
+    )
 }
 
 // ── Decode ────────────────────────────────────────────────────────────────────
@@ -239,59 +207,34 @@ fn decode_typed_array(tag: u64, inner: Value) -> Result<IValue, CborDecodeError>
         TAG_U8 => IArray::try_from(bytes.as_slice())
             .map(Into::into)
             .map_err(|_| CborDecodeError::AllocError),
-        TAG_I8 => decode_le_array::<i8>(&bytes, 1),
-        TAG_U16_LE => decode_le_array::<u16>(&bytes, 2),
-        TAG_I16_LE => decode_le_array::<i16>(&bytes, 2),
-        TAG_F16_LE => decode_le_array::<f16>(&bytes, 2),
-        TAG_BF16_LE => decode_le_array::<bf16>(&bytes, 2),
-        TAG_U32_LE => decode_le_array::<u32>(&bytes, 4),
-        TAG_I32_LE => decode_le_array::<i32>(&bytes, 4),
-        TAG_F32_LE => decode_le_array::<f32>(&bytes, 4),
-        TAG_U64_LE => decode_le_array::<u64>(&bytes, 8),
-        TAG_I64_LE => decode_le_array::<i64>(&bytes, 8),
-        TAG_F64_LE => decode_le_array::<f64>(&bytes, 8),
+        TAG_I8 => decode_le_array::<i8>(&bytes),
+        TAG_U16_LE => decode_le_array::<u16>(&bytes),
+        TAG_I16_LE => decode_le_array::<i16>(&bytes),
+        TAG_F16_LE => decode_le_array::<f16>(&bytes),
+        TAG_BF16_LE => decode_le_array::<bf16>(&bytes),
+        TAG_U32_LE => decode_le_array::<u32>(&bytes),
+        TAG_I32_LE => decode_le_array::<i32>(&bytes),
+        TAG_F32_LE => decode_le_array::<f32>(&bytes),
+        TAG_U64_LE => decode_le_array::<u64>(&bytes),
+        TAG_I64_LE => decode_le_array::<i64>(&bytes),
+        TAG_F64_LE => decode_le_array::<f64>(&bytes),
         other => Err(CborDecodeError::UnknownTag(other)),
     }
 }
 
-trait FromLeBytes: Copy + Sized + 'static {
-    fn from_le_bytes_slice(s: &[u8]) -> Self;
-}
-
-macro_rules! impl_from_le_bytes {
-    ($ty:ty) => {
-        impl FromLeBytes for $ty {
-            fn from_le_bytes_slice(s: &[u8]) -> Self {
-                Self::from_le_bytes(s.try_into().unwrap())
-            }
-        }
-    };
-}
-
-impl_from_le_bytes!(i8);
-impl_from_le_bytes!(i16);
-impl_from_le_bytes!(u16);
-impl_from_le_bytes!(f16);
-impl_from_le_bytes!(bf16);
-impl_from_le_bytes!(i32);
-impl_from_le_bytes!(u32);
-impl_from_le_bytes!(f32);
-impl_from_le_bytes!(i64);
-impl_from_le_bytes!(u64);
-impl_from_le_bytes!(f64);
-
-fn decode_le_array<T>(bytes: &[u8], elem_size: usize) -> Result<IValue, CborDecodeError>
+fn decode_le_array<T>(bytes: &[u8]) -> Result<IValue, CborDecodeError>
 where
-    T: FromLeBytes,
+    T: Pod,
     IArray: TryFrom<Vec<T>>,
 {
+    let elem_size = size_of::<T>();
     if bytes.len() % elem_size != 0 {
         return Err(CborDecodeError::CastError);
     }
-    let mut vec: Vec<T> = Vec::with_capacity(bytes.len() / elem_size);
-    for chunk in bytes.chunks_exact(elem_size) {
-        vec.push(T::from_le_bytes_slice(chunk));
-    }
+    let vec: Vec<T> = bytes
+        .chunks_exact(elem_size)
+        .map(bytemuck::pod_read_unaligned)
+        .collect();
     IArray::try_from(vec)
         .map(Into::into)
         .map_err(|_| CborDecodeError::AllocError)
