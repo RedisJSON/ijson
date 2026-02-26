@@ -1151,15 +1151,19 @@ impl IArray {
     }
 
     /// Pushes a new item onto the back of the array with a specific floating-point type, potentially losing precision.
+    /// If the item is not a number, it is pushed as is.
     pub(crate) fn push_with_fp_type(
         &mut self,
         item: impl Into<IValue>,
         fp_type: FloatType,
     ) -> Result<(), IJsonError> {
+        let item = item.into();
+        if !item.is_number() {
+            return self.push(item);
+        }
         let desired_tag = fp_type.into();
         let current_tag = self.header().type_tag();
         let len = self.len();
-        let item = item.into();
         let can_fit = || match fp_type {
             FloatType::F16 => item.to_f16_lossy().map_or(false, |v| v.is_finite()),
             FloatType::BF16 => item.to_bf16_lossy().map_or(false, |v| v.is_finite()),

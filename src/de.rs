@@ -1163,6 +1163,44 @@ mod tests {
     }
 
     #[test]
+    fn test_fpha_outer_array_of_objects_succeeds() {
+        // The classic embedding use-case: outer array holds objects, not numbers.
+        // Before the fix, push_with_fp_type would error on the object element.
+        let json = r#"[{"embedding": [1.0, 2.0]}, {"embedding": [3.0, 4.0]}]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let value = seed.deserialize(&mut deserializer).unwrap();
+
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(matches!(arr.as_slice(), ArraySliceRef::Heterogeneous(_)));
+
+        // Inner arrays should still be typed f16
+        assert!(matches!(
+            arr[0].as_object().unwrap().get("embedding").unwrap().as_array().unwrap().as_slice(),
+            ArraySliceRef::F16(_)
+        ));
+    }
+
+    #[test]
+    fn test_fpha_outer_array_of_nested_arrays_succeeds() {
+        // Outer array holds inner float arrays; outer must become heterogeneous.
+        let json = r#"[[1.0, 2.0], [3.0, 4.0]]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
+        let mut deserializer = serde_json::Deserializer::from_str(json);
+        let value = seed.deserialize(&mut deserializer).unwrap();
+
+        let arr = value.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(matches!(arr.as_slice(), ArraySliceRef::Heterogeneous(_)));
+        // Inner arrays should still be typed f16
+        assert!(matches!(
+            arr[0].as_array().unwrap().as_slice(),
+            ArraySliceRef::F16(_)
+        ));
+    }
+
+    #[test]
     fn test_ser_deser_roundtrip_preserves_type() {
         let json = r#"[0.2, 1.0, 1.2]"#;
 
