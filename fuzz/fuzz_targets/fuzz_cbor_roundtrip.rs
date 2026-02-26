@@ -6,7 +6,7 @@ use libfuzzer_sys::fuzz_target;
 use serde::Deserialize;
 
 fuzz_target!(|value: JsonValue| {
-    let json_string = value.to_json_string();
+    let json_string = serde_json::to_string(&value).unwrap();
     let mut deserializer = serde_json::Deserializer::from_str(&json_string);
     let Ok(original) = IValue::deserialize(&mut deserializer) else {
         return;
