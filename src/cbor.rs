@@ -7,12 +7,49 @@
 //! [`decode_compressed`] for zstd-compressed CBOR.
 
 use std::fmt;
-use std::mem::size_of;
 
 use bytemuck::Pod;
 use ciborium::value::{Integer, Value};
 use ciborium_ll::tag;
 use half::{bf16, f16};
+
+/// Converts a typed slice to/from little-endian bytes using each type's own
+/// `to_le_bytes` / `from_le_bytes`, which are correct on every host endianness.
+trait LeBytes: Pod + Copy {
+    fn slice_to_le_bytes(s: &[Self]) -> Vec<u8>;
+    fn slice_from_le_bytes(bytes: &[u8]) -> Result<Vec<Self>, CborDecodeError>;
+}
+
+macro_rules! impl_le_bytes {
+    ($($t:ty => $n:literal),* $(,)?) => {$(
+        impl LeBytes for $t {
+            fn slice_to_le_bytes(s: &[Self]) -> Vec<u8> {
+                s.iter().flat_map(|v| v.to_le_bytes()).collect()
+            }
+            fn slice_from_le_bytes(bytes: &[u8]) -> Result<Vec<Self>, CborDecodeError> {
+                if bytes.len() % $n != 0 {
+                    return Err(CborDecodeError::CastError);
+                }
+                Ok(bytes
+                    .chunks_exact($n)
+                    .map(|c| {
+                        // SAFETY: `chunks_exact($n)` guarantees every chunk
+                        // is exactly $n bytes, matching [u8; $n].
+                        let arr: [u8; $n] = c.try_into().unwrap();
+                        Self::from_le_bytes(arr)
+                    })
+                    .collect())
+            }
+        }
+    )*};
+}
+
+impl_le_bytes!(
+    i8  => 1, u8  => 1,
+    i16 => 2, u16 => 2, f16 => 2, bf16 => 2,
+    i32 => 4, u32 => 4, f32 => 4,
+    i64 => 8, u64 => 8, f64 => 8,
+);
 
 use crate::array::ArraySliceRef;
 use crate::{DestructuredRef, IArray, INumber, IObject, IString, IValue};
@@ -110,7 +147,7 @@ fn array_to_cbor(a: &IArray) -> Value {
     match a.as_slice() {
         ArraySliceRef::Heterogeneous(s) => Value::Array(s.iter().map(ivalue_to_cbor).collect()),
         ArraySliceRef::I8(s) => typed_le_tag(TAG_I8, s),
-        ArraySliceRef::U8(s) => Value::Tag(TAG_U8, Box::new(Value::Bytes(s.to_vec()))),
+        ArraySliceRef::U8(s) => typed_le_tag(TAG_U8, s),
         ArraySliceRef::I16(s) => typed_le_tag(TAG_I16_LE, s),
         ArraySliceRef::U16(s) => typed_le_tag(TAG_U16_LE, s),
         ArraySliceRef::F16(s) => typed_le_tag(TAG_F16_LE, s),
@@ -132,11 +169,8 @@ fn object_to_cbor(o: &IObject) -> Value {
     )
 }
 
-fn typed_le_tag<T: Pod>(tag: u64, s: &[T]) -> Value {
-    Value::Tag(
-        tag,
-        Box::new(Value::Bytes(bytemuck::cast_slice(s).to_vec())),
-    )
+fn typed_le_tag<T: LeBytes>(tag: u64, s: &[T]) -> Value {
+    Value::Tag(tag, Box::new(Value::Bytes(T::slice_to_le_bytes(s))))
 }
 
 // ── Decode ────────────────────────────────────────────────────────────────────
@@ -204,9 +238,7 @@ fn decode_typed_array(tag: u64, inner: Value) -> Result<IValue, CborDecodeError>
         _ => return Err(CborDecodeError::InvalidValue),
     };
     match tag {
-        TAG_U8 => IArray::try_from(bytes.as_slice())
-            .map(Into::into)
-            .map_err(|_| CborDecodeError::AllocError),
+        TAG_U8 => decode_le_array::<u8>(&bytes),
         TAG_I8 => decode_le_array::<i8>(&bytes),
         TAG_U16_LE => decode_le_array::<u16>(&bytes),
         TAG_I16_LE => decode_le_array::<i16>(&bytes),
@@ -224,18 +256,10 @@ fn decode_typed_array(tag: u64, inner: Value) -> Result<IValue, CborDecodeError>
 
 fn decode_le_array<T>(bytes: &[u8]) -> Result<IValue, CborDecodeError>
 where
-    T: Pod,
+    T: LeBytes,
     IArray: TryFrom<Vec<T>>,
 {
-    let elem_size = size_of::<T>();
-    if bytes.len() % elem_size != 0 {
-        return Err(CborDecodeError::CastError);
-    }
-    let vec: Vec<T> = bytes
-        .chunks_exact(elem_size)
-        .map(bytemuck::pod_read_unaligned)
-        .collect();
-    IArray::try_from(vec)
+    IArray::try_from(T::slice_from_le_bytes(bytes)?)
         .map(Into::into)
         .map_err(|_| CborDecodeError::AllocError)
 }
