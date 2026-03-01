@@ -1123,7 +1123,11 @@ mod tests {
         let json = r#"[1, "string", 3.5]"#;
         let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
         let mut deserializer = serde_json::Deserializer::from_str(json);
-        let _error = seed.deserialize(&mut deserializer).unwrap_err();
+        let value = seed.deserialize(&mut deserializer).unwrap();
+
+        let arr = value.as_array().unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::Heterogeneous(_)));
+        assert_eq!(arr.len(), 3);
     }
 
     #[test]

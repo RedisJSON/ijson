@@ -1158,12 +1158,12 @@ impl IArray {
         fp_type: FloatType,
     ) -> Result<(), IJsonError> {
         let item = item.into();
-        if !item.is_number() {
-            return self.push(item);
-        }
         let desired_tag = fp_type.into();
         let current_tag = self.header().type_tag();
         let len = self.len();
+        if !item.is_number() || (current_tag != desired_tag && len > 0) {
+            return self.push(item);
+        }
         let can_fit = || match fp_type {
             FloatType::F16 => item.to_f16_lossy().map_or(false, |v| v.is_finite()),
             FloatType::BF16 => item.to_bf16_lossy().map_or(false, |v| v.is_finite()),
