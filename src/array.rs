@@ -1171,6 +1171,10 @@ impl IArray {
             FloatType::F64 => item.to_f64_lossy().map_or(false, |v| v.is_finite()),
         };
 
+        if !can_fit() {
+            return Err(IJsonError::OutOfRange(fp_type));
+        }
+
         // We can fit the item into the array, so we can push it directly
 
         if len == 0 {
