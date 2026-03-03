@@ -18,15 +18,9 @@ impl JsonValue {
             JsonValue::Null => "null".to_string(),
             JsonValue::Bool(b) => b.to_string(),
             JsonValue::Integer(n) => n.to_string(),
-            JsonValue::Float(n) => {
-                if n.is_finite() {
-                    n.to_string()
-                } else {
-                    "0".to_string()
-                }
-            }
+            JsonValue::Float(n) => n.to_string(),
             JsonValue::Str(s) => {
-                format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+                format!(r#""{}"#, s.replace('\\', r"\\").replace('"', r#"\""#))
             }
             JsonValue::Array(arr) => {
                 let items: Vec<String> = arr.iter().map(|v| v.to_json_string()).collect();
@@ -37,8 +31,8 @@ impl JsonValue {
                     .iter()
                     .map(|(k, v)| {
                         format!(
-                            "\"{}\":{}",
-                            k.replace('\\', "\\\\").replace('"', "\\\""),
+                            r#""{}":{}"#,
+                            k.replace('\\', r"\\").replace('"', r#"\""#),
                             v.to_json_string()
                         )
                     })
