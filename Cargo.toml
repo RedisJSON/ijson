@@ -30,10 +30,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 ctor = { version = "0.1.16", optional = true }
 paste = "1.0.15"
-half = "2.0.0"
+ciborium = { git = "https://github.com/AvivDavid23/ciborium", branch = "main" }
+ciborium-ll = { git = "https://github.com/AvivDavid23/ciborium", branch = "main" }
+bytemuck = "1"
+half = { version = "2.0.0", features = ["bytemuck"] }
+thiserror = "2.0.18"
+zstd = "0.13"
 
 [dev-dependencies]
 mockalloc = "0.1.2"
 ctor = "0.1.16"
 rand = "0.8.4"
-
+zstd = "0.13"

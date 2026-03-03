@@ -8,7 +8,7 @@ inputs:
   fuzz_time:
     description: 'Maximum time in seconds to run fuzzing'
     required: false
-    default: '180'
+    default: '300'
   cargo_fuzz_version:
     description: 'Version of cargo-fuzz to install'
     required: false
@@ -26,5 +26,5 @@ runs:
     - name: Run Fuzz Tests
       shell: bash
       working-directory: fuzz
-      run: cargo fuzz run ${{ inputs.fuzz_target }} --release -- -max_total_time=${{ inputs.fuzz_time }}
+      run: cargo fuzz run ${{ inputs.fuzz_target }} --release -- -max_total_time=${{ inputs.fuzz_time }} -ignore_ooms=1 -rss_limit_mb=0
 

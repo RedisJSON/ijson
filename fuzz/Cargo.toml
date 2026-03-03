@@ -7,11 +7,16 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+[lib]
+name = "ijson_fuzz"
+path = "src/lib.rs"
+
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1.3", features = ["derive"] }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+arbitrary-json = "=0.1.1"
 
 [dependencies.ijson]
 path = ".."
@@ -19,6 +24,20 @@ path = ".."
 [[bin]]
 name = "fuzz_json_de"
 path = "fuzz_targets/fuzz_json_de.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cbor_decode"
+path = "fuzz_targets/fuzz_cbor_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cbor_roundtrip"
+path = "fuzz_targets/fuzz_cbor_roundtrip.rs"
 test = false
 doc = false
 bench = false
