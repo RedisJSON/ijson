@@ -30,8 +30,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 ctor = { version = "0.1.16", optional = true }
 paste = "1.0.15"
-ciborium = { git = "https://github.com/AvivDavid23/ciborium", branch = "main" }
-ciborium-ll = { git = "https://github.com/AvivDavid23/ciborium", branch = "main" }
+ciborium = { git = "https://github.com/RedisJSON/ciborium", branch = "main" }
+ciborium-ll = { git = "https://github.com/RedisJSON/ciborium", branch = "main" }
 bytemuck = "1"
 half = { version = "2.0.0", features = ["bytemuck"] }
 thiserror = "2.0.18"
