@@ -31,8 +31,12 @@ fn find_shortest_roundtrip_f64(f64_val: f64, roundtrips: impl Fn(f64) -> bool) -
     }
     // What we do here:
     // Looking for the shortest string where f16::from_f64(str.parse::<f64>()) == original_f16
-    // With our usage(F16/BF16), the loop will only ~4 iterations, since max significant digits needed is ~4
-    for sig_digits in 1..5 {
+    // With our usage(F16/BF16), the loop will need only ~4 iterations, since max significant digits needed is ~4
+    // Example: f16(3.14159) stores 3.140625
+    //   sig_digits=1 → "3e0"  → 3.0  → f16(3.0)=3.0 ≠ 3.140625  ❌
+    //   sig_digits=2 → "3.1e0"→ 3.1  → f16(3.1)=3.099.. ≠ 3.140625  ❌
+    //   sig_digits=3 → "3.14e0"→3.14 → f16(3.14)=3.140625  ✅ → returns 3.14
+    for sig_digits in 1..=5 {
         let s = format!("{:.prec$e}", f64_val, prec = sig_digits - 1);
         if let Ok(parsed) = s.parse::<f64>() {
             if roundtrips(parsed) {
