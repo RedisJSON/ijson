@@ -29,7 +29,10 @@ fn find_shortest_roundtrip_f64(f64_val: f64, roundtrips: impl Fn(f64) -> bool) -
     if !f64_val.is_finite() || f64_val.fract() == 0.0 {
         return f64_val;
     }
-    for sig_digits in 1..20 {
+    // What we do here:
+    // Looking for the shortest string where f16::from_f64(str.parse::<f64>()) == original_f16
+    // With our usage(F16/BF16), the loop will only ~4 iterations, since max significant digits needed is ~4
+    for sig_digits in 1..5 {
         let s = format!("{:.prec$e}", f64_val, prec = sig_digits - 1);
         if let Ok(parsed) = s.parse::<f64>() {
             if roundtrips(parsed) {
@@ -813,8 +816,8 @@ mod tests {
         // must differ too — but it should still be the shortest string that
         // round-trips through f16.
         let cases: &[(&str, &str)] = &[
-            ("3.14159", "3.14"),  // pi truncated: f16 stores 3.140625
-            ("42.42", "42.4"),    // f16 stores 42.40625
+            ("3.14159", "3.14"), // pi truncated: f16 stores 3.140625
+            ("42.42", "42.4"),   // f16 stores 42.40625
             ("12.345", "12.34"), // f16 stores 12.34375
             ("0.5678", "0.568"), // f16 stores 0.56787109375
         ];
@@ -823,8 +826,7 @@ mod tests {
             let json_input = format!("[{input}]");
 
             let f16_arr: IArray = {
-                let seed =
-                    IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
+                let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
                 let mut de = serde_json::Deserializer::from_str(&json_input);
                 serde::de::DeserializeSeed::deserialize(seed, &mut de)
                     .unwrap()
@@ -840,8 +842,7 @@ mod tests {
 
             // Same values through F32 should preserve the original (enough precision)
             let f32_arr: IArray = {
-                let seed =
-                    IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
+                let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
                 let mut de = serde_json::Deserializer::from_str(&json_input);
                 serde::de::DeserializeSeed::deserialize(seed, &mut de)
                     .unwrap()
