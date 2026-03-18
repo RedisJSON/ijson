@@ -1,3 +1,4 @@
+use half::{bf16, f16};
 use serde::{
     ser::{
         Error as _, Impossible, SerializeMap, SerializeSeq, SerializeStruct,
@@ -11,6 +12,33 @@ use crate::{
     array::{ArraySliceRef, TryCollect},
     DestructuredRef, IArray, INumber, IObject, IString, IValue,
 };
+
+/// Finds an f64 value that, when formatted by ryu's f64 algorithm, produces
+/// the shortest decimal string that still round-trips through the target
+/// half-precision type (f16 or bf16).
+///
+/// ryu only supports f32/f64, and serde has no `serialize_f16`. Since f16/bf16
+/// have far fewer distinct values than f32, there exist shorter representations
+/// that uniquely identify the half value. For example, f16(0.3) = 0.300048828125,
+/// and "0.3" parsed as f16 gives back the same bits — so "0.3" is valid.
+///
+/// The approach: try increasing significant digits (in scientific notation) until
+/// the formatted string round-trips through the half type. Then return the f64
+/// value of that string, so that `serialize_f64` (via ryu) reproduces it.
+fn find_shortest_roundtrip_f64(f64_val: f64, roundtrips: impl Fn(f64) -> bool) -> f64 {
+    if !f64_val.is_finite() || f64_val.fract() == 0.0 {
+        return f64_val;
+    }
+    for sig_digits in 1..20 {
+        let s = format!("{:.prec$e}", f64_val, prec = sig_digits - 1);
+        if let Ok(parsed) = s.parse::<f64>() {
+            if roundtrips(parsed) {
+                return parsed;
+            }
+        }
+    }
+    f64_val
+}
 
 impl Serialize for IValue {
     #[inline]
@@ -59,14 +87,16 @@ impl Serialize for IArray {
         S: Serializer,
     {
         match self.as_slice() {
-            // Serialize f32/f16/bf16 typed arrays using f32 precision so that
-            // serde_json's ryu-based formatter produces the shortest decimal
-            // string that round-trips through f32. Without this, these values
-            // would be promoted to f64 via INumber, and ryu's f64 algorithm
-            // would emit unnecessarily long representations (e.g. "0.3" stored
-            // as f32 would serialize as "0.30000001192092896" instead of "0.3").
-            // f16/bf16 are widened to f32 because serde has no serialize_f16,
-            // and every f16/bf16 value is exactly representable as f32.
+            // Serialize typed float arrays with the shortest representation that
+            // round-trips through the stored precision. Without this, all floats
+            // would be promoted to f64 via INumber, and ryu's f64 algorithm would
+            // emit unnecessarily long strings (e.g. "0.3" stored as f32 would
+            // serialize as "0.30000001192092896" instead of "0.3").
+            //
+            // F32: serialize directly as f32 so ryu uses its f32 algorithm.
+            // F16/BF16: ryu has no f16 mode and serde has no serialize_f16, so we
+            // find the shortest decimal that round-trips through the half type and
+            // pass the corresponding f64 value to serialize_f64.
             ArraySliceRef::F32(slice) => {
                 let mut s = serializer.serialize_seq(Some(slice.len()))?;
                 for &v in slice {
@@ -77,14 +107,18 @@ impl Serialize for IArray {
             ArraySliceRef::F16(slice) => {
                 let mut s = serializer.serialize_seq(Some(slice.len()))?;
                 for &v in slice {
-                    s.serialize_element(&f32::from(v))?;
+                    let f64_val = f64::from(v);
+                    let shortest = find_shortest_roundtrip_f64(f64_val, |p| f16::from_f64(p) == v);
+                    s.serialize_element(&shortest)?;
                 }
                 s.end()
             }
             ArraySliceRef::BF16(slice) => {
                 let mut s = serializer.serialize_seq(Some(slice.len()))?;
                 for &v in slice {
-                    s.serialize_element(&f32::from(v))?;
+                    let f64_val = f64::from(v);
+                    let shortest = find_shortest_roundtrip_f64(f64_val, |p| bf16::from_f64(p) == v);
+                    s.serialize_element(&shortest)?;
                 }
                 s.end()
             }
@@ -703,69 +737,122 @@ mod tests {
     }
 
     #[test]
-    fn test_f16_array_serialization_uses_f32_precision() {
+    fn test_f16_array_serialization_preserves_short_representation() {
         let mut arr = IArray::new();
         arr.push_with_fp_type(IValue::from(1.5), FloatType::F16)
             .unwrap();
-        assert!(matches!(arr.as_slice(), ArraySliceRef::F16(_)));
+        assert_eq!(serde_json::to_string(&arr).unwrap(), "[1.5]");
 
-        let json = serde_json::to_string(&arr).unwrap();
-        assert_eq!(json, "[1.5]", "F16: 1.5 is exactly representable");
+        let mut arr2 = IArray::new();
+        arr2.push_with_fp_type(IValue::from(0.3), FloatType::F16)
+            .unwrap();
+        assert_eq!(
+            serde_json::to_string(&arr2).unwrap(),
+            "[0.3]",
+            "F16 array should serialize 0.3 as '0.3', not '0.30004883' or '0.300048828125'"
+        );
     }
 
     #[test]
-    fn test_bf16_array_serialization_uses_f32_precision() {
+    fn test_bf16_array_serialization_preserves_short_representation() {
         let mut arr = IArray::new();
         arr.push_with_fp_type(IValue::from(1.5), FloatType::BF16)
             .unwrap();
-        assert!(matches!(arr.as_slice(), ArraySliceRef::BF16(_)));
+        assert_eq!(serde_json::to_string(&arr).unwrap(), "[1.5]");
 
-        let json = serde_json::to_string(&arr).unwrap();
-        assert_eq!(json, "[1.5]", "BF16: 1.5 is exactly representable");
-    }
-
-    #[test]
-    fn test_typed_float_array_serialization_multiple_values() {
-        let values = [0.3, 0.1, 0.7, 1.0, 2.5, 100.0];
-
-        let mut f32_arr = IArray::new();
-        let mut f64_arr = IArray::new();
-        for &v in &values {
-            f32_arr
-                .push_with_fp_type(IValue::from(v), FloatType::F32)
-                .unwrap();
-            f64_arr
-                .push_with_fp_type(IValue::from(v), FloatType::F64)
-                .unwrap();
-        }
-
-        let f32_json = serde_json::to_string(&f32_arr).unwrap();
-        let f64_json = serde_json::to_string(&f64_arr).unwrap();
+        let mut arr2 = IArray::new();
+        arr2.push_with_fp_type(IValue::from(0.3), FloatType::BF16)
+            .unwrap();
         assert_eq!(
-            f32_json, f64_json,
-            "F32 and F64 arrays should produce identical JSON for values that round-trip through f32"
+            serde_json::to_string(&arr2).unwrap(),
+            "[0.3]",
+            "BF16 array should serialize 0.3 as '0.3'"
         );
-        assert_eq!(f64_json, "[0.3,0.1,0.7,1.0,2.5,100.0]");
     }
 
     #[test]
     fn test_typed_float_array_serialization_roundtrip() {
-        let input = "[0.3,0.1,0.7,1.0,2.5]";
+        let input = "[0.3,0.1,0.7,1.0,2.5,100.0]";
+        let fp_types = [
+            FloatType::F16,
+            FloatType::BF16,
+            FloatType::F32,
+            FloatType::F64,
+        ];
 
-        let f32_arr: IArray = {
-            let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
-            let mut de = serde_json::Deserializer::from_str(input);
-            serde::de::DeserializeSeed::deserialize(seed, &mut de)
-                .unwrap()
-                .into_array()
-                .unwrap()
-        };
-        assert!(matches!(f32_arr.as_slice(), ArraySliceRef::F32(_)));
+        let jsons: Vec<String> = fp_types
+            .iter()
+            .map(|&fp_type| {
+                let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type)));
+                let mut de = serde_json::Deserializer::from_str(input);
+                let arr = serde::de::DeserializeSeed::deserialize(seed, &mut de)
+                    .unwrap()
+                    .into_array()
+                    .unwrap();
+                let json_out = serde_json::to_string(&arr).unwrap();
+                assert_eq!(
+                    json_out, input,
+                    "{fp_type} round-trip should preserve the original JSON string"
+                );
+                json_out
+            })
+            .collect();
 
-        let json_out = serde_json::to_string(&f32_arr).unwrap();
-        assert_eq!(
-            json_out, input,
-            "F32 round-trip should preserve the original JSON string"
-        );
+        for pair in jsons.windows(2) {
+            assert_eq!(
+                pair[0], pair[1],
+                "all float types should produce identical JSON"
+            );
+        }
+    }
+
+    #[test]
+    fn test_f16_precision_loss_produces_different_but_short_representation() {
+        // Values with more significant digits than f16 can represent (~3.3 digits).
+        // The stored f16 value differs from the original, so the serialized string
+        // must differ too — but it should still be the shortest string that
+        // round-trips through f16.
+        let cases: &[(&str, &str)] = &[
+            ("3.14159", "3.14"),  // pi truncated: f16 stores 3.140625
+            ("42.42", "42.4"),    // f16 stores 42.40625
+            ("12.345", "12.34"), // f16 stores 12.34375
+            ("0.5678", "0.568"), // f16 stores 0.56787109375
+        ];
+
+        for &(input, expected_f16) in cases {
+            let json_input = format!("[{input}]");
+
+            let f16_arr: IArray = {
+                let seed =
+                    IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
+                let mut de = serde_json::Deserializer::from_str(&json_input);
+                serde::de::DeserializeSeed::deserialize(seed, &mut de)
+                    .unwrap()
+                    .into_array()
+                    .unwrap()
+            };
+            let f16_json = serde_json::to_string(&f16_arr).unwrap();
+            assert_eq!(
+                f16_json,
+                format!("[{expected_f16}]"),
+                "F16 of {input}: should serialize as shortest f16 representation"
+            );
+
+            // Same values through F32 should preserve the original (enough precision)
+            let f32_arr: IArray = {
+                let seed =
+                    IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
+                let mut de = serde_json::Deserializer::from_str(&json_input);
+                serde::de::DeserializeSeed::deserialize(seed, &mut de)
+                    .unwrap()
+                    .into_array()
+                    .unwrap()
+            };
+            let f32_json = serde_json::to_string(&f32_arr).unwrap();
+            assert_eq!(
+                f32_json, json_input,
+                "F32 of {input}: should preserve the original representation"
+            );
+        }
     }
 }
