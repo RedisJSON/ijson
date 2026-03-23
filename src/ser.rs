@@ -13,6 +13,15 @@ use crate::{
     DestructuredRef, IArray, INumber, IObject, IString, IValue,
 };
 
+/// Rounds an f64 to the given number of significant decimal digits.
+#[inline]
+fn round_to_sig_digits(val: f64, sig_digits: u32) -> f64 {
+    // how many digits are left of the decimal point, minus one
+    let magnitude = val.abs().log10().floor() as i32;
+    let power = 10f64.powi(sig_digits as i32 - 1 - magnitude);
+    (val * power).round() / power
+}
+
 /// Finds an f64 value that, when formatted by ryu's f64 algorithm, produces
 /// the shortest decimal string that still round-trips through the target
 /// half-precision type (f16 or bf16).
@@ -22,26 +31,22 @@ use crate::{
 /// that uniquely identify the half value. For example, f16(0.3) = 0.300048828125,
 /// and "0.3" parsed as f16 gives back the same bits — so "0.3" is valid.
 ///
-/// The approach: try increasing significant digits (in scientific notation) until
-/// the formatted string round-trips through the half type. Then return the f64
-/// value of that string, so that `serialize_f64` (via ryu) reproduces it.
+/// The approach: try rounding to increasing significant digits until the
+/// rounded value round-trips through the type. Then return that f64
+/// value, so that `serialize_f64` (via ryu) reproduces it.
 fn find_shortest_roundtrip_f64(f64_val: f64, roundtrips: impl Fn(f64) -> bool) -> f64 {
     if !f64_val.is_finite() || f64_val.fract() == 0.0 {
         return f64_val;
     }
-    // What we do here:
-    // Looking for the shortest string where f16::from_f64(str.parse::<f64>()) == original_f16
     // With our usage(F16/BF16), the loop will need only ~4 iterations, since max significant digits needed is ~4
     // Example: f16(3.14159) stores 3.140625
-    //   sig_digits=1 → "3e0"  → 3.0  → f16(3.0)=3.0 ≠ 3.140625  ❌
-    //   sig_digits=2 → "3.1e0"→ 3.1  → f16(3.1)=3.099.. ≠ 3.140625  ❌
-    //   sig_digits=3 → "3.14e0"→3.14 → f16(3.14)=3.140625  ✅ → returns 3.14
-    for sig_digits in 1..=5 {
-        let s = format!("{:.prec$e}", f64_val, prec = sig_digits - 1);
-        if let Ok(parsed) = s.parse::<f64>() {
-            if roundtrips(parsed) {
-                return parsed;
-            }
+    //   sig_digits=1 → 3.0  → f16(3.0)=3.0 ≠ 3.140625  ❌
+    //   sig_digits=2 → 3.1  → f16(3.1)=3.099.. ≠ 3.140625  ❌
+    //   sig_digits=3 → 3.14 → f16(3.14)=3.140625  ✅ → returns 3.14
+    for sig_digits in 1..=5u32 {
+        let rounded = round_to_sig_digits(f64_val, sig_digits);
+        if roundtrips(rounded) {
+            return rounded;
         }
     }
     f64_val
