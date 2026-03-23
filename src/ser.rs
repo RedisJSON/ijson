@@ -17,9 +17,13 @@ use crate::{
 #[inline]
 fn round_to_sig_digits(val: f64, sig_digits: u32) -> f64 {
     // how many digits are left of the decimal point, minus one
-    let magnitude = val.abs().log10().floor() as i32;
-    let power = 10f64.powi(sig_digits as i32 - 1 - magnitude);
-    (val * power).round() / power
+    // OR: what power of 10 is this number closest to? (e.g. 100 -> 10^2, 0.001 -> 10^-3)
+    let order_of_magnitude = val.abs().log10().floor() as i32;
+    // Multiplier that shifts the desired significant digits into the integer part,
+    // so that f64::round() can snap to the nearest integer and discard the rest.
+    // e.g. for val=3.14, order_of_magnitude = 0, sig_digits=2: scale=10, so 3.14*10=31.4 → round→31 → 31/10=3.1
+    let scale = 10f64.powi(sig_digits as i32 - 1 - order_of_magnitude);
+    (val * scale).round() / scale
 }
 
 /// Finds an f64 value that, when formatted by ryu's f64 algorithm, produces
@@ -862,6 +866,56 @@ mod tests {
             assert_eq!(
                 f32_json, json_input,
                 "F32 of {input}: should preserve the original representation"
+            );
+        }
+    }
+
+    #[test]
+    fn test_negative_float_array_serialization() {
+        let input = "[-0.3,-0.1,-1.0,-2.5,-100.0]";
+        let fp_types = [
+            FloatType::F16,
+            FloatType::BF16,
+            FloatType::F32,
+            FloatType::F64,
+        ];
+
+        for &fp_type in &fp_types {
+            let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type)));
+            let mut de = serde_json::Deserializer::from_str(input);
+            let arr = serde::de::DeserializeSeed::deserialize(seed, &mut de)
+                .unwrap()
+                .into_array()
+                .unwrap();
+            let json_out = serde_json::to_string(&arr).unwrap();
+            assert_eq!(
+                json_out, input,
+                "{fp_type} negative round-trip should preserve the original JSON string"
+            );
+        }
+    }
+
+    #[test]
+    fn test_negative_f16_precision_loss_produces_short_representation() {
+        let cases: &[(&str, &str)] = &[
+            ("-3.14159", "-3.14"),
+            ("-42.42", "-42.4"),
+            ("-0.5678", "-0.568"),
+        ];
+
+        for &(input, expected_f16) in cases {
+            let json_input = format!("[{input}]");
+            let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F16)));
+            let mut de = serde_json::Deserializer::from_str(&json_input);
+            let arr = serde::de::DeserializeSeed::deserialize(seed, &mut de)
+                .unwrap()
+                .into_array()
+                .unwrap();
+            let json_out = serde_json::to_string(&arr).unwrap();
+            assert_eq!(
+                json_out,
+                format!("[{expected_f16}]"),
+                "F16 of {input}: negative should serialize as shortest f16 representation"
             );
         }
     }
