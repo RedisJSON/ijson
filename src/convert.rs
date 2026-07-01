@@ -1,7 +1,6 @@
 //! Fallible iterator / collection-conversion traits shared by [`IArray`] and
 //! [`IObject`]. These mirror the standard `Extend`, `FromIterator`, and
-//! `Iterator::collect`, but return a `Result` so that allocation failure (and the
-//! 30-bit length limit of the packed headers) can be handled instead of panicking.
+//! `Iterator::collect`, but return a `Result`.
 //!
 //! [`IArray`]: crate::IArray
 //! [`IObject`]: crate::IObject
