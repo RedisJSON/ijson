@@ -25,17 +25,16 @@ use super::value::{IValue, TypeTag};
 #[repr(align(8))]
 struct Header {
     /// Packed field:
-    /// bits 0-29: length,
-    /// bits 30-59: capacity,
-    /// bits 60-63: spare (reserved for a future small-object flag)
+    /// bits 0-31: length,
+    /// bits 32-63: capacity
     packed: u64,
 }
 
 impl Header {
-    const LEN_MASK: u64 = (1u64 << 30) - 1;
+    const LEN_MASK: u64 = (1u64 << 32) - 1;
     const LEN_SHIFT: u64 = 0;
-    const CAP_MASK: u64 = (1u64 << 30) - 1;
-    const CAP_SHIFT: u64 = 30;
+    const CAP_MASK: u64 = (1u64 << 32) - 1;
+    const CAP_SHIFT: u64 = 32;
 
     const fn new(len: usize, cap: usize) -> Result<Self, IJsonError> {
         if len > Self::LEN_MASK as usize || cap > Self::CAP_MASK as usize {
@@ -57,7 +56,7 @@ impl Header {
     fn set_len(&mut self, len: usize) {
         assert!(
             len <= Self::LEN_MASK as usize,
-            "Length exceeds 30-bit limit"
+            "Length exceeds 32-bit limit"
         );
         self.packed = (self.packed & !(Self::LEN_MASK << Self::LEN_SHIFT))
             | (((len as u64) & Self::LEN_MASK) << Self::LEN_SHIFT);
@@ -673,7 +672,7 @@ impl IObject {
     ///
     /// # Errors
     /// Returns an `AllocError` if memory allocation fails or the capacity exceeds the
-    /// 30-bit limit.
+    /// 32-bit limit.
     #[must_use]
     pub fn with_capacity(cap: usize) -> Result<Self, IJsonError> {
         if cap == 0 {
