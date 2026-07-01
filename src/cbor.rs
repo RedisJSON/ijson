@@ -215,14 +215,16 @@ fn cbor_to_ivalue(val: Value, depth: u32) -> Result<IValue, CborDecodeError> {
             Ok(out.into())
         }
         Value::Map(entries) => {
-            let mut obj = IObject::with_capacity(entries.len());
+            let mut obj =
+                IObject::with_capacity(entries.len()).map_err(|_| CborDecodeError::AllocError)?;
             for (k, v) in entries {
                 let key = match k {
                     Value::Text(s) => s,
                     _ => return Err(CborDecodeError::InvalidValue),
                 };
                 let val = cbor_to_ivalue(v, depth + 1)?;
-                obj.insert(&key, val);
+                obj.insert(&key, val)
+                    .map_err(|_| CborDecodeError::AllocError)?;
             }
             Ok(obj.into())
         }

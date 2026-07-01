@@ -1529,16 +1529,7 @@ pub(super) mod private {
     impl Sealed for bool {}
 }
 
-/// Trait for types that can be fallibly extended from an iterator
-/// This is similar to the standard `Extend` trait, but allows for allocation failures
-/// and is specialized for `IArray`.
-pub trait TryExtend<T> {
-    /// Attempts to extend `self` by appending items from the given iterator.
-    /// Returns an `AllocError` if allocation fails.
-    /// # Errors
-    /// Returns an `AllocError` if memory allocation fails during the extension.
-    fn try_extend(&mut self, iter: impl IntoIterator<Item = T>) -> Result<(), IJsonError>;
-}
+pub use crate::convert::{TryCollect, TryExtend, TryFromIterator};
 
 impl<U: Into<IValue> + private::Sealed> TryExtend<U> for IArray {
     fn try_extend(&mut self, iter: impl IntoIterator<Item = U>) -> Result<(), IJsonError> {
@@ -1668,19 +1659,6 @@ fn convert_bf16<T: Into<f64>>(value: T) -> bf16 {
 extend_impl_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 extend_impl_float!(f16, bf16, f32, f64);
 
-/// Trait for types that can be fallibly constructed from an iterator
-/// This is similar to the standard `FromIterator` trait, but allows for allocation failures
-/// and is specialized for `IArray`.
-pub trait TryFromIterator<T> {
-    /// Attempts to create an instance of `Self` from an iterator of items of type `T`.
-    /// Returns an `AllocError` if allocation fails.
-    /// # Errors
-    /// Returns `AllocError` if memory allocation fails during the construction.
-    fn try_from_iter<U: IntoIterator<Item = T>>(iter: U) -> Result<Self, IJsonError>
-    where
-        Self: Sized;
-}
-
 impl<U: Into<IValue> + private::Sealed> TryFromIterator<U> for IArray {
     fn try_from_iter<T: IntoIterator<Item = U>>(iter: T) -> Result<Self, IJsonError> {
         let mut res = IArray::new();
@@ -1703,27 +1681,6 @@ macro_rules! from_iter_impl {
 }
 
 from_iter_impl!(i8, i16, i32, i64, u8, u16, u32, u64, f16, bf16, f32, f64);
-
-/// Extension trait for iterators to collect into an IArray with fallible allocation.
-/// This is similar to the standard `collect` method, but allows for allocation failures.
-pub trait TryCollect<T>: Iterator<Item = T> + Sized {
-    /// Attempts to collect the iterator into a collection `B`.
-    /// Returns an `AllocError` if allocation fails.
-    /// # Errors
-    /// Returns `AllocError` if memory allocation fails during the collection.
-    fn try_collect<B>(self) -> Result<B, IJsonError>
-    where
-        B: TryFromIterator<T>;
-}
-
-impl<T, I: Iterator<Item = T>> TryCollect<T> for I {
-    fn try_collect<B>(self) -> Result<B, IJsonError>
-    where
-        B: TryFromIterator<T>,
-    {
-        B::try_from_iter(self)
-    }
-}
 
 impl<T: Into<IValue> + private::Sealed> TryFrom<Vec<T>> for IArray {
     type Error = IJsonError;

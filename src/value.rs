@@ -1030,12 +1030,12 @@ impl From<bool> for IValue {
 typed_conversions! {
     INumber: i8, u8, i16, u16, i32, u32, i64, u64, isize, usize;
     IString: String, &String, &mut String, &str, &mut str;
-    IObject:
-        HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
-        BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
 }
 typed_conversions_fallible! {
     INumber: f16, bf16, f32, f64;
+    IObject:
+        HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
+        BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
     IArray:
         Vec<T> where (T: Into<IValue> + crate::array::private::Sealed),
         Vec<i8>, Vec<u8>, Vec<i16>, Vec<u16>, Vec<i32>, Vec<u32>,
@@ -1261,7 +1261,7 @@ mod tests {
     #[mockalloc::test]
     fn test_object() {
         for v in 4..20 {
-            let mut o: IObject = (0..v).map(|i| (i.to_string(), i)).collect();
+            let mut o: IObject = (0..v).map(|i| (i.to_string(), i)).try_collect().unwrap();
             let mut x = IValue::from(o.clone());
             assert!(x.is_object());
             assert_eq!(x.type_(), ValueType::Object);
@@ -1293,7 +1293,7 @@ mod tests {
 
     #[mockalloc::test]
     fn test_into_object_for_object() {
-        let o: IObject = (0..10).map(|i| (i.to_string(), i)).collect();
+        let o: IObject = (0..10).map(|i| (i.to_string(), i)).try_collect().unwrap();
         let x = IValue::from(o.clone());
 
         assert_eq!(x.into_object(), Ok(o));

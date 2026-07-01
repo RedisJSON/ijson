@@ -6,10 +6,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Debug, Formatter};
 use std::hash::{Hash, Hasher};
-use std::iter::FromIterator;
 use std::mem;
 use std::ops::{Index, IndexMut};
 
+use crate::convert::{TryExtend, TryFromIterator};
+use crate::error::{AllocError, IJsonError};
 use crate::thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt};
 use crate::{Defrag, DefragAllocator};
 
@@ -36,10 +37,13 @@ impl Header {
     const CAP_MASK: u64 = (1u64 << 30) - 1;
     const CAP_SHIFT: u64 = 30;
 
-    const fn new(len: usize, cap: usize) -> Self {
+    const fn new(len: usize, cap: usize) -> Result<Self, IJsonError> {
+        if len > Self::LEN_MASK as usize || cap > Self::CAP_MASK as usize {
+            return Err(IJsonError::Alloc(AllocError));
+        }
         let packed = ((len as u64) & Self::LEN_MASK) << Self::LEN_SHIFT
             | ((cap as u64) & Self::CAP_MASK) << Self::CAP_SHIFT;
-        Self { packed }
+        Ok(Self { packed })
     }
 
     fn len(&self) -> usize {
@@ -634,14 +638,10 @@ impl IObject {
         Ok(layout.pad_to_align())
     }
 
-    fn alloc(cap: usize) -> *mut Header {
-        assert!(
-            cap <= Header::CAP_MASK as usize,
-            "Capacity exceeds 30-bit limit"
-        );
+    fn alloc(cap: usize) -> Result<*mut Header, IJsonError> {
         unsafe {
-            let hd = alloc(Self::layout(cap).unwrap()).cast::<Header>();
-            std::ptr::write(hd, Header::new(0, cap));
+            let hd = alloc(Self::layout(cap).map_err(|_| AllocError)?).cast::<Header>();
+            std::ptr::write(hd, Header::new(0, cap)?);
             if has_table(cap) {
                 let mut hd_mut = ThinMut::new(hd);
                 let hash_ptr = hd_mut.hashes_ptr_mut();
@@ -649,7 +649,7 @@ impl IObject {
                     hash_ptr.add(i).write(u32::MAX);
                 }
             }
-            hd
+            Ok(hd)
         }
     }
 
@@ -668,12 +668,18 @@ impl IObject {
 
     /// Constructs a new `IObject` with the specified capacity. At least that many entries
     /// can be added to the object without reallocating.
+    ///
+    /// # Errors
+    /// Returns an `AllocError` if memory allocation fails or the capacity exceeds the
+    /// 30-bit limit.
     #[must_use]
-    pub fn with_capacity(cap: usize) -> Self {
+    pub fn with_capacity(cap: usize) -> Result<Self, IJsonError> {
         if cap == 0 {
-            Self::new()
+            Ok(Self::new())
         } else {
-            Self(unsafe { IValue::new_ptr(Self::alloc(cap).cast(), TypeTag::ObjectOrTrue) })
+            Ok(Self(unsafe {
+                IValue::new_ptr(Self::alloc(cap)?.cast(), TypeTag::ObjectOrTrue)
+            }))
         }
     }
 
@@ -706,8 +712,8 @@ impl IObject {
         self.len() == 0
     }
 
-    fn resize_internal(&mut self, cap: usize) {
-        let old_obj = mem::replace(self, Self::with_capacity(cap));
+    fn resize_internal(&mut self, cap: usize) -> Result<(), IJsonError> {
+        let old_obj = mem::replace(self, Self::with_capacity(cap)?);
         if !self.is_static() {
             unsafe {
                 let mut hd = self.header_mut();
@@ -719,31 +725,41 @@ impl IObject {
                 }
             }
         }
+        Ok(())
     }
 
     /// Reserves space for at least this many additional entries.
-    pub fn reserve(&mut self, additional: usize) {
+    ///
+    /// # Errors
+    /// Returns an `AllocError` if memory allocation fails.
+    pub fn reserve(&mut self, additional: usize) -> Result<(), IJsonError> {
         let hd = self.header();
         let current_capacity = hd.cap();
-        let desired_capacity = hd.len().checked_add(additional).unwrap();
+        let desired_capacity = hd.len().checked_add(additional).ok_or(AllocError)?;
         if current_capacity >= desired_capacity {
-            return;
+            return Ok(());
         }
-        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity.max(4)));
+        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity.max(4)))
     }
 
     /// Returns a view of an entry within this object.
-    pub fn entry(&mut self, key: impl Into<IString>) -> Entry<'_> {
-        self.reserve(1);
+    ///
+    /// # Errors
+    /// Returns an `AllocError` if reserving space for the entry fails.
+    pub fn entry(&mut self, key: impl Into<IString>) -> Result<Entry<'_>, IJsonError> {
+        self.reserve(1)?;
         // Safety: cannot be static after reserving space
-        unsafe { self.header_mut().entry(key.into()) }
+        Ok(unsafe { self.header_mut().entry(key.into()) })
     }
     /// Returns a view of an entry within this object, whilst avoiding
     /// cloning the key if the entry is already occupied.
-    pub fn entry_or_clone(&mut self, key: &IString) -> Entry<'_> {
-        self.reserve(1);
+    ///
+    /// # Errors
+    /// Returns an `AllocError` if reserving space for the entry fails.
+    pub fn entry_or_clone(&mut self, key: &IString) -> Result<Entry<'_>, IJsonError> {
+        self.reserve(1)?;
         // Safety: cannot be static after reserving space
-        unsafe { self.header_mut().entry_or_clone(key) }
+        Ok(unsafe { self.header_mut().entry_or_clone(key) })
     }
     /// Returns an iterator over references to the keys in this object.
     pub fn keys(&self) -> impl Iterator<Item = &IString> {
@@ -816,12 +832,19 @@ impl IObject {
 
     /// Inserts a new value into this object with the specified key. If a value already
     /// existed at this key, that value is replaced and returend.
-    pub fn insert(&mut self, k: impl Into<IString>, v: impl Into<IValue>) -> Option<IValue> {
-        match self.entry(k) {
-            Entry::Occupied(mut occ) => Some(occ.insert(v)),
+    ///
+    /// # Errors
+    /// Returns an `AllocError` if memory allocation fails.
+    pub fn insert(
+        &mut self,
+        k: impl Into<IString>,
+        v: impl Into<IValue>,
+    ) -> Result<Option<IValue>, IJsonError> {
+        match self.entry(k)? {
+            Entry::Occupied(mut occ) => Ok(Some(occ.insert(v))),
             Entry::Vacant(vac) => {
                 vac.insert(v);
-                None
+                Ok(None)
             }
         }
     }
@@ -840,7 +863,8 @@ impl IObject {
     /// Shrinks the memory allocation used by the object such that its
     /// capacity becomes equal to its length.
     pub fn shrink_to_fit(&mut self) {
-        self.resize_internal(self.len());
+        // Shrinking never grows capacity, so this cannot fail.
+        self.resize_internal(self.len()).unwrap();
     }
 
     /// Calls the specified function for each entry in the object. Each entry
@@ -871,9 +895,11 @@ impl IObject {
     }
 
     pub(crate) fn clone_impl(&self) -> IValue {
-        let mut res = Self::with_capacity(self.len());
+        // Cloning an existing (valid) object never exceeds its capacity, so this
+        // cannot fail short of the global allocator aborting.
+        let mut res = Self::with_capacity(self.len()).unwrap();
         for (k, v) in self.iter() {
-            res.insert(k.clone(), v.clone());
+            res.insert(k.clone(), v.clone()).unwrap();
         }
 
         res.0
@@ -958,21 +984,22 @@ impl Hash for IObject {
     }
 }
 
-impl<K: Into<IString>, V: Into<IValue>> Extend<(K, V)> for IObject {
-    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+impl<K: Into<IString>, V: Into<IValue>> TryExtend<(K, V)> for IObject {
+    fn try_extend(&mut self, iter: impl IntoIterator<Item = (K, V)>) -> Result<(), IJsonError> {
         let iter = iter.into_iter();
-        self.reserve(iter.size_hint().0);
+        self.reserve(iter.size_hint().0)?;
         for (k, v) in iter {
-            self.insert(k, v);
+            self.insert(k, v)?;
         }
+        Ok(())
     }
 }
 
-impl<K: Into<IString>, V: Into<IValue>> FromIterator<(K, V)> for IObject {
-    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
+impl<K: Into<IString>, V: Into<IValue>> TryFromIterator<(K, V)> for IObject {
+    fn try_from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Result<Self, IJsonError> {
         let mut res = IObject::new();
-        res.extend(iter);
-        res
+        res.try_extend(iter)?;
+        Ok(res)
     }
 }
 
@@ -1027,7 +1054,9 @@ impl ObjectIndex for &str {
     }
 
     fn index_or_insert(self, v: &mut IObject) -> &mut IValue {
-        v.entry(IString::intern(self)).or_insert(IValue::NULL)
+        v.entry(IString::intern(self))
+            .unwrap()
+            .or_insert(IValue::NULL)
     }
 
     fn remove(self, v: &mut IObject) -> Option<(IString, IValue)> {
@@ -1081,7 +1110,7 @@ impl ObjectIndex for &IString {
     }
 
     fn index_or_insert(self, v: &mut IObject) -> &mut IValue {
-        v.entry_or_clone(self).or_insert(IValue::NULL)
+        v.entry_or_clone(self).unwrap().or_insert(IValue::NULL)
     }
 
     fn remove(self, v: &mut IObject) -> Option<(IString, IValue)> {
@@ -1184,19 +1213,21 @@ impl<'a> IntoIterator for &'a mut IObject {
     }
 }
 
-impl<K: Into<IString>, V: Into<IValue>> From<HashMap<K, V>> for IObject {
-    fn from(other: HashMap<K, V>) -> Self {
-        let mut res = Self::with_capacity(other.len());
-        res.extend(other.into_iter().map(|(k, v)| (k.into(), v.into())));
-        res
+impl<K: Into<IString>, V: Into<IValue>> TryFrom<HashMap<K, V>> for IObject {
+    type Error = IJsonError;
+    fn try_from(other: HashMap<K, V>) -> Result<Self, Self::Error> {
+        let mut res = Self::with_capacity(other.len())?;
+        res.try_extend(other)?;
+        Ok(res)
     }
 }
 
-impl<K: Into<IString>, V: Into<IValue>> From<BTreeMap<K, V>> for IObject {
-    fn from(other: BTreeMap<K, V>) -> Self {
-        let mut res = Self::with_capacity(other.len());
-        res.extend(other.into_iter().map(|(k, v)| (k.into(), v.into())));
-        res
+impl<K: Into<IString>, V: Into<IValue>> TryFrom<BTreeMap<K, V>> for IObject {
+    type Error = IJsonError;
+    fn try_from(other: BTreeMap<K, V>) -> Result<Self, Self::Error> {
+        let mut res = Self::with_capacity(other.len())?;
+        res.try_extend(other)?;
+        Ok(res)
     }
 }
 
@@ -1236,11 +1267,12 @@ impl<A: DefragAllocator> Defrag<A> for IObject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::convert::TryCollect;
 
     #[mockalloc::test]
     fn can_create() {
         let x = IObject::new();
-        let y = IObject::with_capacity(10);
+        let y = IObject::with_capacity(10).unwrap();
 
         assert_eq!(x, y);
     }
@@ -1269,7 +1301,7 @@ mod tests {
             ("b", IValue::TRUE),
             ("c", IValue::FALSE),
         ];
-        let y: IObject = x.into_iter().collect();
+        let y: IObject = x.into_iter().try_collect().unwrap();
 
         assert_eq!(y, y.clone());
         assert_eq!(y.len(), 3);
@@ -1281,9 +1313,9 @@ mod tests {
     #[mockalloc::test]
     fn can_insert() {
         let mut x = IObject::new();
-        x.insert("a", IValue::NULL);
-        x.insert("b", IValue::TRUE);
-        x.insert("c", IValue::FALSE);
+        x.insert("a", IValue::NULL).unwrap();
+        x.insert("b", IValue::TRUE).unwrap();
+        x.insert("c", IValue::FALSE).unwrap();
 
         assert_eq!(x.len(), 3);
         assert_eq!(x["a"], IValue::NULL);
@@ -1294,10 +1326,10 @@ mod tests {
     #[mockalloc::test]
     fn can_nest() {
         let mut x = IObject::new();
-        x.insert("a", IValue::NULL);
-        x.insert("b", x.clone());
-        x.insert("c", IValue::FALSE);
-        x.insert("d", x.clone());
+        x.insert("a", IValue::NULL).unwrap();
+        x.insert("b", x.clone()).unwrap();
+        x.insert("c", IValue::FALSE).unwrap();
+        x.insert("d", x.clone()).unwrap();
 
         assert_eq!(x.len(), 4);
         assert_eq!(x["a"], IValue::NULL);
@@ -1313,7 +1345,7 @@ mod tests {
             ("b", IValue::TRUE),
             ("c", IValue::FALSE),
         ];
-        let mut y: IObject = x.into_iter().collect();
+        let mut y: IObject = x.into_iter().try_collect().unwrap();
         assert_eq!(y.len(), 3);
         assert_eq!(y.capacity(), 4);
 
@@ -1352,7 +1384,7 @@ mod tests {
                 if x.contains_key(&k) {
                     x.remove(&k);
                 } else {
-                    x.insert(k, op);
+                    x.insert(k, op).unwrap();
                 }
             }
             assert_eq!(x, IObject::new());
