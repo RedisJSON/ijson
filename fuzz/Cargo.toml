@@ -41,3 +41,10 @@ path = "fuzz_targets/fuzz_cbor_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_object_ops"
+path = "fuzz_targets/fuzz_object_ops.rs"
+test = false
+doc = false
+bench = false
