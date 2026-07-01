@@ -64,8 +64,6 @@ macro_rules! typed_conversions {
         )*
     }
 }
-// Conversions whose only failure mode is a value JSON cannot represent (e.g. a
-// non-finite float): degrade to `null`.
 macro_rules! typed_conversions_fallible {
     ($(
         $interm:ty: $(
@@ -78,30 +76,6 @@ macro_rules! typed_conversions_fallible {
                 impl $(<$($gb)*>)* From<$src> for IValue {
                     fn from(other: $src) -> Self {
                         <$interm>::try_from(other).map(Into::into).unwrap_or(IValue::NULL)
-                    }
-                }
-            )*
-        )*
-    }
-}
-// Conversions whose only failure mode is allocation / the capacity limit. `From`
-// cannot return a `Result`, so panic on failure — preserving the panic-on-OOM
-// contract these had before the fallible API. Use `TryFrom` on the concrete
-// container type for a recoverable path.
-macro_rules! typed_conversions_panicking {
-    ($(
-        $interm:ty: $(
-            $src:ty
-            $(where ($($gb:tt)*))*
-        ),*;
-    )*) => {
-        $(
-            $(
-                impl $(<$($gb)*>)* From<$src> for IValue {
-                    fn from(other: $src) -> Self {
-                        <$interm>::try_from(other)
-                            .map(Into::into)
-                            .expect("allocation failed converting to IValue")
                     }
                 }
             )*
@@ -192,7 +166,7 @@ macro_rules! ijson_internal {
 
     // Insert the current entry followed by trailing comma.
     (@object $object:ident [$($key:tt)+] ($value:expr) , $($rest:tt)*) => {
-        $object.insert(($($key)+), $value).unwrap();
+        let _ = $object.insert(($($key)+), $value);
         ijson_internal!(@object $object () ($($rest)*) ($($rest)*));
     };
 
@@ -203,7 +177,7 @@ macro_rules! ijson_internal {
 
     // Insert the last entry without trailing comma.
     (@object $object:ident [$($key:tt)+] ($value:expr)) => {
-        $object.insert(($($key)+), $value).unwrap();
+        let _ = $object.insert(($($key)+), $value);
     };
 
     // Next value is `null`.

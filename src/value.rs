@@ -1033,8 +1033,6 @@ typed_conversions! {
 }
 typed_conversions_fallible! {
     INumber: f16, bf16, f32, f64;
-}
-typed_conversions_panicking! {
     IObject:
         HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
         BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
