@@ -1270,14 +1270,23 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::Object(u) if u == o));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Object(u) if *u == o));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Object(u) if *u == o));
+            // Layout: packed 8-byte header + KeyValuePair array + (only when cap > 8)
+            // a u32 hash table, padded to 8-byte alignment. Small objects carry no table.
+            let cap = o.capacity();
+            let table_bytes = if cap > 8 {
+                5 * cap / 4 * mem::size_of::<u32>()
+            } else {
+                0
+            };
+            let raw = mem::size_of::<u64>()
+                + cap * (mem::size_of::<IString>() + mem::size_of::<IValue>())
+                + table_bytes;
             assert_eq!(
                 x.mem_allocated(),
                 o.iter()
                     .map(|(k, v)| k.mem_allocated() + v.mem_allocated())
                     .sum::<usize>()
-                    + o.capacity() * (mem::size_of::<IString>() + mem::size_of::<IValue>())
-                    + 5 * o.capacity() / 4 * mem::size_of::<usize>()
-                    + 2 * mem::size_of::<usize>()
+                    + ((raw + 7) & !7)
             );
         }
     }
