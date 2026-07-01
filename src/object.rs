@@ -655,6 +655,8 @@ impl IObject {
 
     fn dealloc(ptr: *mut Header) {
         unsafe {
+            // SAFETY: `cap` is read from a live header that was successfully allocated, so its
+            // layout was valid then and is valid now; the unwrap cannot fail.
             let layout = Self::layout((*ptr).cap()).unwrap();
             dealloc(ptr.cast(), layout);
         }
@@ -918,6 +920,8 @@ impl IObject {
         if self.is_static() {
             0
         } else {
+            // Layout of a live object's own capacity; it allocated successfully, so
+            // recomputing its layout cannot fail.
             Self::layout(self.capacity()).unwrap().size()
                 + self
                     .iter()
@@ -1257,6 +1261,8 @@ impl<A: DefragAllocator> Defrag<A> for IObject {
         }
         unsafe {
             let ptr = self.0.ptr().cast::<Header>();
+            // SAFETY: `cap` is read from a live header that already allocated with this layout,
+            // so recomputing it cannot fail.
             let new_ptr = defrag_allocator.realloc_ptr(ptr, Self::layout((*ptr).cap()).unwrap());
             self.0.set_ptr(new_ptr.cast());
         }
