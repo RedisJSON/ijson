@@ -103,13 +103,12 @@ impl<'a> SplitHeader<'a> {
     fn find_bucket(&self, key: &IString) -> Result<usize, usize> {
         if !has_table(self.cap) {
             // Small object: linear scan the items array.
-            for (i, kvp) in self.items.iter().enumerate() {
-                if &kvp.key == key {
-                    return Ok(i);
-                }
-            }
             // No table bucket to report; insertion just appends.
-            return Err(usize::MAX);
+            return self
+                .items
+                .iter()
+                .position(|kvp| &kvp.key == key)
+                .ok_or(usize::MAX);
         }
         let hash_cap = hash_capacity(self.cap);
         let initial_bucket = hash_bucket(key, hash_cap);
