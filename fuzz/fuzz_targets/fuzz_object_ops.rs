@@ -41,7 +41,7 @@ fuzz_target!(|ops: Vec<Op>| {
                 assert_eq!(got, oracle.get(&id).copied());
             }
         }
-        assert_eq!(obj.len(), oracle.len());
+        assert_eq!(obj.len() as usize, oracle.len());
     }
 
     // Final agreement: every oracle key present with the right value.
