@@ -139,7 +139,7 @@ impl Serialize for IArray {
                 s.end()
             }
             _ => {
-                let mut s = serializer.serialize_seq(Some(self.len()))?;
+                let mut s = serializer.serialize_seq(Some(self.len() as usize))?;
                 for v in self {
                     s.serialize_element(&v)?;
                 }
@@ -154,7 +154,7 @@ impl Serialize for IObject {
     where
         S: Serializer,
     {
-        let mut m = serializer.serialize_map(Some(self.len()))?;
+        let mut m = serializer.serialize_map(Some(self.len() as usize))?;
         for (k, v) in self {
             m.serialize_entry(k, v)?;
         }

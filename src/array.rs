@@ -451,10 +451,8 @@ impl Header {
     const TAG_MASK: u64 = 0xF;
     const TAG_SHIFT: u64 = 60;
 
-    const fn new(len: usize, cap: usize, tag: ArrayTag) -> Result<Self, IJsonError> {
-        // assert!(len <= Self::LEN_MASK as usize, "Length exceeds 30-bit limit");
-        // assert!(cap <= Self::CAP_MASK as usize, "Capacity exceeds 30-bit limit");
-        if len > Self::LEN_MASK as usize || cap > Self::CAP_MASK as usize {
+    const fn new(len: u32, cap: u32, tag: ArrayTag) -> Result<Self, IJsonError> {
+        if len as u64 > Self::LEN_MASK || cap as u64 > Self::CAP_MASK {
             return Err(IJsonError::Alloc(AllocError));
         }
 
@@ -465,12 +463,12 @@ impl Header {
         Ok(Self { packed })
     }
 
-    fn len(&self) -> usize {
-        ((self.packed >> Self::LEN_SHIFT) & Self::LEN_MASK) as usize
+    fn len(&self) -> u32 {
+        ((self.packed >> Self::LEN_SHIFT) & Self::LEN_MASK) as u32
     }
 
-    fn cap(&self) -> usize {
-        ((self.packed >> Self::CAP_SHIFT) & Self::CAP_MASK) as usize
+    fn cap(&self) -> u32 {
+        ((self.packed >> Self::CAP_SHIFT) & Self::CAP_MASK) as u32
     }
 
     fn type_tag(&self) -> ArrayTag {
@@ -479,18 +477,15 @@ impl Header {
         unsafe { std::mem::transmute(tag_value) }
     }
 
-    fn set_len(&mut self, len: usize) {
-        assert!(
-            len <= Self::LEN_MASK as usize,
-            "Length exceeds 30-bit limit"
-        );
+    fn set_len(&mut self, len: u32) {
+        assert!(len as u64 <= Self::LEN_MASK, "Length exceeds 30-bit limit");
         self.packed = (self.packed & !(Self::LEN_MASK << Self::LEN_SHIFT))
             | (((len as u64) & Self::LEN_MASK) << Self::LEN_SHIFT);
     }
 
-    fn set_cap(&mut self, cap: usize) {
+    fn set_cap(&mut self, cap: u32) {
         assert!(
-            cap <= Self::CAP_MASK as usize,
+            cap as u64 <= Self::CAP_MASK,
             "Capacity exceeds 30-bit limit"
         );
         self.packed = (self.packed & !(Self::CAP_MASK << Self::CAP_SHIFT))
@@ -537,7 +532,7 @@ trait HeaderRef<'a>: ThinRefExt<'a, Header> {
 
     // Safety: The array must contain the expected type, and len must be accurate
     unsafe fn as_slice_unchecked<T>(&self) -> &'a [T] {
-        from_raw_parts(self.raw_array_ptr().cast::<T>(), self.len())
+        from_raw_parts(self.raw_array_ptr().cast::<T>(), self.len() as usize)
     }
 }
 
@@ -574,7 +569,7 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
 
     // Safety: The array must contain the expected type, and len must be accurate
     unsafe fn as_mut_slice_unchecked<T>(self) -> &'a mut [T] {
-        let len = self.len();
+        let len = self.len() as usize;
         from_raw_parts_mut(self.raw_array_ptr_mut().cast::<T>(), len)
     }
 
@@ -582,7 +577,7 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
     // and the item must be compatible with the array type.
     unsafe fn push(&mut self, item: IValue) {
         use ArrayTag::*;
-        let index = self.len();
+        let index = self.len() as usize;
 
         macro_rules! push_impl {
             ($(($tag:ident, $ty:ty)),*) => {
@@ -608,14 +603,14 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
             (U64, u64),
             (F64, f64)
         );
-        self.set_len(index + 1);
+        self.set_len(index as u32 + 1);
     }
 
     // Safety: Space must already be allocated for the item,
     // and the item must be a number. The array type must be a floating-point type.
     unsafe fn push_lossy(&mut self, item: IValue) {
         use ArrayTag::*;
-        let index = self.len();
+        let index = self.len() as usize;
 
         macro_rules! push_lossy_impl {
             ($(($tag:ident, $ty:ty)),*) => {
@@ -628,7 +623,7 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
         }
 
         push_lossy_impl!((F16, f16), (BF16, bf16), (F32, f32), (F64, f64));
-        self.set_len(index + 1);
+        self.set_len(index as u32 + 1);
     }
 
     fn pop(&mut self) -> Option<IValue> {
@@ -639,7 +634,7 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
 
             let new_len = self.len() - 1;
             self.set_len(new_len);
-            let index = new_len;
+            let index = new_len as usize;
 
             macro_rules! pop_impl {
                 ($(($tag:ident, $ty:ty)),*) => {{
@@ -687,7 +682,7 @@ impl Iterator for IntoIter {
 
 impl ExactSizeIterator for IntoIter {
     fn len(&self) -> usize {
-        self.reversed_array.len()
+        self.reversed_array.len() as usize
     }
 }
 
@@ -733,14 +728,14 @@ impl ArrayTag {
 }
 
 impl IArray {
-    fn layout(cap: usize, tag: ArrayTag) -> Result<Layout, LayoutError> {
+    fn layout(cap: u32, tag: ArrayTag) -> Result<Layout, LayoutError> {
         Ok(Layout::new::<Header>()
-            .extend(Layout::array::<u8>(cap * tag.element_size())?)?
+            .extend(Layout::array::<u8>(cap as usize * tag.element_size())?)?
             .0
             .pad_to_align())
     }
 
-    fn alloc(cap: usize, tag: ArrayTag) -> Result<*mut Header, IJsonError> {
+    fn alloc(cap: u32, tag: ArrayTag) -> Result<*mut Header, IJsonError> {
         unsafe {
             let ptr = alloc(Self::layout(cap, tag).map_err(|_| AllocError)?).cast::<Header>();
             ptr.write(Header::new(0, cap, tag)?);
@@ -748,7 +743,7 @@ impl IArray {
         }
     }
 
-    fn realloc(ptr: *mut Header, new_cap: usize) -> Result<*mut Header, IJsonError> {
+    fn realloc(ptr: *mut Header, new_cap: u32) -> Result<*mut Header, IJsonError> {
         unsafe {
             let tag = (*ptr).type_tag();
             let old_layout = Self::layout((*ptr).cap(), tag).map_err(|_| AllocError)?;
@@ -783,6 +778,8 @@ impl IArray {
     /// Constructs a new `IArray` with the specified capacity and array type.
     #[must_use]
     fn with_capacity_and_tag(cap: usize, tag: ArrayTag) -> Result<Self, IJsonError> {
+        // Validate the external size into the internal 32-bit domain once, here at the edge.
+        let cap = u32::try_from(cap).map_err(|_| AllocError)?;
         if cap == 0 {
             Ok(Self::new())
         } else {
@@ -807,7 +804,7 @@ impl IArray {
     /// Returns the capacity of the array. This is the maximum number of items the array
     /// can hold without reallocating.
     #[must_use]
-    pub fn capacity(&self) -> usize {
+    pub fn capacity(&self) -> u32 {
         self.header().cap()
     }
 
@@ -826,13 +823,13 @@ impl IArray {
                 - std::mem::size_of::<Header>();
             let new_cap = (payload_bytes / new_tag.element_size()).min(Header::CAP_MASK as usize);
             unsafe {
-                self.header_mut().set_cap(new_cap);
+                self.header_mut().set_cap(new_cap as u32);
                 self.header_mut().set_tag(new_tag);
             }
             return Ok(());
         }
 
-        let mut new_array = Self::with_capacity_and_tag(current_len, new_tag)?;
+        let mut new_array = Self::with_capacity_and_tag(current_len as usize, new_tag)?;
         unsafe {
             let src_hd = self.header();
             let src_tag = src_hd.type_tag();
@@ -861,7 +858,7 @@ impl IArray {
         dst: &mut IArray,
         src_tag: ArrayTag,
         dst_tag: ArrayTag,
-        len: usize,
+        len: u32,
     ) {
         use ArrayTag::*;
 
@@ -912,7 +909,7 @@ impl IArray {
 
     /// Returns the number of items currently stored in the array.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> u32 {
         self.header().len()
     }
 
@@ -968,14 +965,14 @@ impl IArray {
         self.header_mut().as_mut_slice_unchecked::<T>()
     }
 
-    fn resize_internal(&mut self, cap: usize) -> Result<(), IJsonError> {
+    fn resize_internal(&mut self, cap: u32) -> Result<(), IJsonError> {
         if self.is_static() || cap == 0 {
             let tag = if self.is_static() {
                 ArrayTag::Heterogeneous
             } else {
                 self.header().type_tag()
             };
-            *self = Self::with_capacity_and_tag(cap, tag)?;
+            *self = Self::with_capacity_and_tag(cap as usize, tag)?;
         } else {
             unsafe {
                 let new_ptr = Self::realloc(self.0.ptr().cast(), cap)?;
@@ -987,6 +984,7 @@ impl IArray {
 
     /// Reserves space for at least this many additional items.
     pub fn reserve(&mut self, additional: usize) -> Result<(), IJsonError> {
+        let additional = u32::try_from(additional).map_err(|_| AllocError)?;
         let hd = self.header();
         let current_capacity = hd.cap();
         let desired_capacity = hd.len().checked_add(additional).ok_or(AllocError)?;
@@ -1005,13 +1003,13 @@ impl IArray {
         unsafe {
             let mut hd = self.header_mut();
             if hd.type_tag() == ArrayTag::Heterogeneous {
-                while hd.len() > len {
+                while hd.len() as usize > len {
                     hd.pop();
                 }
             } else {
                 // we don't need to drop primitives
-                if len < hd.len() {
-                    hd.set_len(len);
+                if len < hd.len() as usize {
+                    hd.set_len(len as u32);
                 }
             }
         }
@@ -1051,11 +1049,11 @@ impl IArray {
         unsafe {
             // Safety: cannot be static after calling `reserve`
             let mut hd = self.header_mut();
-            assert!(index <= hd.len());
+            assert!(index <= hd.len() as usize);
 
             // Safety: We just reserved enough space for at least one extra item
             hd.push(item);
-            if index < hd.len() {
+            if index < hd.len() as usize {
                 use ArraySliceMut::*;
                 match hd.reborrow().items_slice_mut() {
                     Heterogeneous(slice) => slice[index..].rotate_right(1),
@@ -1086,7 +1084,7 @@ impl IArray {
     ///
     /// If the index is outside the array bounds, `None` is returned.
     pub fn remove(&mut self, index: usize) -> Option<IValue> {
-        if index < self.len() {
+        if index < self.len() as usize {
             // Safety: cannot be static if index < len
             unsafe {
                 use ArraySliceMut::*;
@@ -1122,12 +1120,12 @@ impl IArray {
     ///
     /// If the index is outside the array bounds, `None` is returned.
     pub fn swap_remove(&mut self, index: usize) -> Option<IValue> {
-        if index < self.len() {
+        if index < self.len() as usize {
             // Safety: cannot be static if index < len
             unsafe {
                 use ArraySliceMut::*;
                 let mut hd = self.header_mut();
-                let last_index = hd.len() - 1;
+                let last_index = hd.len() as usize - 1;
                 match hd.reborrow().items_slice_mut() {
                     Heterogeneous(slice) => slice.swap(index, last_index),
                     I8(slice) => slice.swap(index, last_index),
@@ -1284,7 +1282,7 @@ impl IArray {
         let tag = hd.type_tag();
 
         // Safety: cannot be Err because self is valid
-        let mut res = Self::with_capacity_and_tag(len, tag).unwrap();
+        let mut res = Self::with_capacity_and_tag(len as usize, tag).unwrap();
 
         if len > 0 {
             if tag == ArrayTag::Heterogeneous {
@@ -1303,7 +1301,7 @@ impl IArray {
                     let src_ptr = hd.raw_array_ptr();
                     let dst_ptr = res.header_mut().raw_array_ptr_mut();
                     let element_size = tag.element_size();
-                    let total_bytes = len * element_size;
+                    let total_bytes = len as usize * element_size;
                     std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, total_bytes);
 
                     res.header_mut().set_len(len);
@@ -1563,7 +1561,7 @@ macro_rules! extend_impl_int {
                             let mut index = self.header().len();
                             let array_ptr = self.header_mut().raw_array_ptr_mut().cast::<$target_ty>();
                             for v in iter {
-                                array_ptr.add(index).write(v as $target_ty);
+                                array_ptr.add(index as usize).write(v as $target_ty);
                                 index += 1;
                             }
                             self.header_mut().set_len(index);
@@ -1616,7 +1614,7 @@ macro_rules! extend_impl_float {
                             let mut index = self.header().len();
                             let array_ptr = self.header_mut().raw_array_ptr_mut().cast::<$target_ty>();
                             for v in iter {
-                                array_ptr.add(index).write(paste::paste!([<convert_ $target_ty>])(v));
+                                array_ptr.add(index as usize).write(paste::paste!([<convert_ $target_ty>])(v));
                                 index += 1;
                             }
                             self.header_mut().set_len(index);
@@ -2189,7 +2187,7 @@ mod tests {
         assert_eq!(header.cap(), 456);
         assert_eq!(header.type_tag(), ArrayTag::I32);
 
-        let max_30_bit = (1usize << 30) - 1;
+        let max_30_bit = (1u32 << 30) - 1;
         let header_max = Header::new(max_30_bit, max_30_bit, ArrayTag::F64).unwrap();
         assert_eq!(header_max.len(), max_30_bit);
         assert_eq!(header_max.cap(), max_30_bit);
@@ -3197,7 +3195,7 @@ mod tests {
         assert_eq!(arr.len(), 0);
         assert_eq!(arr.header().type_tag(), ArrayTag::Heterogeneous);
 
-        let total = IArray::layout(cap, ArrayTag::Heterogeneous)
+        let total = IArray::layout(cap as u32, ArrayTag::Heterogeneous)
             .expect("layout")
             .size();
         let payload = total - std::mem::size_of::<Header>();
@@ -3205,7 +3203,7 @@ mod tests {
 
         arr.push(255u8).unwrap();
         assert_eq!(arr.header().type_tag(), ArrayTag::U8);
-        assert_eq!(arr.capacity(), expected);
+        assert_eq!(arr.capacity() as usize, expected);
         assert!(!arr.is_static());
     }
 
@@ -3216,7 +3214,7 @@ mod tests {
         assert_eq!(arr.len(), 0);
         assert_eq!(arr.header().type_tag(), ArrayTag::Heterogeneous);
 
-        let total = IArray::layout(cap, ArrayTag::Heterogeneous)
+        let total = IArray::layout(cap as u32, ArrayTag::Heterogeneous)
             .expect("layout")
             .size();
         let payload = total - std::mem::size_of::<Header>();
@@ -3224,7 +3222,7 @@ mod tests {
 
         arr.push(f64::MAX).unwrap();
         assert_eq!(arr.header().type_tag(), ArrayTag::F64);
-        assert_eq!(arr.capacity(), expected);
+        assert_eq!(arr.capacity() as usize, expected);
         assert!(!arr.is_static());
     }
 
@@ -3235,13 +3233,15 @@ mod tests {
         assert_eq!(arr.len(), 0);
         assert_eq!(arr.header().type_tag(), ArrayTag::U8);
 
-        let total = IArray::layout(cap, ArrayTag::U8).expect("layout").size();
+        let total = IArray::layout(cap as u32, ArrayTag::U8)
+            .expect("layout")
+            .size();
         let payload = total - std::mem::size_of::<Header>();
         let expected = payload / ArrayTag::F64.element_size();
 
         arr.push(f64::MAX).unwrap();
         assert_eq!(arr.header().type_tag(), ArrayTag::F64);
-        assert_eq!(arr.capacity(), expected);
+        assert_eq!(arr.capacity() as usize, expected);
         assert!(!arr.is_static());
     }
 
@@ -3267,7 +3267,7 @@ mod tests {
             let mut arr = IArray::new();
 
             for j in 0..1000 {
-                let index = rng.gen_range(0..arr.len() + 1);
+                let index = rng.gen_range(0..arr.len() as usize + 1);
                 if rng.gen() {
                     arr.insert(index, j).unwrap();
                 } else {

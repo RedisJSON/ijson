@@ -407,8 +407,8 @@ impl IValue {
         use ValueType::*;
         // Safety: we checked the type
         match self.type_() {
-            Array => Some(unsafe { self.as_array_unchecked().len() }),
-            Object => Some(unsafe { self.as_object_unchecked().len() }),
+            Array => Some(unsafe { self.as_array_unchecked().len() as usize }),
+            Object => Some(unsafe { self.as_object_unchecked().len() as usize }),
             _ => None,
         }
     }
@@ -1253,7 +1253,8 @@ mod tests {
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Array(u) if *u == a));
             assert_eq!(
                 x.mem_allocated(),
-                mem::size_of::<usize>() + ((a.capacity() * mem::size_of::<i32>() + 7) & !7)
+                mem::size_of::<usize>()
+                    + ((a.capacity() as usize * mem::size_of::<i32>() + 7) & !7)
             );
         }
     }
@@ -1272,7 +1273,7 @@ mod tests {
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Object(u) if *u == o));
             // Layout: packed 8-byte header + KeyValuePair array + (only when cap > 8)
             // a u32 hash table, padded to 8-byte alignment. Small objects carry no table.
-            let cap = o.capacity();
+            let cap = o.capacity() as usize;
             let table_bytes = if cap > 8 {
                 5 * cap / 4 * mem::size_of::<u32>()
             } else {

@@ -622,7 +622,7 @@ impl<'de> Deserializer<'de> for &'de IArray {
         V: Visitor<'de>,
     {
         use crate::array::ArraySliceRef;
-        let len = self.len();
+        let len = self.len() as usize;
 
         macro_rules! deserialize_typed_array {
             ($variant:ident, $slice:expr) => {{
@@ -683,7 +683,7 @@ impl<'de> Deserializer<'de> for &'de IObject {
     where
         V: Visitor<'de>,
     {
-        let len = self.len();
+        let len = self.len() as usize;
         let mut deserializer = ObjectAccess::new(self);
         let seq = visitor.visit_map(&mut deserializer)?;
         let remaining = deserializer.iter.len();

@@ -36,28 +36,22 @@ impl Header {
     const CAP_MASK: u64 = (1u64 << 32) - 1;
     const CAP_SHIFT: u64 = 32;
 
-    const fn new(len: usize, cap: usize) -> Result<Self, IJsonError> {
-        if len > Self::LEN_MASK as usize || cap > Self::CAP_MASK as usize {
-            return Err(IJsonError::Alloc(AllocError));
-        }
+    const fn new(len: u32, cap: u32) -> Result<Self, IJsonError> {
+        // The packed len/cap fields are exactly 32 bits, so any u32 fits.
         let packed = ((len as u64) & Self::LEN_MASK) << Self::LEN_SHIFT
             | ((cap as u64) & Self::CAP_MASK) << Self::CAP_SHIFT;
         Ok(Self { packed })
     }
 
-    fn len(&self) -> usize {
-        ((self.packed >> Self::LEN_SHIFT) & Self::LEN_MASK) as usize
+    fn len(&self) -> u32 {
+        ((self.packed >> Self::LEN_SHIFT) & Self::LEN_MASK) as u32
     }
 
-    fn cap(&self) -> usize {
-        ((self.packed >> Self::CAP_SHIFT) & Self::CAP_MASK) as usize
+    fn cap(&self) -> u32 {
+        ((self.packed >> Self::CAP_SHIFT) & Self::CAP_MASK) as u32
     }
 
-    fn set_len(&mut self, len: usize) {
-        assert!(
-            len <= Self::LEN_MASK as usize,
-            "Length exceeds 32-bit limit"
-        );
+    fn set_len(&mut self, len: u32) {
         self.packed = (self.packed & !(Self::LEN_MASK << Self::LEN_SHIFT))
             | (((len as u64) & Self::LEN_MASK) << Self::LEN_SHIFT);
     }
@@ -71,15 +65,16 @@ struct KeyValuePair {
 }
 
 /// Objects with capacity at or below this threshold store no hash table.
-const SMALL_OBJECT_THRESHOLD: usize = 8;
+const SMALL_OBJECT_THRESHOLD: u32 = 8;
 
 /// Whether an object of this capacity carries a hash table.
-fn has_table(cap: usize) -> bool {
+fn has_table(cap: u32) -> bool {
     cap > SMALL_OBJECT_THRESHOLD
 }
 
-fn hash_capacity(cap: usize) -> usize {
-    cap + cap / 4
+fn hash_capacity(cap: u32) -> usize {
+    // Widen before the arithmetic: `cap + cap/4` would overflow u32 near its ceiling.
+    cap as usize + cap as usize / 4
 }
 
 fn hash_fn(s: &IString) -> usize {
@@ -93,14 +88,14 @@ fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
 }
 
 struct SplitHeader<'a> {
-    cap: usize,
+    cap: u32,
     items: &'a [KeyValuePair],
     table: &'a [u32],
 }
 
 impl<'a> SplitHeader<'a> {
     // Returns the *item index* (Ok) in no-table mode, or the *table bucket* (Ok) in table mode.
-    fn find_bucket(&self, key: &IString) -> Result<usize, usize> {
+    fn find_bucket(&self, key: &IString) -> Result<u32, u32> {
         if !has_table(self.cap) {
             // Small object: linear scan the items array.
             // No table bucket to report; insertion just appends.
@@ -108,7 +103,8 @@ impl<'a> SplitHeader<'a> {
                 .items
                 .iter()
                 .position(|kvp| &kvp.key == key)
-                .ok_or(usize::MAX);
+                .map(|i| i as u32)
+                .ok_or(u32::MAX);
         }
         let hash_cap = hash_capacity(self.cap);
         let initial_bucket = hash_bucket(key, hash_cap);
@@ -120,30 +116,30 @@ impl<'a> SplitHeader<'a> {
 
                 // If we hit an empty bucket, we know the key is not present
                 if index == u32::MAX {
-                    return Err(bucket);
+                    return Err(bucket as u32);
                 }
 
                 // If the bucket contains our key, we found the bucket
                 let k = &self.items.get_unchecked(index as usize).key;
                 if k == key {
-                    return Ok(bucket);
+                    return Ok(bucket as u32);
                 }
 
                 // If the bucket contains a different key, and its probe length is less than
                 // ours, then we know our key is not present or we would have evicted this one.
                 let key_dist = (bucket + hash_cap - hash_bucket(k, hash_cap)) % hash_cap;
                 if key_dist < i {
-                    return Err(bucket);
+                    return Err(bucket as u32);
                 }
             }
         }
-        Err(usize::MAX)
+        Err(u32::MAX)
     }
     // Safety: index must be in bounds
-    unsafe fn find_bucket_from_index(&self, index: usize) -> usize {
+    unsafe fn find_bucket_from_index(&self, index: usize) -> u32 {
         // No-table mode: the "bucket" identifying an item is the item index itself.
         if !has_table(self.cap) {
-            return index;
+            return index as u32;
         }
         let hash_cap = hash_capacity(self.cap);
         let key = &self.items.get_unchecked(index).key;
@@ -155,12 +151,12 @@ impl<'a> SplitHeader<'a> {
             bucket = (bucket + 1) % hash_cap;
         }
 
-        bucket
+        bucket as u32
     }
 }
 
 struct SplitHeaderMut<'a> {
-    cap: usize,
+    cap: u32,
     items: &'a mut [KeyValuePair],
     table: &'a mut [u32],
 }
@@ -176,8 +172,9 @@ impl<'a> SplitHeaderMut<'a> {
     // Safety: Bucket must be valid and empty.
     //
     // Shifts elements up to fill the empty space if they are not at their ideal location.
-    unsafe fn unshift(&mut self, initial_bucket: usize) {
+    unsafe fn unshift(&mut self, initial_bucket: u32) {
         let hash_cap = hash_capacity(self.cap);
+        let initial_bucket = initial_bucket as usize;
         let mut prev_bucket = initial_bucket;
         for i in 1..hash_cap {
             let bucket = (initial_bucket + i) % hash_cap;
@@ -204,13 +201,13 @@ impl<'a> SplitHeaderMut<'a> {
     //
     // Inserts an index into the table, shifting existing elements down until
     // there's an empty slot.
-    unsafe fn shift(&mut self, initial_bucket: usize, index: usize) {
+    unsafe fn shift(&mut self, initial_bucket: u32, mut index: u32) {
         // No-table mode keeps no hash table to insert into.
         if !has_table(self.cap) {
             return;
         }
         let hash_cap = hash_capacity(self.cap);
-        let mut index = index as u32;
+        let initial_bucket = initial_bucket as usize;
         for i in 0..hash_cap {
             // If we hit an empty bucket, we're done
             if index == u32::MAX {
@@ -223,10 +220,11 @@ impl<'a> SplitHeaderMut<'a> {
     }
     // Safety: Bucket index must be in range and occupied. In no-table mode, `bucket`
     // is the item index.
-    unsafe fn remove_bucket(&mut self, bucket: usize) {
+    unsafe fn remove_bucket(&mut self, bucket: u32) {
         if !has_table(self.cap) {
             // `bucket` is the item index. Swap it to the back so the caller's `pop`
             // removes it; the displaced last item lands at `bucket`.
+            let bucket = bucket as usize;
             let last_index = self.items.len() - 1;
             if bucket != last_index {
                 self.items.swap(bucket, last_index);
@@ -235,7 +233,7 @@ impl<'a> SplitHeaderMut<'a> {
         }
 
         // Remove the entry from the table
-        let index = mem::replace(self.table.get_unchecked_mut(bucket), u32::MAX) as usize;
+        let index = mem::replace(self.table.get_unchecked_mut(bucket as usize), u32::MAX) as usize;
 
         // Unshift any displaced buckets, so the table is valid again
         self.unshift(bucket);
@@ -249,7 +247,7 @@ impl<'a> SplitHeaderMut<'a> {
 
             // Update it to point to the location where that item will be
             // after we swap it.
-            *self.table.get_unchecked_mut(bucket_to_update) = index as u32;
+            *self.table.get_unchecked_mut(bucket_to_update as usize) = index as u32;
 
             // Swap the element to be removed to the back
             self.items.swap(index, last_index);
@@ -264,7 +262,7 @@ trait HeaderRef<'a>: ThinRefExt<'a, Header> {
     }
     fn hashes_ptr(&self) -> *const u32 {
         // Safety: pointers to the end of structs are allowed
-        unsafe { self.items_ptr().add(self.cap()).cast() }
+        unsafe { self.items_ptr().add(self.cap() as usize).cast() }
     }
     fn split(&self) -> SplitHeader<'a> {
         let cap = self.cap();
@@ -272,7 +270,7 @@ trait HeaderRef<'a>: ThinRefExt<'a, Header> {
         unsafe {
             SplitHeader {
                 cap,
-                items: std::slice::from_raw_parts(self.items_ptr(), self.len()),
+                items: std::slice::from_raw_parts(self.items_ptr(), self.len() as usize),
                 // Small objects carry no table: present an empty slice.
                 table: if has_table(cap) {
                     std::slice::from_raw_parts(self.hashes_ptr(), hash_capacity(cap))
@@ -291,12 +289,12 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
     }
     fn hashes_ptr_mut(&mut self) -> *mut u32 {
         // Safety: pointers to the end of structs are allowed
-        unsafe { self.items_ptr_mut().add(self.cap()).cast() }
+        unsafe { self.items_ptr_mut().add(self.cap() as usize).cast() }
     }
     fn split_mut(mut self) -> SplitHeaderMut<'a> {
         // Safety: Header `len` and `cap` must be accurate
         let cap = self.cap();
-        let len = self.len();
+        let len = self.len() as usize;
         let item_ptr = self.items_ptr_mut();
         unsafe {
             // Small objects carry no table: present an empty slice.
@@ -323,15 +321,15 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
     unsafe fn pop(&mut self) -> (IString, IValue) {
         let new_len = self.len() - 1;
         self.set_len(new_len);
-        let item = self.items_ptr_mut().add(new_len).read();
+        let item = self.items_ptr_mut().add(new_len as usize).read();
         (item.key, item.value)
     }
-    unsafe fn push(&mut self, key: IString, value: IValue) -> usize {
+    unsafe fn push(&mut self, key: IString, value: IValue) -> u32 {
         let res = self.len();
         self.items_ptr_mut()
-            .add(res)
+            .add(res as usize)
             .write(KeyValuePair { key, value });
-        self.set_len(res + 1);
+        self.set_len(res.checked_add(1).expect("object length overflow"));
         res
     }
     fn clear(&mut self) {
@@ -384,7 +382,7 @@ impl<'a> HeaderMut<'a> for ThinMut<'a, Header> {
 /// A view into an occupied entry in an [`IObject`]. It is part of the [`Entry`] enum.
 pub struct OccupiedEntry<'a> {
     header: ThinMut<'a, Header>,
-    bucket: usize,
+    bucket: u32,
 }
 
 impl<'a> Debug for OccupiedEntry<'a> {
@@ -402,9 +400,9 @@ impl<'a> OccupiedEntry<'a> {
         let split = self.header.split();
         unsafe {
             let index = if has_table(split.cap) {
-                *split.table.get_unchecked(self.bucket) as usize
+                *split.table.get_unchecked(self.bucket as usize) as usize
             } else {
-                self.bucket
+                self.bucket as usize
             };
             let kvp = split.items.get_unchecked(index);
             (&kvp.key, &kvp.value)
@@ -415,9 +413,9 @@ impl<'a> OccupiedEntry<'a> {
         let split = self.header.reborrow().split_mut();
         unsafe {
             let index = if has_table(split.cap) {
-                *split.table.get_unchecked(self.bucket) as usize
+                *split.table.get_unchecked(self.bucket as usize) as usize
             } else {
-                self.bucket
+                self.bucket as usize
             };
             let kvp = split.items.get_unchecked_mut(index);
             (&kvp.key, &mut kvp.value)
@@ -428,9 +426,9 @@ impl<'a> OccupiedEntry<'a> {
         let split = self.header.split_mut();
         unsafe {
             let index = if has_table(split.cap) {
-                *split.table.get_unchecked(self.bucket) as usize
+                *split.table.get_unchecked(self.bucket as usize) as usize
             } else {
-                self.bucket
+                self.bucket as usize
             };
             let kvp = split.items.get_unchecked_mut(index);
             (&kvp.key, &mut kvp.value)
@@ -483,7 +481,7 @@ impl<'a> OccupiedEntry<'a> {
 /// A view into a vacant entry in an [`IObject`]. It is part of the [`Entry`] enum.
 pub struct VacantEntry<'a> {
     header: ThinMut<'a, Header>,
-    bucket: usize,
+    bucket: u32,
     key: IString,
 }
 
@@ -602,7 +600,7 @@ impl Iterator for IntoIter {
 
 impl ExactSizeIterator for IntoIter {
     fn len(&self) -> usize {
-        self.reversed_object.len()
+        self.reversed_object.len() as usize
     }
 }
 
@@ -623,9 +621,9 @@ value_subtype_impls!(IObject, into_object, as_object, as_object_mut);
 static EMPTY_HEADER: Header = Header { packed: 0 };
 
 impl IObject {
-    fn layout(cap: usize) -> Result<Layout, LayoutError> {
+    fn layout(cap: u32) -> Result<Layout, LayoutError> {
         let layout = Layout::new::<Header>()
-            .extend(Layout::array::<KeyValuePair>(cap)?)?
+            .extend(Layout::array::<KeyValuePair>(cap as usize)?)?
             .0;
         // Small objects carry no hash table.
         let layout = if has_table(cap) {
@@ -636,7 +634,7 @@ impl IObject {
         Ok(layout.pad_to_align())
     }
 
-    fn alloc(cap: usize) -> Result<*mut Header, IJsonError> {
+    fn alloc(cap: u32) -> Result<*mut Header, IJsonError> {
         unsafe {
             let hd = alloc(Self::layout(cap).map_err(|_| AllocError)?).cast::<Header>();
             std::ptr::write(hd, Header::new(0, cap)?);
@@ -674,6 +672,8 @@ impl IObject {
     /// 32-bit limit.
     #[must_use]
     pub fn with_capacity(cap: usize) -> Result<Self, IJsonError> {
+        // Validate the external size into the internal 32-bit domain once, here at the edge.
+        let cap = u32::try_from(cap).map_err(|_| AllocError)?;
         if cap == 0 {
             Ok(Self::new())
         } else {
@@ -698,12 +698,12 @@ impl IObject {
     /// Returns the capacity of the object. This is the maximum number of entries the object
     /// can hold without reallocating.
     #[must_use]
-    pub fn capacity(&self) -> usize {
+    pub fn capacity(&self) -> u32 {
         self.header().cap()
     }
     /// Returns the number of entries currently stored in the object.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub fn len(&self) -> u32 {
         self.header().len()
     }
     /// Returns `true` if the object is empty.
@@ -712,8 +712,8 @@ impl IObject {
         self.len() == 0
     }
 
-    fn resize_internal(&mut self, cap: usize) -> Result<(), IJsonError> {
-        let old_obj = mem::replace(self, Self::with_capacity(cap)?);
+    fn resize_internal(&mut self, cap: u32) -> Result<(), IJsonError> {
+        let old_obj = mem::replace(self, Self::with_capacity(cap as usize)?);
         if !self.is_static() {
             unsafe {
                 let mut hd = self.header_mut();
@@ -733,13 +733,17 @@ impl IObject {
     /// # Errors
     /// Returns an `AllocError` if memory allocation fails.
     pub fn reserve(&mut self, additional: usize) -> Result<(), IJsonError> {
+        let additional = u32::try_from(additional).map_err(|_| AllocError)?;
         let hd = self.header();
         let current_capacity = hd.cap();
         let desired_capacity = hd.len().checked_add(additional).ok_or(AllocError)?;
         if current_capacity >= desired_capacity {
             return Ok(());
         }
-        self.resize_internal(cmp::max(current_capacity * 2, desired_capacity.max(4)))
+        self.resize_internal(cmp::max(
+            current_capacity.checked_mul(2).ok_or(AllocError)?,
+            desired_capacity.max(4),
+        ))
     }
 
     /// Returns a view of an entry within this object.
@@ -876,7 +880,7 @@ impl IObject {
             // Safety: not static
             let mut hd = unsafe { self.header_mut() };
             let mut index = 0;
-            while index < hd.len() {
+            while index < hd.len() as usize {
                 let mut split = hd.reborrow().split_mut();
 
                 // Safety: Indices are in range
@@ -897,7 +901,7 @@ impl IObject {
     pub(crate) fn clone_impl(&self) -> IValue {
         // Cloning an existing (valid) object never exceeds its capacity, so this
         // cannot fail short of the global allocator aborting.
-        let mut res = Self::with_capacity(self.len()).unwrap();
+        let mut res = Self::with_capacity(self.len() as usize).unwrap();
         for (k, v) in self.iter() {
             res.insert(k.clone(), v.clone()).unwrap();
         }
@@ -1076,9 +1080,9 @@ impl ObjectIndex for &IString {
             // Safety: Bucket index is valid
             unsafe {
                 let index = if has_table(hd.cap) {
-                    *hd.table.get_unchecked(bucket) as usize
+                    *hd.table.get_unchecked(bucket as usize) as usize
                 } else {
-                    bucket
+                    bucket as usize
                 };
                 let item = hd.items.get_unchecked(index);
                 Some((&item.key, &item.value))
@@ -1098,9 +1102,9 @@ impl ObjectIndex for &IString {
                 // Safety: Bucket index is valid
                 unsafe {
                     let index = if has_table(hd.cap) {
-                        *hd.table.get_unchecked(bucket) as usize
+                        *hd.table.get_unchecked(bucket as usize) as usize
                     } else {
-                        bucket
+                        bucket as usize
                     };
                     let item = hd.items.get_unchecked_mut(index);
                     Some((&item.key, &mut item.value))
