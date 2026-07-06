@@ -139,7 +139,7 @@ impl Serialize for IArray {
                 s.end()
             }
             _ => {
-                let mut s = serializer.serialize_seq(Some(self.len()))?;
+                let mut s = serializer.serialize_seq(Some(self.len() as usize))?;
                 for v in self {
                     s.serialize_element(&v)?;
                 }
@@ -154,7 +154,7 @@ impl Serialize for IObject {
     where
         S: Serializer,
     {
-        let mut m = serializer.serialize_map(Some(self.len()))?;
+        let mut m = serializer.serialize_map(Some(self.len() as usize))?;
         for (k, v) in self {
             m.serialize_entry(k, v)?;
         }
@@ -293,7 +293,8 @@ impl Serializer for ValueSerializer {
         T: ?Sized + Serialize,
     {
         let mut obj = IObject::new();
-        obj.insert(variant, value.serialize(self)?);
+        obj.insert(variant, value.serialize(self)?)
+            .map_err(|e| Error::custom(e.to_string()))?;
         Ok(obj.into())
     }
 
@@ -345,7 +346,8 @@ impl Serializer for ValueSerializer {
 
     fn serialize_map(self, len: Option<usize>) -> Result<Self::SerializeMap, Self::Error> {
         Ok(SerializeObject {
-            object: IObject::with_capacity(len.unwrap_or(0)),
+            object: IObject::with_capacity(len.unwrap_or(0))
+                .map_err(|e| Error::custom(e.to_string()))?,
             next_key: None,
         })
     }
@@ -367,7 +369,7 @@ impl Serializer for ValueSerializer {
     ) -> Result<Self::SerializeStructVariant, Self::Error> {
         Ok(SerializeObjectVariant {
             name: variant.into(),
-            object: IObject::with_capacity(len),
+            object: IObject::with_capacity(len).map_err(|e| Error::custom(e.to_string()))?,
         })
     }
 }
@@ -458,7 +460,9 @@ impl SerializeTupleVariant for SerializeArrayVariant {
 
     fn end(self) -> Result<IValue, Self::Error> {
         let mut object = IObject::new();
-        object.insert(self.name, self.array);
+        object
+            .insert(self.name, self.array)
+            .map_err(|e| Error::custom(e.to_string()))?;
 
         Ok(object.into())
     }
@@ -486,7 +490,9 @@ impl SerializeMap for SerializeObject {
             .next_key
             .take()
             .expect("serialize_value called before serialize_key");
-        self.object.insert(key, value.serialize(ValueSerializer)?);
+        self.object
+            .insert(key, value.serialize(ValueSerializer)?)
+            .map_err(|e| Error::custom(e.to_string()))?;
         Ok(())
     }
 
@@ -699,13 +705,17 @@ impl SerializeStructVariant for SerializeObjectVariant {
     where
         T: ?Sized + Serialize,
     {
-        self.object.insert(key, value.serialize(ValueSerializer)?);
+        self.object
+            .insert(key, value.serialize(ValueSerializer)?)
+            .map_err(|e| Error::custom(e.to_string()))?;
         Ok(())
     }
 
     fn end(self) -> Result<IValue, Self::Error> {
         let mut object = IObject::new();
-        object.insert(self.name, self.object);
+        object
+            .insert(self.name, self.object)
+            .map_err(|e| Error::custom(e.to_string()))?;
         Ok(object.into())
     }
 }

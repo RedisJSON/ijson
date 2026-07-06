@@ -36,11 +36,13 @@ pub mod unsafe_string;
 #[cfg(not(feature = "thread_safe"))]
 pub use unsafe_string::IString;
 
+pub mod convert;
 pub mod error;
 mod thin;
 mod value;
 
 pub use array::{FloatType, IArray};
+pub use convert::{TryCollect, TryExtend, TryFromIterator};
 pub use number::INumber;
 pub use object::IObject;
 use std::alloc::Layout;

@@ -166,7 +166,7 @@ macro_rules! ijson_internal {
 
     // Insert the current entry followed by trailing comma.
     (@object $object:ident [$($key:tt)+] ($value:expr) , $($rest:tt)*) => {
-        let _ = $object.insert(($($key)+), $value);
+        $object.insert(($($key)+), $value).unwrap();
         ijson_internal!(@object $object () ($($rest)*) ($($rest)*));
     };
 
@@ -177,7 +177,7 @@ macro_rules! ijson_internal {
 
     // Insert the last entry without trailing comma.
     (@object $object:ident [$($key:tt)+] ($value:expr)) => {
-        let _ = $object.insert(($($key)+), $value);
+        $object.insert(($($key)+), $value).unwrap();
     };
 
     // Next value is `null`.

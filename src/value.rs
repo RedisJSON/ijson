@@ -407,8 +407,8 @@ impl IValue {
         use ValueType::*;
         // Safety: we checked the type
         match self.type_() {
-            Array => Some(unsafe { self.as_array_unchecked().len() }),
-            Object => Some(unsafe { self.as_object_unchecked().len() }),
+            Array => Some(unsafe { self.as_array_unchecked().len() as usize }),
+            Object => Some(unsafe { self.as_object_unchecked().len() as usize }),
             _ => None,
         }
     }
@@ -1030,12 +1030,12 @@ impl From<bool> for IValue {
 typed_conversions! {
     INumber: i8, u8, i16, u16, i32, u32, i64, u64, isize, usize;
     IString: String, &String, &mut String, &str, &mut str;
-    IObject:
-        HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
-        BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
 }
 typed_conversions_fallible! {
     INumber: f16, bf16, f32, f64;
+    IObject:
+        HashMap<K, V> where (K: Into<IString>, V: Into<IValue>),
+        BTreeMap<K, V> where (K: Into<IString>, V: Into<IValue>);
     IArray:
         Vec<T> where (T: Into<IValue> + crate::array::private::Sealed),
         Vec<i8>, Vec<u8>, Vec<i16>, Vec<u16>, Vec<i32>, Vec<u32>,
@@ -1253,7 +1253,8 @@ mod tests {
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Array(u) if *u == a));
             assert_eq!(
                 x.mem_allocated(),
-                mem::size_of::<usize>() + ((a.capacity() * mem::size_of::<i32>() + 7) & !7)
+                mem::size_of::<usize>()
+                    + ((a.capacity() as usize * mem::size_of::<i32>() + 7) & !7)
             );
         }
     }
@@ -1261,7 +1262,7 @@ mod tests {
     #[mockalloc::test]
     fn test_object() {
         for v in 4..20 {
-            let mut o: IObject = (0..v).map(|i| (i.to_string(), i)).collect();
+            let mut o: IObject = (0..v).map(|i| (i.to_string(), i)).try_collect().unwrap();
             let mut x = IValue::from(o.clone());
             assert!(x.is_object());
             assert_eq!(x.type_(), ValueType::Object);
@@ -1270,21 +1271,30 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::Object(u) if u == o));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Object(u) if *u == o));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Object(u) if *u == o));
+            // Layout: packed 8-byte header + KeyValuePair array + (only when cap > 8)
+            // a u32 hash table, padded to 8-byte alignment. Small objects carry no table.
+            let cap = o.capacity() as usize;
+            let table_bytes = if cap > 8 {
+                5 * cap / 4 * mem::size_of::<u32>()
+            } else {
+                0
+            };
+            let raw = mem::size_of::<u64>()
+                + cap * (mem::size_of::<IString>() + mem::size_of::<IValue>())
+                + table_bytes;
             assert_eq!(
                 x.mem_allocated(),
                 o.iter()
                     .map(|(k, v)| k.mem_allocated() + v.mem_allocated())
                     .sum::<usize>()
-                    + o.capacity() * (mem::size_of::<IString>() + mem::size_of::<IValue>())
-                    + 5 * o.capacity() / 4 * mem::size_of::<usize>()
-                    + 2 * mem::size_of::<usize>()
+                    + ((raw + 7) & !7)
             );
         }
     }
 
     #[mockalloc::test]
     fn test_into_object_for_object() {
-        let o: IObject = (0..10).map(|i| (i.to_string(), i)).collect();
+        let o: IObject = (0..10).map(|i| (i.to_string(), i)).try_collect().unwrap();
         let x = IValue::from(o.clone());
 
         assert_eq!(x.into_object(), Ok(o));

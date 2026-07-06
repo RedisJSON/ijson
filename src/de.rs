@@ -292,10 +292,12 @@ impl<'de> Visitor<'de> for ObjectVisitor {
     where
         V: MapAccess<'de>,
     {
-        let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0));
+        let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0))
+            .map_err(|_| SError::custom("Failed to allocate object"))?;
         while let Some(k) = visitor.next_key::<IString>()? {
             let v = visitor.next_value_seed(IValueDeserSeed::new(self.fpha_config))?;
-            obj.insert(k, v);
+            obj.insert(k, v)
+                .map_err(|e| SError::custom(e.to_string()))?;
         }
         Ok(obj)
     }
@@ -620,7 +622,7 @@ impl<'de> Deserializer<'de> for &'de IArray {
         V: Visitor<'de>,
     {
         use crate::array::ArraySliceRef;
-        let len = self.len();
+        let len = self.len() as usize;
 
         macro_rules! deserialize_typed_array {
             ($variant:ident, $slice:expr) => {{
@@ -681,7 +683,7 @@ impl<'de> Deserializer<'de> for &'de IObject {
     where
         V: Visitor<'de>,
     {
-        let len = self.len();
+        let len = self.len() as usize;
         let mut deserializer = ObjectAccess::new(self);
         let seq = visitor.visit_map(&mut deserializer)?;
         let remaining = deserializer.iter.len();
