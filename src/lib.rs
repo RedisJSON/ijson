@@ -77,9 +77,8 @@ pub trait Defrag<A: DefragAllocator> {
     /// Defrag implementation
     fn defrag(self, defrag_allocator: &mut A) -> Self;
 }
-/// Reinitialized the shared strings cache.
-/// Any json that still uses a shared string will continue using it.
-/// But new strings will be reinitialized instead of reused the old ones.
+/// Shrinks the shared string cache while preserving live entries and ownership.
+/// Existing strings remain interned; shared allocations stay pinned during defrag.
 pub fn reinit_shared_string_cache() {
     unsafe_string::reinit_cache();
 }
