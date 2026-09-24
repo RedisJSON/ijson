@@ -95,11 +95,7 @@ enum CacheGuard {
 }
 
 impl CacheGuard {
-    fn get_or_insert<'a>(
-        &mut self,
-        value: &str,
-        f: Box<dyn FnOnce(&str) -> WeakIString + 'a>,
-    ) -> &WeakIString {
+    fn get_or_insert(&mut self, value: &str, f: impl FnOnce(&str) -> WeakIString) -> &WeakIString {
         match self {
             CacheGuard::ThreadSafe(c_g) => c_g.get_or_insert_with(value, |val| f(val)),
             CacheGuard::ThreadUnsafe(c_g) => c_g.get_or_insert_with(value, |val| f(val)),
@@ -327,20 +323,21 @@ impl IString {
         }
 
         let mut cache = get_cache_guard();
-        if let Some(existing) = cache.get_val(s) {
-            return existing.upgrade();
-        }
-
-        let k = cache.get_or_insert(
-            s,
-            Box::new(|s| WeakIString {
+        let mut inserted = false;
+        let entry = cache.get_or_insert(s, |s| {
+            inserted = true;
+            WeakIString {
                 ptr: Cell::new(
                     NonNull::new(Self::alloc(s, allocator).cast())
                         .expect("string allocation failed"),
                 ),
-            }),
-        );
-        k.value()
+            }
+        });
+        if inserted {
+            entry.value()
+        } else {
+            entry.upgrade()
+        }
     }
 
     /// Create an inline string by storing bytes in upper bits
