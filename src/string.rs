@@ -291,11 +291,12 @@ impl IString {
         }
     }
 
-    pub(crate) fn mem_allocated(&self) -> usize {
+    pub(crate) fn mem_allocated(&self) -> f64 {
         if self.is_empty() {
-            0
+            0.0
         } else {
-            Self::layout(self.len()).unwrap().size()
+            Self::layout(self.len()).unwrap().size() as f64
+                / self.header().rc.load(AtomicOrdering::Relaxed) as f64
         }
     }
 }

@@ -1320,17 +1320,17 @@ impl IArray {
         }
     }
 
-    pub(crate) fn mem_allocated(&self) -> usize {
+    pub(crate) fn mem_allocated(&self) -> f64 {
         if self.is_static() {
-            0
+            0.0
         } else {
             let tag = self.header().type_tag();
             let layout_size = Self::layout(self.capacity(), tag).unwrap().size();
             let contained_size = self
                 .as_slice_of::<IValue>()
-                .map(|slice| slice.iter().map(IValue::mem_allocated).sum())
-                .unwrap_or(0);
-            layout_size + contained_size
+                .map(|slice| slice.iter().map(IValue::mem_allocated).sum::<f64>())
+                .unwrap_or(0.0);
+            layout_size as f64 + contained_size
         }
     }
 }
