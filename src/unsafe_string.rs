@@ -427,6 +427,8 @@ impl IString {
         if self.is_empty() || self.is_inline() {
             0.0
         } else {
+            // SAFETY: `self` keeps a counted heap reference alive, so rc is nonzero.
+            // Relaxed suffices for an estimate that may change with concurrent owners.
             Self::layout(self.len()).unwrap().size() as f64
                 / self.header().rc.load(std::sync::atomic::Ordering::Relaxed) as f64
         }
