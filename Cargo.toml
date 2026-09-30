@@ -23,6 +23,7 @@ serde_json = "1.0.59"
 
 
 [dependencies]
+memchr = "2"
 hashbrown = "0.13.2"
 dashmap = { version = "5.4", features = ["raw-api"] }
 lazy_static = "1.4.0"
