@@ -1,5 +1,6 @@
 use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
+use std::marker::PhantomData;
 
 use serde::de::{
     DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess,
@@ -38,13 +39,9 @@ impl IValueDeserSeed {
     }
 }
 
-// Reused across completed sibling objects during one deserialization. The vector
-// preserves insertion order; decoded keys in the index enforce last-value wins.
-#[derive(Default)]
-struct ObjectBuffer {
-    fields: Vec<(IString, IValue)>,
-    indices: hashbrown::HashMap<IString, usize>,
-}
+// IndexMap preserves insertion order and replaces duplicate values. Reuse the
+// existing hash builder and retain drained maps for later sibling objects.
+type ObjectBuffer = indexmap::IndexMap<IString, IValue, hashbrown::hash_map::DefaultHashBuilder>;
 
 impl IValueDeserSeed {
     /// Deserializes using temporary object buffers, then moves each object's
@@ -346,43 +343,59 @@ impl<'de> Visitor<'de> for ObjectVisitor<'_> {
         V: MapAccess<'de>,
     {
         if let Some(buffers) = self.buffers {
-            let mut buffer = buffers.pop().unwrap_or_default();
-            while let Some(key) = visitor.next_key::<IString>()? {
-                let value = visitor.next_value_seed(ValueVisitor {
+            const INLINE_FIELDS: usize = crate::object::OBJECT_BUFFER_INLINE_CAPACITY;
+            // Keep up to 16 unique fields inline while parsing. Final objects
+            // still use their own eight-field threshold for hash tables.
+            let mut small = smallvec::SmallVec::<[(IString, IValue); INLINE_FIELDS]>::new();
+            let mut large: Option<ObjectBuffer> = None;
+            while let Some((key, value)) = visitor.next_entry_seed(
+                PhantomData::<IString>,
+                ValueVisitor {
                     fpha_config: self.fpha_config,
                     buffers: Some(&mut *buffers),
-                })?;
-                if let Some(&index) = buffer.indices.get(&key) {
-                    buffer.fields[index].1 = value;
-                } else {
-                    buffer.fields.try_reserve(1).map_err(SError::custom)?;
+                },
+            )? {
+                if large.is_none() {
+                    if let Some((_, previous)) = small.iter_mut().find(|(k, _)| *k == key) {
+                        *previous = value;
+                        continue;
+                    }
+                    if small.len() < INLINE_FIELDS {
+                        small.push((key, value));
+                        continue;
+                    }
+                    let mut buffer = buffers.pop().unwrap_or_default();
                     buffer
-                        .indices
-                        .try_reserve(1)
-                        .map_err(|_| SError::custom("Failed to allocate object buffer"))?;
-                    buffer.indices.insert(key.clone(), buffer.fields.len());
-                    buffer.fields.push((key, value));
+                        .try_reserve(small.len() + 1)
+                        .map_err(SError::custom)?;
+                    buffer.extend(small.drain(..));
+                    large = Some(buffer);
                 }
+                let buffer = large.as_mut().unwrap();
+                if buffer.len() == buffer.capacity() && !buffer.contains_key(&key) {
+                    buffer.try_reserve(1).map_err(SError::custom)?;
+                }
+                buffer.insert(key, value);
             }
-            // Allocate after parsing the fields, using the number of unique keys.
-            buffer.indices.clear();
-            let mut obj = IObject::with_capacity(buffer.fields.len())
-                .map_err(|_| SError::custom("Failed to allocate object"))?;
-            for (key, value) in buffer.fields.drain(..) {
-                obj.insert(key, value).map_err(SError::custom)?;
+            // Allocate only for validated, unique fields; move their values.
+            if let Some(mut buffer) = large {
+                let obj = IObject::from_unique_entries(&mut buffer).map_err(SError::custom)?;
+                buffers.try_reserve(1).map_err(SError::custom)?;
+                buffers.push(buffer);
+                return Ok(obj);
             }
-            buffers.try_reserve(1).map_err(SError::custom)?;
-            buffers.push(buffer);
-            return Ok(obj);
+            return IObject::from_unique_inline_entries(small).map_err(SError::custom);
         }
 
         let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate object"))?;
-        while let Some(k) = visitor.next_key::<IString>()? {
-            let v = visitor.next_value_seed(ValueVisitor {
+        while let Some((k, v)) = visitor.next_entry_seed(
+            PhantomData::<IString>,
+            ValueVisitor {
                 fpha_config: self.fpha_config,
                 buffers: None,
-            })?;
+            },
+        )? {
             obj.insert(k, v)
                 .map_err(|e| SError::custom(e.to_string()))?;
         }
