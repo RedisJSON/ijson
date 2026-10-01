@@ -67,9 +67,6 @@ struct KeyValuePair {
 /// Objects with capacity at or below this threshold store no hash table.
 const SMALL_OBJECT_THRESHOLD: u32 = 8;
 
-/// Temporary parser storage; independent of the final object's table threshold.
-pub(crate) const OBJECT_BUFFER_INLINE_CAPACITY: usize = 16;
-
 /// Whether an object of this capacity carries a hash table.
 fn has_table(cap: u32) -> bool {
     cap > SMALL_OBJECT_THRESHOLD
@@ -706,9 +703,8 @@ impl IObject {
 
     /// Moves already-deduplicated inline fields into their final storage.
     pub(crate) fn from_unique_inline_entries(
-        entries: smallvec::SmallVec<[(IString, IValue); OBJECT_BUFFER_INLINE_CAPACITY]>,
+        entries: smallvec::SmallVec<[(IString, IValue); crate::de::OBJECT_BUFFER_INLINE_CAPACITY]>,
     ) -> Result<Self, IJsonError> {
-        assert!(entries.len() <= OBJECT_BUFFER_INLINE_CAPACITY);
         let mut obj = Self::with_capacity(entries.len())?;
         if !entries.is_empty() {
             // SAFETY: the object is non-static and has space for every entry.
@@ -726,7 +722,7 @@ impl IObject {
 
     /// Moves fields whose uniqueness is guaranteed by the source map.
     pub(crate) fn from_unique_entries(
-        entries: &mut indexmap::IndexMap<IString, IValue, hashbrown::hash_map::DefaultHashBuilder>,
+        entries: &mut crate::de::ObjectBuffer,
     ) -> Result<Self, IJsonError> {
         let mut obj = Self::with_capacity(entries.len())?;
         if !entries.is_empty() {
@@ -1379,7 +1375,7 @@ mod tests {
     #[test]
     fn unique_inline_entries_move_and_grow() {
         // Heap keys exercise string allocation and ownership under Miri.
-        for len in 0..=OBJECT_BUFFER_INLINE_CAPACITY {
+        for len in 0..=crate::de::OBJECT_BUFFER_INLINE_CAPACITY {
             let entries = (0..len)
                 .map(|i| {
                     (

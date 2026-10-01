@@ -39,9 +39,13 @@ impl IValueDeserSeed {
     }
 }
 
+/// Temporary parser storage; independent of the final object's table threshold.
+pub(crate) const OBJECT_BUFFER_INLINE_CAPACITY: usize = 16;
+
 // IndexMap preserves insertion order and replaces duplicate values. Reuse the
 // existing hash builder and retain drained maps for later sibling objects.
-type ObjectBuffer = indexmap::IndexMap<IString, IValue, hashbrown::hash_map::DefaultHashBuilder>;
+pub(crate) type ObjectBuffer =
+    indexmap::IndexMap<IString, IValue, hashbrown::hash_map::DefaultHashBuilder>;
 
 impl IValueDeserSeed {
     /// Deserializes using temporary object buffers, then moves each object's
@@ -343,10 +347,10 @@ impl<'de> Visitor<'de> for ObjectVisitor<'_> {
         V: MapAccess<'de>,
     {
         if let Some(buffers) = self.buffers {
-            const INLINE_FIELDS: usize = crate::object::OBJECT_BUFFER_INLINE_CAPACITY;
             // Keep up to 16 unique fields inline while parsing. Final objects
             // still use their own eight-field threshold for hash tables.
-            let mut small = smallvec::SmallVec::<[(IString, IValue); INLINE_FIELDS]>::new();
+            let mut small =
+                smallvec::SmallVec::<[(IString, IValue); OBJECT_BUFFER_INLINE_CAPACITY]>::new();
             let mut large: Option<ObjectBuffer> = None;
             while let Some((key, value)) = visitor.next_entry_seed(
                 PhantomData::<IString>,
@@ -355,23 +359,25 @@ impl<'de> Visitor<'de> for ObjectVisitor<'_> {
                     buffers: Some(&mut *buffers),
                 },
             )? {
-                if large.is_none() {
-                    if let Some((_, previous)) = small.iter_mut().find(|(k, _)| *k == key) {
-                        *previous = value;
-                        continue;
+                let buffer = match &mut large {
+                    Some(buffer) => buffer,
+                    None => {
+                        if let Some((_, previous)) = small.iter_mut().find(|(k, _)| *k == key) {
+                            *previous = value;
+                            continue;
+                        }
+                        if small.len() < OBJECT_BUFFER_INLINE_CAPACITY {
+                            small.push((key, value));
+                            continue;
+                        }
+                        let mut buffer = buffers.pop().unwrap_or_default();
+                        buffer
+                            .try_reserve(small.len() + 1)
+                            .map_err(SError::custom)?;
+                        buffer.extend(small.drain(..));
+                        large.insert(buffer)
                     }
-                    if small.len() < INLINE_FIELDS {
-                        small.push((key, value));
-                        continue;
-                    }
-                    let mut buffer = buffers.pop().unwrap_or_default();
-                    buffer
-                        .try_reserve(small.len() + 1)
-                        .map_err(SError::custom)?;
-                    buffer.extend(small.drain(..));
-                    large = Some(buffer);
-                }
-                let buffer = large.as_mut().unwrap();
+                };
                 if buffer.len() == buffer.capacity() && !buffer.contains_key(&key) {
                     buffer.try_reserve(1).map_err(SError::custom)?;
                 }
@@ -379,12 +385,17 @@ impl<'de> Visitor<'de> for ObjectVisitor<'_> {
             }
             // Allocate only for validated, unique fields; move their values.
             if let Some(mut buffer) = large {
-                let obj = IObject::from_unique_entries(&mut buffer).map_err(SError::custom)?;
-                buffers.try_reserve(1).map_err(SError::custom)?;
-                buffers.push(buffer);
+                let obj = IObject::from_unique_entries(&mut buffer)
+                    .map_err(|_| SError::custom("Failed to allocate object"))?;
+                // Pooling is optional: a failed reservation must not reject
+                // an object that was already parsed successfully.
+                if buffers.try_reserve(1).is_ok() {
+                    buffers.push(buffer);
+                }
                 return Ok(obj);
             }
-            return IObject::from_unique_inline_entries(small).map_err(SError::custom);
+            return IObject::from_unique_inline_entries(small)
+                .map_err(|_| SError::custom("Failed to allocate object"));
         }
 
         let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0))
