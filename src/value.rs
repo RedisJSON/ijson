@@ -351,14 +351,17 @@ impl IValue {
         }
     }
 
-    /// Reports dynamic memory allocated by this value.
-    pub fn mem_allocated(&self) -> usize {
+    /// Reports proportional dynamic memory in bytes, excluding this value itself.
+    /// Shared strings are divided among all live references (including temporary
+    /// owners). Container capacity is fully counted; the intern table is excluded.
+    /// Retain fractional bytes until rounding the final measurement.
+    pub fn mem_allocated(&self) -> f64 {
         use ValueType::*;
         match self.type_() {
             // inline types consume no extra memory
-            Null | Bool => 0,
+            Null | Bool => 0.0,
             // Safety: We checked the type
-            Number => unsafe { self.as_number_unchecked() }.mem_allocated(),
+            Number => unsafe { self.as_number_unchecked() }.mem_allocated() as f64,
             String => unsafe { self.as_string_unchecked() }.mem_allocated(),
             Array => unsafe { self.as_array_unchecked() }.mem_allocated(),
             Object => unsafe { self.as_object_unchecked() }.mem_allocated(),
@@ -1091,7 +1094,7 @@ mod tests {
         assert!(matches!(x.clone().destructure(), Destructured::Null));
         assert!(matches!(x.clone().destructure_ref(), DestructuredRef::Null));
         assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Null));
-        assert_eq!(x.mem_allocated(), 0);
+        assert_eq!(x.mem_allocated(), 0.0);
     }
 
     #[test]
@@ -1112,7 +1115,7 @@ mod tests {
             }
 
             assert_eq!(x.to_bool(), Some(!v));
-            assert_eq!(x.mem_allocated(), 0);
+            assert_eq!(x.mem_allocated(), 0.0);
         }
     }
 
@@ -1147,9 +1150,9 @@ mod tests {
                 assert_eq!(
                     x.mem_allocated(),
                     if (INLINE_LOWER..=INLINE_UPPER).contains(&v) {
-                        0
+                        0.0
                     } else {
-                        mem::size_of::<i64>()
+                        mem::size_of::<i64>() as f64
                     }
                 );
             }
@@ -1181,9 +1184,9 @@ mod tests {
                 assert_eq!(
                     x.mem_allocated(),
                     if v <= i64::MAX as u64 && (INLINE_LOWER..=INLINE_UPPER).contains(&(v as i64)) {
-                        0
+                        0.0
                     } else {
-                        mem::size_of::<u64>()
+                        mem::size_of::<u64>() as f64
                     }
                 );
             }
@@ -1207,7 +1210,7 @@ mod tests {
                 assert!(
                     matches!(x.clone().destructure_mut(), DestructuredMut::Number(u) if *u == INumber::try_from(v).unwrap())
                 );
-                assert_eq!(x.mem_allocated(), mem::size_of::<f64>());
+                assert_eq!(x.mem_allocated(), mem::size_of::<f64>() as f64);
             }
         }
     }
@@ -1224,7 +1227,7 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
-            assert_eq!(x.mem_allocated(), 0);
+            assert_eq!(x.mem_allocated(), 0.0);
         }
 
         let s = String::from("foofoofoo");
@@ -1236,7 +1239,7 @@ mod tests {
         assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
         assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
         assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
-        assert_eq!(x.mem_allocated(), 24);
+        assert_eq!(x.mem_allocated(), 24.0);
     }
 
     #[mockalloc::test]
@@ -1253,8 +1256,9 @@ mod tests {
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::Array(u) if *u == a));
             assert_eq!(
                 x.mem_allocated(),
-                mem::size_of::<usize>()
-                    + ((a.capacity() as usize * mem::size_of::<i32>() + 7) & !7)
+                (mem::size_of::<usize>()
+                    + ((a.capacity() as usize * mem::size_of::<i32>() + 7) & !7))
+                    as f64
             );
         }
     }
@@ -1286,8 +1290,8 @@ mod tests {
                 x.mem_allocated(),
                 o.iter()
                     .map(|(k, v)| k.mem_allocated() + v.mem_allocated())
-                    .sum::<usize>()
-                    + ((raw + 7) & !7)
+                    .sum::<f64>()
+                    + ((raw + 7) & !7) as f64
             );
         }
     }

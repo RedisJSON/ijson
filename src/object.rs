@@ -918,17 +918,17 @@ impl IObject {
         }
     }
 
-    pub(crate) fn mem_allocated(&self) -> usize {
+    pub(crate) fn mem_allocated(&self) -> f64 {
         if self.is_static() {
-            0
+            0.0
         } else {
             // Layout of a live object's own capacity; it allocated successfully, so
             // recomputing its layout cannot fail.
-            Self::layout(self.capacity()).unwrap().size()
+            Self::layout(self.capacity()).unwrap().size() as f64
                 + self
                     .iter()
                     .map(|(k, v)| k.mem_allocated() + v.mem_allocated())
-                    .sum::<usize>()
+                    .sum::<f64>()
         }
     }
 }

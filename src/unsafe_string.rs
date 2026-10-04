@@ -423,11 +423,14 @@ impl IString {
         self.drop_impl_with_deallocator(|ptr, layout| unsafe { dealloc(ptr, layout) });
     }
 
-    pub(crate) fn mem_allocated(&self) -> usize {
+    pub(crate) fn mem_allocated(&self) -> f64 {
         if self.is_empty() || self.is_inline() {
-            0
+            0.0
         } else {
-            Self::layout(self.len()).unwrap().size()
+            // SAFETY: `self` keeps a counted heap reference alive, so rc is nonzero.
+            // Relaxed suffices for an estimate that may change with concurrent owners.
+            Self::layout(self.len()).unwrap().size() as f64
+                / self.header().rc.load(std::sync::atomic::Ordering::Relaxed) as f64
         }
     }
 }
@@ -630,7 +633,7 @@ mod tests {
                 assert_eq!(istr.as_bytes(), s.as_bytes());
 
                 // Inline strings should have minimal memory overhead
-                assert_eq!(istr.mem_allocated(), 0);
+                assert_eq!(istr.mem_allocated(), 0.0);
             } else {
                 assert!(!istr.is_inline(), "String '{}' should not be inline", s);
             }
@@ -651,7 +654,7 @@ mod tests {
             assert_eq!(istr.as_bytes(), s.as_bytes());
 
             // Heap strings should have memory overhead
-            assert!(istr.mem_allocated() > 0);
+            assert!(istr.mem_allocated() > 0.0);
         }
     }
 
