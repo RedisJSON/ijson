@@ -1,9 +1,9 @@
 use ijson::{array::ArraySliceRef, FPHAConfig, FloatType, IValue, IValueDeserSeed};
 use serde::de::DeserializeSeed;
 
-fn parse(s: &str, counted: bool) -> Result<IValue, serde_json::Error> {
+fn parse(s: &str, compact: bool) -> Result<IValue, serde_json::Error> {
     let mut de = serde_json::Deserializer::from_str(s);
-    let value = if counted {
+    let value = if compact {
         IValueDeserSeed::new(None).deserialize_compact_objects(&mut de)?
     } else {
         IValueDeserSeed::new(None).deserialize(&mut de)?
@@ -25,10 +25,10 @@ fn buffered_objects_preserve_values_errors_and_capacity() {
         "123",
         "\"hello\"",
     ] {
-        let counted = parse(input, true).unwrap();
+        let compact = parse(input, true).unwrap();
         let ordinary = parse(input, false).unwrap();
         assert_eq!(
-            serde_json::to_value(&counted).unwrap(),
+            serde_json::to_value(&compact).unwrap(),
             serde_json::to_value(&ordinary).unwrap()
         );
     }
@@ -137,4 +137,85 @@ fn buffered_objects_preserve_escaped_strings() {
         assert!(parse(input, true).is_err(), "{input}");
         assert!(parse(input, false).is_err(), "{input}");
     }
+}
+
+#[test]
+fn small_objects_promote_without_changing_order_or_duplicate_values() {
+    let widths = [0, 1, 8, 9, 12, 16, 17, 20, 31, 32, 33, 8, 16, 17];
+    let inputs: Vec<_> = widths
+        .into_iter()
+        .map(|n| {
+            let mut fields: Vec<_> = (0..n).map(|i| format!("\"k{i}\":{i}")).collect();
+            if n > 0 {
+                fields.push(r#""\u006b0":{"replacement":true}"#.to_owned());
+            }
+            format!("{{{}}}", fields.join(","))
+        })
+        .collect();
+    let input = format!("[{}]", inputs.join(","));
+    let value = parse(&input, true).unwrap();
+    assert_eq!(
+        serde_json::to_string(&value).unwrap(),
+        serde_json::to_string(&parse(&input, false).unwrap()).unwrap()
+    );
+    for (i, n) in widths.into_iter().enumerate() {
+        assert_eq!(value[i].as_object().unwrap().capacity(), n);
+    }
+}
+
+#[test]
+fn exact_small_objects_grow_without_a_premature_hash_table() {
+    let mut value = parse(r#"{"a":1,"b":2,"c":3,"d":4,"e":5}"#, true).unwrap();
+    let object = value.as_object_mut().unwrap();
+    for key in ["f", "g", "h"] {
+        object.insert(key, IValue::NULL).unwrap();
+        assert_eq!(object.capacity(), 8);
+    }
+    object.insert("i", IValue::NULL).unwrap();
+    assert_eq!(object.capacity(), 16);
+    assert_eq!(object.len(), 9);
+    assert_eq!(object["a"], IValue::from(1));
+    assert!(object["i"].is_null());
+}
+
+#[test]
+fn compact_objects_reuse_large_buffers_and_preserve_errors() {
+    let fields = (0..33)
+        .map(|i| format!("\"long_field_{i}\":null"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let wide = format!("{{{fields}}}");
+    // Replacing a nested value drops its object; its drained buffer can still
+    // be reused by siblings without retaining any of the old fields.
+    let input = format!(r#"[{wide},{{"child":{wide},"\u0063hild":{{}},"tail":{wide}}},{wide}]"#);
+    let value = parse(&input, true).unwrap();
+    assert_eq!(
+        serde_json::to_string(&value).unwrap(),
+        serde_json::to_string(&parse(&input, false).unwrap()).unwrap()
+    );
+    assert_eq!(value[0].as_object().unwrap().capacity(), 33);
+    assert_eq!(value[1].as_object().unwrap().capacity(), 2);
+    assert!(value[1]["child"].as_object().unwrap().is_empty());
+    assert_eq!(value[1]["tail"].as_object().unwrap().capacity(), 33);
+    assert_eq!(value[2].as_object().unwrap().capacity(), 33);
+
+    for suffix in ["", ",}", ",\"bad\":]", r#", "bad":"\uD800"}"#] {
+        let malformed = format!("[{wide},{{{fields}{suffix}");
+        let compact = parse(&malformed, true).unwrap_err();
+        let ordinary = parse(&malformed, false).unwrap_err();
+        assert_eq!(compact.classify(), ordinary.classify());
+        assert_eq!(
+            (compact.line(), compact.column()),
+            (ordinary.line(), ordinary.column())
+        );
+    }
+
+    let input = r#"{"":0,"\u0000":1,"":2,"😀":3,"\ud83d\ude00":4}"#;
+    let mut de = serde_json::Deserializer::from_reader(input.as_bytes());
+    let value = IValueDeserSeed::new(None)
+        .deserialize_compact_objects(&mut de)
+        .unwrap();
+    de.end().unwrap();
+    assert_eq!(value, parse(input, false).unwrap());
+    assert_eq!(value.as_object().unwrap().capacity(), 3);
 }
