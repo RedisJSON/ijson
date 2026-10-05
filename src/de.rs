@@ -126,6 +126,9 @@ impl<'de> Deserialize<'de> for IObject {
 
 struct ValueVisitor<'a> {
     fpha_config: Option<FPHAConfig>,
+    // Pool of drained maps that retain capacity for reuse while parsing objects.
+    // Maps are popped when needed and returned after use; indices do not identify
+    // JSON objects or nesting levels. None selects ordinary deserialization.
     buffers: Option<&'a mut Vec<ObjectBuffer>>,
 }
 
