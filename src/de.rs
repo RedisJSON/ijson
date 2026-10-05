@@ -343,75 +343,85 @@ impl<'de> Visitor<'de> for ObjectVisitor<'_> {
         formatter.write_str("JSON object")
     }
 
-    fn visit_map<V>(self, mut visitor: V) -> Result<IObject, V::Error>
+    fn visit_map<V>(self, mut map_access: V) -> Result<IObject, V::Error>
     where
         V: MapAccess<'de>,
     {
-        if let Some(buffers) = self.buffers {
+        if let Some(buffer_pool) = self.buffers {
             // Keep up to 16 unique fields inline while parsing. Final objects
             // still use their own eight-field threshold for hash tables.
-            let mut small =
+            let mut inline_entries =
                 smallvec::SmallVec::<[(IString, IValue); OBJECT_BUFFER_INLINE_CAPACITY]>::new();
-            let mut large: Option<ObjectBuffer> = None;
-            while let Some((key, value)) = visitor.next_entry_seed(
+            let mut indexed_entries: Option<ObjectBuffer> = None;
+            // Nested values reuse the same pool, but each active object owns its entries.
+            while let Some((key, value)) = map_access.next_entry_seed(
                 PhantomData::<IString>,
                 ValueVisitor {
                     fpha_config: self.fpha_config,
-                    buffers: Some(&mut *buffers),
+                    buffers: Some(&mut *buffer_pool),
                 },
             )? {
-                let buffer = match &mut large {
-                    Some(buffer) => buffer,
+                let entries_map = match &mut indexed_entries {
+                    Some(entries_map) => entries_map,
                     None => {
-                        if let Some((_, previous)) = small.iter_mut().find(|(k, _)| *k == key) {
-                            *previous = value;
+                        // Duplicate keys replace their value without consuming another slot.
+                        if let Some((_, existing_value)) = inline_entries
+                            .iter_mut()
+                            .find(|(existing_key, _)| *existing_key == key)
+                        {
+                            *existing_value = value;
                             continue;
                         }
-                        if small.len() < OBJECT_BUFFER_INLINE_CAPACITY {
-                            small.push((key, value));
+                        if inline_entries.len() < OBJECT_BUFFER_INLINE_CAPACITY {
+                            inline_entries.push((key, value));
                             continue;
                         }
-                        let mut buffer = buffers.pop().unwrap_or_default();
-                        buffer
-                            .try_reserve(small.len() + 1)
+                        // The next unique field exceeds inline storage: move to a pooled map.
+                        let mut entries_map = buffer_pool.pop().unwrap_or_default();
+                        entries_map
+                            .try_reserve(inline_entries.len() + 1)
                             .map_err(SError::custom)?;
-                        buffer.extend(small.drain(..));
-                        large.insert(buffer)
+                        entries_map.extend(inline_entries.drain(..));
+                        indexed_entries.insert(entries_map)
                     }
                 };
-                if buffer.len() == buffer.capacity() && !buffer.contains_key(&key) {
-                    buffer.try_reserve(1).map_err(SError::custom)?;
+                // Reserve only for new keys; inserting a duplicate replaces its value.
+                if entries_map.len() == entries_map.capacity() && !entries_map.contains_key(&key) {
+                    entries_map.try_reserve(1).map_err(SError::custom)?;
                 }
-                buffer.insert(key, value);
+                entries_map.insert(key, value);
             }
             // Allocate only for validated, unique fields; move their values.
-            if let Some(mut buffer) = large {
-                let obj = IObject::from_unique_entries(&mut buffer)
+            if let Some(mut entries_map) = indexed_entries {
+                let object = IObject::from_unique_entries(&mut entries_map)
                     .map_err(|_| SError::custom("Failed to allocate object"))?;
+                // Construction drains the map; retain its capacity for another object.
                 // Pooling is optional: a failed reservation must not reject
                 // an object that was already parsed successfully.
-                if buffers.try_reserve(1).is_ok() {
-                    buffers.push(buffer);
+                if buffer_pool.try_reserve(1).is_ok() {
+                    buffer_pool.push(entries_map);
                 }
-                return Ok(obj);
+                return Ok(object);
             }
-            return IObject::from_unique_inline_entries(small)
+            return IObject::from_unique_inline_entries(inline_entries)
                 .map_err(|_| SError::custom("Failed to allocate object"));
         }
 
-        let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0))
+        // Ordinary deserialization inserts directly into a growing object.
+        let mut object = IObject::with_capacity(map_access.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate object"))?;
-        while let Some((k, v)) = visitor.next_entry_seed(
+        while let Some((key, value)) = map_access.next_entry_seed(
             PhantomData::<IString>,
             ValueVisitor {
                 fpha_config: self.fpha_config,
                 buffers: None,
             },
         )? {
-            obj.insert(k, v)
+            object
+                .insert(key, value)
                 .map_err(|e| SError::custom(e.to_string()))?;
         }
-        Ok(obj)
+        Ok(object)
     }
 }
 
