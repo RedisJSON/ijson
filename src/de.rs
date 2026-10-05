@@ -38,6 +38,75 @@ impl IValueDeserSeed {
     }
 }
 
+// A lexical sizing pass only: serde_json still performs all validation.
+// One count per object, in preorder; delimiters inside strings are ignored.
+fn object_counts(json: &str) -> Vec<usize> {
+    let mut counts = Vec::new();
+    // Objects store their index in counts; arrays only mark a nesting level.
+    let mut stack = Vec::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    for byte in json.bytes() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                quoted = false;
+            }
+            continue;
+        }
+        // Bound the sizing pass even for malformed or deeply nested input.
+        // Returning no hints leaves depth handling to the deserializer.
+        if matches!(byte, b'{' | b'[') && stack.len() == 128 {
+            return Vec::new();
+        }
+        match byte {
+            b'"' => quoted = true,
+            b'{' => {
+                stack.push(Some(counts.len()));
+                counts.push(0);
+            }
+            b'[' => stack.push(None),
+            b'}' | b']' => {
+                stack.pop();
+            }
+            b':' => {
+                if let Some(Some(index)) = stack.last() {
+                    counts[*index] += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    counts
+}
+
+impl IValueDeserSeed {
+    /// Deserializes JSON with object capacities counted before parsing.
+    ///
+    /// `deserializer` must traverse the same JSON text in input order, starting
+    /// at its beginning. Counts only affect allocation; validation and recursion
+    /// limits remain the deserializer's responsibility. The caller must check for
+    /// trailing input (for example, with `serde_json::Deserializer::end`).
+    /// Arrays retain their existing allocation behavior.
+    pub fn deserialize_with_object_hints<'de, D>(
+        self,
+        deserializer: D,
+        json: &str,
+    ) -> Result<IValue, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut counts = object_counts(json).into_iter();
+        deserializer.deserialize_any(ValueVisitor {
+            fpha_config: self.fpha_config,
+            counts: Some(&mut counts),
+        })
+    }
+}
+
 impl<'de> DeserializeSeed<'de> for IValueDeserSeed {
     type Value = IValue;
 
@@ -82,7 +151,10 @@ impl<'de> Deserialize<'de> for IArray {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_seq(ArrayVisitor { fpha_config: None })
+        deserializer.deserialize_seq(ArrayVisitor {
+            fpha_config: None,
+            counts: None,
+        })
     }
 }
 
@@ -91,21 +163,40 @@ impl<'de> Deserialize<'de> for IObject {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(ObjectVisitor { fpha_config: None })
+        deserializer.deserialize_map(ObjectVisitor {
+            fpha_config: None,
+            counts: None,
+        })
     }
 }
 
-struct ValueVisitor {
+struct ValueVisitor<'a> {
     fpha_config: Option<FPHAConfig>,
+    counts: Option<&'a mut std::vec::IntoIter<usize>>,
 }
 
-impl ValueVisitor {
+impl ValueVisitor<'_> {
     fn new(fpha_config: Option<FPHAConfig>) -> Self {
-        ValueVisitor { fpha_config }
+        ValueVisitor {
+            fpha_config,
+            counts: None,
+        }
     }
 }
 
-impl<'de> Visitor<'de> for ValueVisitor {
+// Reuse the visitor as a seed so nested values borrow the same count iterator.
+impl<'de> DeserializeSeed<'de> for ValueVisitor<'_> {
+    type Value = IValue;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<IValue, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ValueVisitor<'_> {
     type Value = IValue;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
@@ -152,7 +243,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     where
         D: Deserializer<'de>,
     {
-        IValueDeserSeed::new(self.fpha_config).deserialize(deserializer)
+        self.deserialize(deserializer)
     }
 
     #[inline]
@@ -167,6 +258,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     {
         ArrayVisitor {
             fpha_config: self.fpha_config,
+            counts: self.counts,
         }
         .visit_seq(visitor)
         .map(Into::into)
@@ -178,6 +270,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     {
         ObjectVisitor {
             fpha_config: self.fpha_config,
+            counts: self.counts,
         }
         .visit_map(visitor)
         .map(Into::into)
@@ -248,11 +341,12 @@ impl<'de> Visitor<'de> for StringVisitor {
     }
 }
 
-struct ArrayVisitor {
+struct ArrayVisitor<'a> {
     fpha_config: Option<FPHAConfig>,
+    counts: Option<&'a mut std::vec::IntoIter<usize>>,
 }
 
-impl<'de> Visitor<'de> for ArrayVisitor {
+impl<'de> Visitor<'de> for ArrayVisitor<'_> {
     type Value = IArray;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
@@ -260,13 +354,16 @@ impl<'de> Visitor<'de> for ArrayVisitor {
     }
 
     #[inline]
-    fn visit_seq<V>(self, mut visitor: V) -> Result<IArray, V::Error>
+    fn visit_seq<V>(mut self, mut visitor: V) -> Result<IArray, V::Error>
     where
         V: SeqAccess<'de>,
     {
         let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate array"))?;
-        while let Some(v) = visitor.next_element_seed(IValueDeserSeed::new(self.fpha_config))? {
+        while let Some(v) = visitor.next_element_seed(ValueVisitor {
+            fpha_config: self.fpha_config,
+            counts: self.counts.as_deref_mut(),
+        })? {
             match self.fpha_config {
                 Some(FPHAConfig { fpha_type }) => arr.push_with_fp_type(v, fpha_type),
                 None => arr.push(v).map_err(Into::into),
@@ -277,27 +374,38 @@ impl<'de> Visitor<'de> for ArrayVisitor {
     }
 }
 
-struct ObjectVisitor {
+struct ObjectVisitor<'a> {
     fpha_config: Option<FPHAConfig>,
+    counts: Option<&'a mut std::vec::IntoIter<usize>>,
 }
 
-impl<'de> Visitor<'de> for ObjectVisitor {
+impl<'de> Visitor<'de> for ObjectVisitor<'_> {
     type Value = IObject;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
         formatter.write_str("JSON object")
     }
 
-    fn visit_map<V>(self, mut visitor: V) -> Result<IObject, V::Error>
+    fn visit_map<V>(mut self, mut visitor: V) -> Result<IObject, V::Error>
     where
         V: MapAccess<'de>,
     {
-        let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0))
+        // Consume the parent's count before visiting any of its children.
+        let capacity = self.counts.as_deref_mut().and_then(Iterator::next);
+        let mut obj = IObject::with_capacity(capacity.or_else(|| visitor.size_hint()).unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate object"))?;
         while let Some(k) = visitor.next_key::<IString>()? {
-            let v = visitor.next_value_seed(IValueDeserSeed::new(self.fpha_config))?;
+            let v = visitor.next_value_seed(ValueVisitor {
+                fpha_config: self.fpha_config,
+                counts: self.counts.as_deref_mut(),
+            })?;
             obj.insert(k, v)
                 .map_err(|e| SError::custom(e.to_string()))?;
+        }
+        // Repeated keys overwrite earlier values, but the sizing pass counts
+        // every occurrence. Release those slots only on the hinted path.
+        if capacity.is_some() && obj.capacity() > obj.len() {
+            obj.shrink_to_fit();
         }
         Ok(obj)
     }
@@ -1071,6 +1179,14 @@ mod tests {
     use super::*;
     use crate::array::ArraySliceRef;
     use serde::de::DeserializeSeed;
+
+    #[test]
+    fn object_counts_bounds_nesting() {
+        assert_eq!(object_counts(r#"{"a":[{"b":1}],"c":{}}"#), vec![2, 1, 0]);
+        assert!(object_counts(&"[".repeat(129)).is_empty());
+        // Discard earlier hints too: partial counts would misalign later objects.
+        assert!(object_counts(&format!("{{\"a\":{{}},\"b\":{}", "[".repeat(128))).is_empty());
+    }
 
     #[test]
     fn test_deserialize_with_f64_fp() {
