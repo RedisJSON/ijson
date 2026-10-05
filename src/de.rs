@@ -37,17 +37,7 @@ impl IValueDeserSeed {
     pub fn new(fpha_config: Option<FPHAConfig>) -> Self {
         IValueDeserSeed { fpha_config }
     }
-}
 
-/// Temporary parser storage; independent of the final object's table threshold.
-pub(crate) const OBJECT_BUFFER_INLINE_CAPACITY: usize = 16;
-
-// IndexMap preserves insertion order and replaces duplicate values. Reuse the
-// existing hash builder and retain drained maps for later sibling objects.
-pub(crate) type ObjectBuffer =
-    indexmap::IndexMap<IString, IValue, hashbrown::hash_map::DefaultHashBuilder>;
-
-impl IValueDeserSeed {
     /// Deserializes using temporary object buffers, then moves each object's
     /// unique fields into exactly sized storage. Arrays keep normal growth.
     /// The caller must still check for trailing input with the deserializer.
@@ -62,6 +52,14 @@ impl IValueDeserSeed {
         })
     }
 }
+
+/// Temporary parser storage; independent of the final object's table threshold.
+pub(crate) const OBJECT_BUFFER_INLINE_CAPACITY: usize = 16;
+
+// IndexMap preserves insertion order and replaces duplicate values. Reuse the
+// existing hash builder and retain drained maps for later sibling objects.
+pub(crate) type ObjectBuffer =
+    indexmap::IndexMap<IString, IValue, hashbrown::hash_map::DefaultHashBuilder>;
 
 impl<'de> DeserializeSeed<'de> for IValueDeserSeed {
     type Value = IValue;
