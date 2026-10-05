@@ -44,26 +44,29 @@ fn object_counts(json: &str) -> Vec<usize> {
     let mut counts = Vec::new();
     // Objects store their index in counts; arrays only mark a nesting level.
     let mut stack = Vec::new();
-    let mut quoted = false;
-    let mut escaped = false;
-    for byte in json.bytes() {
-        if quoted {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                quoted = false;
-            }
-            continue;
-        }
+    let mut bytes = json.as_bytes();
+    while let Some((&byte, rest)) = bytes.split_first() {
+        bytes = rest;
         // Bound the sizing pass even for malformed or deeply nested input.
         // Returning no hints leaves depth handling to the deserializer.
         if matches!(byte, b'{' | b'[') && stack.len() == 128 {
             return Vec::new();
         }
         match byte {
-            b'"' => quoted = true,
+            b'"' => loop {
+                // Search string contents in chunks. A backslash escapes exactly
+                // the next byte for quote detection, including another backslash.
+                let Some(index) = memchr::memchr2(b'"', b'\\', bytes) else {
+                    return counts; // The deserializer rejects unterminated strings.
+                };
+                let delimiter = bytes[index];
+                bytes = &bytes[index + 1..];
+                if delimiter == b'"' {
+                    break;
+                }
+                // A trailing backslash is invalid JSON, but must not panic here.
+                bytes = bytes.get(1..).unwrap_or_default();
+            },
             b'{' => {
                 stack.push(Some(counts.len()));
                 counts.push(0);

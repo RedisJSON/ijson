@@ -114,3 +114,25 @@ fn counted_objects_preserve_typed_arrays() {
         ));
     }
 }
+
+#[test]
+fn string_skipping_preserves_escape_boundaries() {
+    // Exercise short strings and positions around SIMD chunk boundaries.
+    for padding in [0, 1, 15, 16, 31, 32, 63, 64, 65, 256, 4096] {
+        for slashes in 0..8 {
+            for suffix in ["", "\"", "\" :{}[] שלום"] {
+                let text = format!("{}{}{}", "x".repeat(padding), "\\".repeat(slashes), suffix);
+                let text = serde_json::to_string(&text).unwrap();
+                let input = format!("{{{text}:{text},\"next\":{{\"a\":1,\"b\":2}}}}");
+                let value = parse(&input, true).unwrap();
+                assert_eq!(value, parse(&input, false).unwrap());
+                assert_eq!(value.as_object().unwrap().capacity(), 2);
+                assert_eq!(value["next"].as_object().unwrap().capacity(), 2);
+            }
+        }
+    }
+    for input in ["\"", "\"abc\\", "{\"key\":\"abc\\", "\"\\q\"", "\"\\u12\""] {
+        assert!(parse(input, true).is_err(), "{input}");
+        assert!(parse(input, false).is_err(), "{input}");
+    }
+}
