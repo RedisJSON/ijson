@@ -797,7 +797,9 @@ impl IObject {
             return Ok(());
         }
         let grown = cmp::max(
-            current_capacity.checked_mul(2).ok_or(AllocError)?,
+            current_capacity
+                .checked_add(current_capacity.div_ceil(4))
+                .ok_or(AllocError)?,
             desired_capacity.max(4),
         );
         // Exact-size parsed objects can have capacities such as 5 or 7. Keep
