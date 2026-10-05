@@ -4,7 +4,7 @@ use serde::de::DeserializeSeed;
 fn parse(s: &str, counted: bool) -> Result<IValue, serde_json::Error> {
     let mut de = serde_json::Deserializer::from_str(s);
     let value = if counted {
-        IValueDeserSeed::new(None).deserialize_with_object_hints(&mut de, s)?
+        IValueDeserSeed::new(None).deserialize_compact_objects(&mut de)?
     } else {
         IValueDeserSeed::new(None).deserialize(&mut de)?
     };
@@ -13,7 +13,7 @@ fn parse(s: &str, counted: bool) -> Result<IValue, serde_json::Error> {
 }
 
 #[test]
-fn counted_objects_preserve_values_errors_and_capacity() {
+fn buffered_objects_preserve_values_errors_and_capacity() {
     for input in [
         r#"{"a":1,"b":2,"c":3,"d":4,"e":5}"#,
         r#"{"x":[{}, {"nested":{"a":null,"b":true}}],"str":"{[colon:]}"}"#,
@@ -68,12 +68,16 @@ fn counted_objects_preserve_values_errors_and_capacity() {
 }
 
 #[test]
-fn repeated_keys_release_unused_slots_and_preserve_last_value() {
+fn repeated_keys_use_exact_storage_and_preserve_last_value() {
     // Escaped names compare equal after decoding. Replaced values may themselves
-    // contain objects, whose counts must still be consumed before the next field.
+    // contain objects, whose buffers must not interfere with the next field.
     let input = r#"{"a":{"x":1},"\u0061":{"y":2,"z":3},"next":{"p":4}}"#;
     let value = parse(input, true).unwrap();
     assert_eq!(value, parse(input, false).unwrap());
+    assert_eq!(
+        serde_json::to_string(&value).unwrap(),
+        serde_json::to_string(&parse(input, false).unwrap()).unwrap()
+    );
     assert_eq!(value.as_object().unwrap().capacity(), 2);
     assert_eq!(value["a"].as_object().unwrap().capacity(), 2);
     assert_eq!(value["next"].as_object().unwrap().capacity(), 1);
@@ -85,7 +89,7 @@ fn repeated_keys_release_unused_slots_and_preserve_last_value() {
 }
 
 #[test]
-fn counted_objects_preserve_typed_arrays() {
+fn buffered_objects_preserve_typed_arrays() {
     let input = r#"{"values":[0.5,1.0,1.5],"nested":[{"x":1,"y":2}]}"#;
     for fp_type in [
         FloatType::F16,
@@ -95,9 +99,7 @@ fn counted_objects_preserve_typed_arrays() {
     ] {
         let seed = || IValueDeserSeed::new(Some(FPHAConfig::new_with_type(fp_type)));
         let mut de = serde_json::Deserializer::from_str(input);
-        let value = seed()
-            .deserialize_with_object_hints(&mut de, input)
-            .unwrap();
+        let value = seed().deserialize_compact_objects(&mut de).unwrap();
         de.end().unwrap();
         let ordinary = seed()
             .deserialize(&mut serde_json::Deserializer::from_str(input))
@@ -116,8 +118,8 @@ fn counted_objects_preserve_typed_arrays() {
 }
 
 #[test]
-fn string_skipping_preserves_escape_boundaries() {
-    // Exercise short strings and positions around SIMD chunk boundaries.
+fn buffered_objects_preserve_escaped_strings() {
+    // Exercise escaped keys and values at varied lengths.
     for padding in [0, 1, 15, 16, 31, 32, 63, 64, 65, 256, 4096] {
         for slashes in 0..8 {
             for suffix in ["", "\"", "\" :{}[] שלום"] {

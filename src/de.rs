@@ -38,74 +38,26 @@ impl IValueDeserSeed {
     }
 }
 
-// A lexical sizing pass only: serde_json still performs all validation.
-// One count per object, in preorder; delimiters inside strings are ignored.
-fn object_counts(json: &str) -> Vec<usize> {
-    let mut counts = Vec::new();
-    // Objects store their index in counts; arrays only mark a nesting level.
-    let mut stack = Vec::new();
-    let mut bytes = json.as_bytes();
-    while let Some((&byte, rest)) = bytes.split_first() {
-        bytes = rest;
-        // Bound the sizing pass even for malformed or deeply nested input.
-        // Returning no hints leaves depth handling to the deserializer.
-        if matches!(byte, b'{' | b'[') && stack.len() == 128 {
-            return Vec::new();
-        }
-        match byte {
-            b'"' => loop {
-                // Search string contents in chunks. A backslash escapes exactly
-                // the next byte for quote detection, including another backslash.
-                let Some(index) = memchr::memchr2(b'"', b'\\', bytes) else {
-                    return counts; // The deserializer rejects unterminated strings.
-                };
-                let delimiter = bytes[index];
-                bytes = &bytes[index + 1..];
-                if delimiter == b'"' {
-                    break;
-                }
-                // A trailing backslash is invalid JSON, but must not panic here.
-                bytes = bytes.get(1..).unwrap_or_default();
-            },
-            b'{' => {
-                stack.push(Some(counts.len()));
-                counts.push(0);
-            }
-            b'[' => stack.push(None),
-            b'}' | b']' => {
-                stack.pop();
-            }
-            b':' => {
-                if let Some(Some(index)) = stack.last() {
-                    counts[*index] += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    counts
+// Reused across completed sibling objects during one deserialization. The vector
+// preserves insertion order; decoded keys in the index enforce last-value wins.
+#[derive(Default)]
+struct ObjectBuffer {
+    fields: Vec<(IString, IValue)>,
+    indices: hashbrown::HashMap<IString, usize>,
 }
 
 impl IValueDeserSeed {
-    /// Deserializes JSON with object capacities counted before parsing.
-    ///
-    /// `deserializer` must traverse the same JSON text in input order, starting
-    /// at its beginning. Counts only affect allocation; validation and recursion
-    /// limits remain the deserializer's responsibility. The caller must check for
-    /// trailing input (for example, with `serde_json::Deserializer::end`).
-    /// Arrays retain their existing allocation behavior.
-    pub fn deserialize_with_object_hints<'de, D>(
-        self,
-        deserializer: D,
-        json: &str,
-    ) -> Result<IValue, D::Error>
+    /// Deserializes using temporary object buffers, then moves each object's
+    /// unique fields into exactly sized storage. Arrays keep normal growth.
+    /// The caller must still check for trailing input with the deserializer.
+    pub fn deserialize_compact_objects<'de, D>(self, deserializer: D) -> Result<IValue, D::Error>
     where
         D: Deserializer<'de>,
     {
-        let mut counts = object_counts(json).into_iter();
+        let mut buffers = Vec::new();
         deserializer.deserialize_any(ValueVisitor {
             fpha_config: self.fpha_config,
-            counts: Some(&mut counts),
+            buffers: Some(&mut buffers),
         })
     }
 }
@@ -156,7 +108,7 @@ impl<'de> Deserialize<'de> for IArray {
     {
         deserializer.deserialize_seq(ArrayVisitor {
             fpha_config: None,
-            counts: None,
+            buffers: None,
         })
     }
 }
@@ -168,26 +120,26 @@ impl<'de> Deserialize<'de> for IObject {
     {
         deserializer.deserialize_map(ObjectVisitor {
             fpha_config: None,
-            counts: None,
+            buffers: None,
         })
     }
 }
 
 struct ValueVisitor<'a> {
     fpha_config: Option<FPHAConfig>,
-    counts: Option<&'a mut std::vec::IntoIter<usize>>,
+    buffers: Option<&'a mut Vec<ObjectBuffer>>,
 }
 
 impl ValueVisitor<'_> {
     fn new(fpha_config: Option<FPHAConfig>) -> Self {
         ValueVisitor {
             fpha_config,
-            counts: None,
+            buffers: None,
         }
     }
 }
 
-// Reuse the visitor as a seed so nested values borrow the same count iterator.
+// Nested visitors share the pool of reusable object buffers.
 impl<'de> DeserializeSeed<'de> for ValueVisitor<'_> {
     type Value = IValue;
 
@@ -261,7 +213,7 @@ impl<'de> Visitor<'de> for ValueVisitor<'_> {
     {
         ArrayVisitor {
             fpha_config: self.fpha_config,
-            counts: self.counts,
+            buffers: self.buffers,
         }
         .visit_seq(visitor)
         .map(Into::into)
@@ -273,7 +225,7 @@ impl<'de> Visitor<'de> for ValueVisitor<'_> {
     {
         ObjectVisitor {
             fpha_config: self.fpha_config,
-            counts: self.counts,
+            buffers: self.buffers,
         }
         .visit_map(visitor)
         .map(Into::into)
@@ -346,7 +298,7 @@ impl<'de> Visitor<'de> for StringVisitor {
 
 struct ArrayVisitor<'a> {
     fpha_config: Option<FPHAConfig>,
-    counts: Option<&'a mut std::vec::IntoIter<usize>>,
+    buffers: Option<&'a mut Vec<ObjectBuffer>>,
 }
 
 impl<'de> Visitor<'de> for ArrayVisitor<'_> {
@@ -365,7 +317,7 @@ impl<'de> Visitor<'de> for ArrayVisitor<'_> {
             .map_err(|_| SError::custom("Failed to allocate array"))?;
         while let Some(v) = visitor.next_element_seed(ValueVisitor {
             fpha_config: self.fpha_config,
-            counts: self.counts.as_deref_mut(),
+            buffers: self.buffers.as_deref_mut(),
         })? {
             match self.fpha_config {
                 Some(FPHAConfig { fpha_type }) => arr.push_with_fp_type(v, fpha_type),
@@ -379,7 +331,7 @@ impl<'de> Visitor<'de> for ArrayVisitor<'_> {
 
 struct ObjectVisitor<'a> {
     fpha_config: Option<FPHAConfig>,
-    counts: Option<&'a mut std::vec::IntoIter<usize>>,
+    buffers: Option<&'a mut Vec<ObjectBuffer>>,
 }
 
 impl<'de> Visitor<'de> for ObjectVisitor<'_> {
@@ -389,26 +341,50 @@ impl<'de> Visitor<'de> for ObjectVisitor<'_> {
         formatter.write_str("JSON object")
     }
 
-    fn visit_map<V>(mut self, mut visitor: V) -> Result<IObject, V::Error>
+    fn visit_map<V>(self, mut visitor: V) -> Result<IObject, V::Error>
     where
         V: MapAccess<'de>,
     {
-        // Consume the parent's count before visiting any of its children.
-        let capacity = self.counts.as_deref_mut().and_then(Iterator::next);
-        let mut obj = IObject::with_capacity(capacity.or_else(|| visitor.size_hint()).unwrap_or(0))
+        if let Some(buffers) = self.buffers {
+            let mut buffer = buffers.pop().unwrap_or_default();
+            while let Some(key) = visitor.next_key::<IString>()? {
+                let value = visitor.next_value_seed(ValueVisitor {
+                    fpha_config: self.fpha_config,
+                    buffers: Some(&mut *buffers),
+                })?;
+                if let Some(&index) = buffer.indices.get(&key) {
+                    buffer.fields[index].1 = value;
+                } else {
+                    buffer.fields.try_reserve(1).map_err(SError::custom)?;
+                    buffer
+                        .indices
+                        .try_reserve(1)
+                        .map_err(|_| SError::custom("Failed to allocate object buffer"))?;
+                    buffer.indices.insert(key.clone(), buffer.fields.len());
+                    buffer.fields.push((key, value));
+                }
+            }
+            // Allocate after parsing the fields, using the number of unique keys.
+            buffer.indices.clear();
+            let mut obj = IObject::with_capacity(buffer.fields.len())
+                .map_err(|_| SError::custom("Failed to allocate object"))?;
+            for (key, value) in buffer.fields.drain(..) {
+                obj.insert(key, value).map_err(SError::custom)?;
+            }
+            buffers.try_reserve(1).map_err(SError::custom)?;
+            buffers.push(buffer);
+            return Ok(obj);
+        }
+
+        let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate object"))?;
         while let Some(k) = visitor.next_key::<IString>()? {
             let v = visitor.next_value_seed(ValueVisitor {
                 fpha_config: self.fpha_config,
-                counts: self.counts.as_deref_mut(),
+                buffers: None,
             })?;
             obj.insert(k, v)
                 .map_err(|e| SError::custom(e.to_string()))?;
-        }
-        // Repeated keys overwrite earlier values, but the sizing pass counts
-        // every occurrence. Release those slots only on the hinted path.
-        if capacity.is_some() && obj.capacity() > obj.len() {
-            obj.shrink_to_fit();
         }
         Ok(obj)
     }
@@ -1184,11 +1160,30 @@ mod tests {
     use serde::de::DeserializeSeed;
 
     #[test]
-    fn object_counts_bounds_nesting() {
-        assert_eq!(object_counts(r#"{"a":[{"b":1}],"c":{}}"#), vec![2, 1, 0]);
-        assert!(object_counts(&"[".repeat(129)).is_empty());
-        // Discard earlier hints too: partial counts would misalign later objects.
-        assert!(object_counts(&format!("{{\"a\":{{}},\"b\":{}", "[".repeat(128))).is_empty());
+    #[cfg(not(miri))]
+    fn compact_objects_do_not_reserve_for_unvalidated_or_duplicate_fields() {
+        for (input, valid) in [
+            (format!("{{{}", ":".repeat(100_000)), false),
+            (r#"{"a":{"x":1},"b":[{"y":2},"#.to_owned(), false),
+            (
+                format!("{{{}\"same\":2}}", "\"same\":1,".repeat(100_000)),
+                true,
+            ),
+        ] {
+            // Build the input outside the measured scope. Repetition must not
+            // translate into a proportional temporary or final object allocation.
+            let allocations = mockalloc::record_allocs(|| {
+                let mut de = serde_json::Deserializer::from_str(&input);
+                let result = IValueDeserSeed::new(None).deserialize_compact_objects(&mut de);
+                assert_eq!(result.is_ok(), valid);
+                if let Ok(value) = result {
+                    assert_eq!(value.as_object().unwrap().capacity(), 1);
+                    de.end().unwrap();
+                }
+            });
+            assert!(allocations.peak_mem() < 64 * 1024);
+            allocations.result().unwrap();
+        }
     }
 
     #[test]
