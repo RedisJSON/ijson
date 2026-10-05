@@ -703,7 +703,7 @@ impl IObject {
 
     /// Moves already-deduplicated inline fields into their final storage.
     pub(crate) fn from_unique_inline_entries(
-        entries: smallvec::SmallVec<[(IString, IValue); crate::de::OBJECT_BUFFER_INLINE_CAPACITY]>,
+        entries: crate::de::InlineObjectEntries,
     ) -> Result<Self, IJsonError> {
         let mut obj = Self::with_capacity(entries.len())?;
         if !entries.is_empty() {

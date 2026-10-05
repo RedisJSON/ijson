@@ -56,6 +56,9 @@ impl IValueDeserSeed {
 /// Temporary parser storage; independent of the final object's table threshold.
 pub(crate) const OBJECT_BUFFER_INLINE_CAPACITY: usize = 16;
 
+pub(crate) type InlineObjectEntries =
+    smallvec::SmallVec<[(IString, IValue); OBJECT_BUFFER_INLINE_CAPACITY]>;
+
 // IndexMap preserves insertion order and replaces duplicate values. Reuse the
 // existing hash builder and retain drained maps for later sibling objects.
 pub(crate) type ObjectBuffer =
@@ -350,8 +353,7 @@ impl<'de> Visitor<'de> for ObjectVisitor<'_> {
         if let Some(buffer_pool) = self.buffers {
             // Keep up to 16 unique fields inline while parsing. Final objects
             // still use their own eight-field threshold for hash tables.
-            let mut inline_entries =
-                smallvec::SmallVec::<[(IString, IValue); OBJECT_BUFFER_INLINE_CAPACITY]>::new();
+            let mut inline_entries = InlineObjectEntries::new();
             let mut indexed_entries: Option<ObjectBuffer> = None;
             // Nested values reuse the same pool, but each active object owns its entries.
             while let Some((key, value)) = map_access.next_entry_seed(
