@@ -177,8 +177,19 @@ fn typed_le_tag<T: LeBytes>(tag: u64, s: &[T]) -> Value {
 
 /// Decodes an [`IValue`] tree from CBOR bytes produced by [`encode`].
 pub fn decode(bytes: &[u8]) -> Result<IValue, CborDecodeError> {
-    let cbor: Value = ciborium::from_reader(bytes).map_err(|_| CborDecodeError::DecodeError)?;
-    cbor_to_ivalue(cbor, 0)
+    decode_with_depth_limit(bytes, true)
+}
+
+/// Decodes an [`IValue`] tree, optionally enforcing the standard nesting limit.
+pub fn decode_with_depth_limit(bytes: &[u8], limit_depth: bool) -> Result<IValue, CborDecodeError> {
+    let recursion_limit = if limit_depth {
+        MAX_DEPTH as usize
+    } else {
+        usize::MAX
+    };
+    let cbor: Value = ciborium::de::from_reader_with_recursion_limit(bytes, recursion_limit)
+        .map_err(|_| CborDecodeError::DecodeError)?;
+    cbor_to_ivalue(cbor, 0, limit_depth)
 }
 
 /// Decodes an [`IValue`] tree from bytes produced by [`encode_compressed`].
@@ -187,8 +198,8 @@ pub fn decode_compressed(bytes: &[u8]) -> Result<IValue, CborDecodeError> {
     decode(&raw)
 }
 
-fn cbor_to_ivalue(val: Value, depth: u32) -> Result<IValue, CborDecodeError> {
-    if depth >= MAX_DEPTH {
+fn cbor_to_ivalue(val: Value, depth: u32, limit_depth: bool) -> Result<IValue, CborDecodeError> {
+    if limit_depth && depth >= MAX_DEPTH {
         return Err(CborDecodeError::DepthLimitExceeded);
     }
     match val {
@@ -209,7 +220,7 @@ fn cbor_to_ivalue(val: Value, depth: u32) -> Result<IValue, CborDecodeError> {
             let hint = arr.len().min(1024);
             let mut out = IArray::with_capacity(hint).map_err(|_| CborDecodeError::AllocError)?;
             for v in arr {
-                let iv = cbor_to_ivalue(v, depth + 1)?;
+                let iv = cbor_to_ivalue(v, depth + 1, limit_depth)?;
                 out.push(iv).map_err(|_| CborDecodeError::AllocError)?;
             }
             Ok(out.into())
@@ -222,7 +233,7 @@ fn cbor_to_ivalue(val: Value, depth: u32) -> Result<IValue, CborDecodeError> {
                     Value::Text(s) => s,
                     _ => return Err(CborDecodeError::InvalidValue),
                 };
-                let val = cbor_to_ivalue(v, depth + 1)?;
+                let val = cbor_to_ivalue(v, depth + 1, limit_depth)?;
                 obj.insert(&key, val)
                     .map_err(|_| CborDecodeError::AllocError)?;
             }
@@ -425,6 +436,18 @@ mod tests {
         assert!(matches!(a.as_slice(), ArraySliceRef::F32(_)));
         assert!(matches!(c.as_slice(), ArraySliceRef::F32(_)));
         assert_eq!(obj.get("b").unwrap().as_string().unwrap().as_str(), "text");
+    }
+
+    #[test]
+    fn test_optional_depth_limit() {
+        let mut value = IValue::NULL;
+        for _ in 0..300 {
+            value = IArray::try_from(vec![value]).unwrap().into();
+        }
+
+        let bytes = encode(&value);
+        assert!(decode(&bytes).is_err());
+        assert_eq!(decode_with_depth_limit(&bytes, false).unwrap(), value);
     }
 
     #[test]
