@@ -96,7 +96,15 @@ struct SplitHeader<'a> {
 impl<'a> SplitHeader<'a> {
     // Returns the *item index* (Ok) in no-table mode, or the *table bucket* (Ok) in table mode.
     fn find_bucket(&self, key: &IString) -> Result<u32, u32> {
+        self.find_bucket_impl::<true>(key)
+    }
+
+    // Unique entries still need collision handling, but no equality checks.
+    fn find_bucket_impl<const CHECK_DUPLICATES: bool>(&self, key: &IString) -> Result<u32, u32> {
         if !has_table(self.cap) {
+            if !CHECK_DUPLICATES {
+                return Err(u32::MAX);
+            }
             // Small object: linear scan the items array.
             // No table bucket to report; insertion just appends.
             return self
@@ -121,7 +129,7 @@ impl<'a> SplitHeader<'a> {
 
                 // If the bucket contains our key, we found the bucket
                 let k = &self.items.get_unchecked(index as usize).key;
-                if k == key {
+                if CHECK_DUPLICATES && k == key {
                     return Ok(bucket as u32);
                 }
 
@@ -331,6 +339,16 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
             .write(KeyValuePair { key, value });
         self.set_len(res.checked_add(1).expect("object length overflow"));
         res
+    }
+
+    // SAFETY: there must be capacity for one more entry, and key must be absent.
+    unsafe fn push_unique(&mut self, key: IString, value: IValue) {
+        let bucket = self
+            .split()
+            .find_bucket_impl::<false>(&key)
+            .expect_err("unique insertion only finds vacant buckets");
+        let index = self.push(key, value);
+        self.reborrow().split_mut().shift(bucket, index);
     }
     fn clear(&mut self) {
         // Clear the table
@@ -683,6 +701,44 @@ impl IObject {
         }
     }
 
+    /// Moves already-deduplicated inline fields into their final storage.
+    pub(crate) fn from_unique_inline_entries(
+        entries: crate::de::InlineObjectEntries,
+    ) -> Result<Self, IJsonError> {
+        let mut obj = Self::with_capacity(entries.len())?;
+        if !entries.is_empty() {
+            // SAFETY: the object is non-static and has space for every entry.
+            // The parser has already removed duplicate keys. Objects above
+            // the storage threshold still need their hash table initialized.
+            unsafe {
+                let mut header = obj.header_mut();
+                for (key, value) in entries {
+                    header.push_unique(key, value);
+                }
+            }
+        }
+        Ok(obj)
+    }
+
+    /// Moves fields whose uniqueness is guaranteed by the source map.
+    pub(crate) fn from_unique_entries(
+        entries: &mut crate::de::ObjectBuffer,
+    ) -> Result<Self, IJsonError> {
+        let mut obj = Self::with_capacity(entries.len())?;
+        if !entries.is_empty() {
+            // SAFETY: allocation covers every drained entry; the source map
+            // guarantees unique keys. Existing probing and shifting preserve
+            // the final table's collision and lookup invariants.
+            unsafe {
+                let mut header = obj.header_mut();
+                for (key, value) in entries.drain(..) {
+                    header.push_unique(key, value);
+                }
+            }
+        }
+        Ok(obj)
+    }
+
     fn header(&self) -> ThinRef<'_, Header> {
         unsafe { ThinRef::new(self.0.ptr().cast()) }
     }
@@ -740,10 +796,19 @@ impl IObject {
         if current_capacity >= desired_capacity {
             return Ok(());
         }
-        self.resize_internal(cmp::max(
-            current_capacity.checked_mul(2).ok_or(AllocError)?,
+        let grown = cmp::max(
+            current_capacity
+                .checked_add(current_capacity.div_ceil(4))
+                .ok_or(AllocError)?,
             desired_capacity.max(4),
-        ))
+        );
+        // Exact-size parsed objects can have capacities such as 5 or 7. Keep
+        // growth table-free while all requested fields still fit a small object.
+        self.resize_internal(if desired_capacity <= SMALL_OBJECT_THRESHOLD {
+            grown.min(SMALL_OBJECT_THRESHOLD)
+        } else {
+            grown
+        })
     }
 
     /// Returns a view of an entry within this object.
@@ -751,9 +816,20 @@ impl IObject {
     /// # Errors
     /// Returns an `AllocError` if reserving space for the entry fails.
     pub fn entry(&mut self, key: impl Into<IString>) -> Result<Entry<'_>, IJsonError> {
+        let key = key.into();
+        // A full object only needs to grow if the key is absent.
+        if self.len() == self.capacity() {
+            if let Ok(bucket) = self.header().split().find_bucket(&key) {
+                return Ok(Entry::Occupied(OccupiedEntry {
+                    // SAFETY: finding an occupied entry proves the object is non-static.
+                    header: unsafe { self.header_mut() },
+                    bucket,
+                }));
+            }
+        }
         self.reserve(1)?;
         // Safety: cannot be static after reserving space
-        Ok(unsafe { self.header_mut().entry(key.into()) })
+        Ok(unsafe { self.header_mut().entry(key) })
     }
     /// Returns a view of an entry within this object, whilst avoiding
     /// cloning the key if the entry is already occupied.
@@ -761,6 +837,16 @@ impl IObject {
     /// # Errors
     /// Returns an `AllocError` if reserving space for the entry fails.
     pub fn entry_or_clone(&mut self, key: &IString) -> Result<Entry<'_>, IJsonError> {
+        // Reuse the occupied bucket instead of reserving or probing a second time.
+        if self.len() == self.capacity() {
+            if let Ok(bucket) = self.header().split().find_bucket(key) {
+                return Ok(Entry::Occupied(OccupiedEntry {
+                    // SAFETY: finding an occupied entry proves the object is non-static.
+                    header: unsafe { self.header_mut() },
+                    bucket,
+                }));
+            }
+        }
         self.reserve(1)?;
         // Safety: cannot be static after reserving space
         Ok(unsafe { self.header_mut().entry_or_clone(key) })
@@ -1276,6 +1362,68 @@ impl<A: DefragAllocator> Defrag<A> for IObject {
 mod tests {
     use super::*;
     use crate::convert::TryCollect;
+
+    #[test]
+    fn unique_entries_preserve_colliding_keys() {
+        let mut entries = indexmap::IndexMap::default();
+        let cap = hash_capacity(20);
+        // Force collisions across the end of the table to exercise wrapping.
+        for i in 0.. {
+            let key = IString::intern(&format!("collision_field_{i}"));
+            if hash_bucket(&key, cap) >= cap - 2 {
+                entries.insert(key, IValue::NULL);
+            }
+            if entries.len() == 20 {
+                break;
+            }
+        }
+        let keys: Vec<_> = entries.keys().cloned().collect();
+        entries.insert(keys[0].clone(), true.into());
+        let mut object = IObject::from_unique_entries(&mut entries).unwrap();
+        assert!(entries.is_empty());
+        assert_eq!(object.capacity(), 20);
+        assert_eq!(object.keys().cloned().collect::<Vec<_>>(), keys);
+        for (i, key) in keys.iter().enumerate() {
+            let expected = if i == 0 { true.into() } else { IValue::NULL };
+            assert_eq!(object.get(key.as_str()), Some(&expected));
+        }
+        for key in keys {
+            assert!(object.remove(key.as_str()).is_some());
+        }
+        assert!(object.is_empty());
+        object.insert("another_long_field", IValue::NULL).unwrap();
+        assert_eq!(object.get("another_long_field"), Some(&IValue::NULL));
+    }
+
+    #[test]
+    fn unique_inline_entries_move_and_grow() {
+        // Heap keys exercise string allocation and ownership under Miri.
+        for len in 0..=crate::de::OBJECT_BUFFER_INLINE_CAPACITY {
+            let entries = (0..len)
+                .map(|i| {
+                    (
+                        IString::intern(&format!("long_field_name_{i}")),
+                        IValue::NULL,
+                    )
+                })
+                .collect();
+            let mut object = IObject::from_unique_inline_entries(entries).unwrap();
+            assert_eq!(object.len() as usize, len);
+            assert_eq!(object.capacity() as usize, len);
+            for i in len..17 {
+                object
+                    .insert(format!("long_field_name_{i}"), IValue::NULL)
+                    .unwrap();
+            }
+            assert_eq!(object.len(), 17);
+            for i in 0..17 {
+                assert_eq!(
+                    object.get(format!("long_field_name_{i}").as_str()),
+                    Some(&IValue::NULL)
+                );
+            }
+        }
+    }
 
     #[mockalloc::test]
     fn can_create() {

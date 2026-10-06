@@ -1,5 +1,6 @@
 use std::convert::TryFrom;
 use std::fmt::{self, Formatter};
+use std::marker::PhantomData;
 
 use serde::de::{
     DeserializeSeed, EnumAccess, Error as SError, Expected, IntoDeserializer, MapAccess, SeqAccess,
@@ -36,7 +37,32 @@ impl IValueDeserSeed {
     pub fn new(fpha_config: Option<FPHAConfig>) -> Self {
         IValueDeserSeed { fpha_config }
     }
+
+    /// Deserializes using temporary object buffers, then moves each object's
+    /// unique fields into exactly sized storage. Arrays keep normal growth.
+    /// The caller must still check for trailing input with the deserializer.
+    pub fn deserialize_compact_objects<'de, D>(self, deserializer: D) -> Result<IValue, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let mut buffers = Vec::new();
+        deserializer.deserialize_any(ValueVisitor {
+            fpha_config: self.fpha_config,
+            buffers: Some(&mut buffers),
+        })
+    }
 }
+
+/// Temporary parser storage; independent of the final object's table threshold.
+pub(crate) const OBJECT_BUFFER_INLINE_CAPACITY: usize = 16;
+
+pub(crate) type InlineObjectEntries =
+    smallvec::SmallVec<[(IString, IValue); OBJECT_BUFFER_INLINE_CAPACITY]>;
+
+// IndexMap preserves insertion order and replaces duplicate values. Reuse the
+// existing hash builder and retain drained maps for later sibling objects.
+pub(crate) type ObjectBuffer =
+    indexmap::IndexMap<IString, IValue, hashbrown::hash_map::DefaultHashBuilder>;
 
 impl<'de> DeserializeSeed<'de> for IValueDeserSeed {
     type Value = IValue;
@@ -82,7 +108,10 @@ impl<'de> Deserialize<'de> for IArray {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_seq(ArrayVisitor { fpha_config: None })
+        deserializer.deserialize_seq(ArrayVisitor {
+            fpha_config: None,
+            buffers: None,
+        })
     }
 }
 
@@ -91,21 +120,43 @@ impl<'de> Deserialize<'de> for IObject {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_map(ObjectVisitor { fpha_config: None })
+        deserializer.deserialize_map(ObjectVisitor {
+            fpha_config: None,
+            buffers: None,
+        })
     }
 }
 
-struct ValueVisitor {
+struct ValueVisitor<'a> {
     fpha_config: Option<FPHAConfig>,
+    // Pool of drained maps that retain capacity for reuse while parsing objects.
+    // Maps are popped when needed and returned after use; indices do not identify
+    // JSON objects or nesting levels. None selects ordinary deserialization.
+    buffers: Option<&'a mut Vec<ObjectBuffer>>,
 }
 
-impl ValueVisitor {
+impl ValueVisitor<'_> {
     fn new(fpha_config: Option<FPHAConfig>) -> Self {
-        ValueVisitor { fpha_config }
+        ValueVisitor {
+            fpha_config,
+            buffers: None,
+        }
     }
 }
 
-impl<'de> Visitor<'de> for ValueVisitor {
+// Nested visitors share the pool of reusable object buffers.
+impl<'de> DeserializeSeed<'de> for ValueVisitor<'_> {
+    type Value = IValue;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<IValue, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ValueVisitor<'_> {
     type Value = IValue;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
@@ -152,7 +203,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     where
         D: Deserializer<'de>,
     {
-        IValueDeserSeed::new(self.fpha_config).deserialize(deserializer)
+        self.deserialize(deserializer)
     }
 
     #[inline]
@@ -167,6 +218,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     {
         ArrayVisitor {
             fpha_config: self.fpha_config,
+            buffers: self.buffers,
         }
         .visit_seq(visitor)
         .map(Into::into)
@@ -178,6 +230,7 @@ impl<'de> Visitor<'de> for ValueVisitor {
     {
         ObjectVisitor {
             fpha_config: self.fpha_config,
+            buffers: self.buffers,
         }
         .visit_map(visitor)
         .map(Into::into)
@@ -248,11 +301,12 @@ impl<'de> Visitor<'de> for StringVisitor {
     }
 }
 
-struct ArrayVisitor {
+struct ArrayVisitor<'a> {
     fpha_config: Option<FPHAConfig>,
+    buffers: Option<&'a mut Vec<ObjectBuffer>>,
 }
 
-impl<'de> Visitor<'de> for ArrayVisitor {
+impl<'de> Visitor<'de> for ArrayVisitor<'_> {
     type Value = IArray;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
@@ -260,13 +314,16 @@ impl<'de> Visitor<'de> for ArrayVisitor {
     }
 
     #[inline]
-    fn visit_seq<V>(self, mut visitor: V) -> Result<IArray, V::Error>
+    fn visit_seq<V>(mut self, mut visitor: V) -> Result<IArray, V::Error>
     where
         V: SeqAccess<'de>,
     {
         let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate array"))?;
-        while let Some(v) = visitor.next_element_seed(IValueDeserSeed::new(self.fpha_config))? {
+        while let Some(v) = visitor.next_element_seed(ValueVisitor {
+            fpha_config: self.fpha_config,
+            buffers: self.buffers.as_deref_mut(),
+        })? {
             match self.fpha_config {
                 Some(FPHAConfig { fpha_type }) => arr.push_with_fp_type(v, fpha_type),
                 None => arr.push(v).map_err(Into::into),
@@ -277,29 +334,96 @@ impl<'de> Visitor<'de> for ArrayVisitor {
     }
 }
 
-struct ObjectVisitor {
+struct ObjectVisitor<'a> {
     fpha_config: Option<FPHAConfig>,
+    buffers: Option<&'a mut Vec<ObjectBuffer>>,
 }
 
-impl<'de> Visitor<'de> for ObjectVisitor {
+impl<'de> Visitor<'de> for ObjectVisitor<'_> {
     type Value = IObject;
 
     fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
         formatter.write_str("JSON object")
     }
 
-    fn visit_map<V>(self, mut visitor: V) -> Result<IObject, V::Error>
+    fn visit_map<V>(self, mut map_access: V) -> Result<IObject, V::Error>
     where
         V: MapAccess<'de>,
     {
-        let mut obj = IObject::with_capacity(visitor.size_hint().unwrap_or(0))
+        if let Some(buffer_pool) = self.buffers {
+            // Keep up to 16 unique fields inline while parsing. Final objects
+            // still use their own eight-field threshold for hash tables.
+            let mut inline_entries = InlineObjectEntries::new();
+            let mut indexed_entries: Option<ObjectBuffer> = None;
+            // Nested values reuse the same pool, but each active object owns its entries.
+            while let Some((key, value)) = map_access.next_entry_seed(
+                PhantomData::<IString>,
+                ValueVisitor {
+                    fpha_config: self.fpha_config,
+                    buffers: Some(&mut *buffer_pool),
+                },
+            )? {
+                let entries_map = match &mut indexed_entries {
+                    Some(entries_map) => entries_map,
+                    None => {
+                        // Duplicate keys replace their value without consuming another slot.
+                        if let Some((_, existing_value)) = inline_entries
+                            .iter_mut()
+                            .find(|(existing_key, _)| *existing_key == key)
+                        {
+                            *existing_value = value;
+                            continue;
+                        }
+                        if inline_entries.len() < OBJECT_BUFFER_INLINE_CAPACITY {
+                            inline_entries.push((key, value));
+                            continue;
+                        }
+                        // The next unique field exceeds inline storage: move to a pooled map.
+                        let mut entries_map = buffer_pool.pop().unwrap_or_default();
+                        entries_map
+                            .try_reserve(inline_entries.len() + 1)
+                            .map_err(SError::custom)?;
+                        entries_map.extend(inline_entries.drain(..));
+                        indexed_entries.insert(entries_map)
+                    }
+                };
+                // Reserve only for new keys; inserting a duplicate replaces its value.
+                if entries_map.len() == entries_map.capacity() && !entries_map.contains_key(&key) {
+                    entries_map.try_reserve(1).map_err(SError::custom)?;
+                }
+                entries_map.insert(key, value);
+            }
+            // Allocate only for validated, unique fields; move their values.
+            if let Some(mut entries_map) = indexed_entries {
+                let object = IObject::from_unique_entries(&mut entries_map)
+                    .map_err(|_| SError::custom("Failed to allocate object"))?;
+                // Construction drains the map; retain its capacity for another object.
+                // Pooling is optional: a failed reservation must not reject
+                // an object that was already parsed successfully.
+                if buffer_pool.try_reserve(1).is_ok() {
+                    buffer_pool.push(entries_map);
+                }
+                return Ok(object);
+            }
+            return IObject::from_unique_inline_entries(inline_entries)
+                .map_err(|_| SError::custom("Failed to allocate object"));
+        }
+
+        // Ordinary deserialization inserts directly into a growing object.
+        let mut object = IObject::with_capacity(map_access.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate object"))?;
-        while let Some(k) = visitor.next_key::<IString>()? {
-            let v = visitor.next_value_seed(IValueDeserSeed::new(self.fpha_config))?;
-            obj.insert(k, v)
+        while let Some((key, value)) = map_access.next_entry_seed(
+            PhantomData::<IString>,
+            ValueVisitor {
+                fpha_config: self.fpha_config,
+                buffers: None,
+            },
+        )? {
+            object
+                .insert(key, value)
                 .map_err(|e| SError::custom(e.to_string()))?;
         }
-        Ok(obj)
+        Ok(object)
     }
 }
 
@@ -1071,6 +1195,33 @@ mod tests {
     use super::*;
     use crate::array::ArraySliceRef;
     use serde::de::DeserializeSeed;
+
+    #[test]
+    #[cfg(not(miri))]
+    fn compact_objects_do_not_reserve_for_unvalidated_or_duplicate_fields() {
+        for (input, valid) in [
+            (format!("{{{}", ":".repeat(100_000)), false),
+            (r#"{"a":{"x":1},"b":[{"y":2},"#.to_owned(), false),
+            (
+                format!("{{{}\"same\":2}}", "\"same\":1,".repeat(100_000)),
+                true,
+            ),
+        ] {
+            // Build the input outside the measured scope. Repetition must not
+            // translate into a proportional temporary or final object allocation.
+            let allocations = mockalloc::record_allocs(|| {
+                let mut de = serde_json::Deserializer::from_str(&input);
+                let result = IValueDeserSeed::new(None).deserialize_compact_objects(&mut de);
+                assert_eq!(result.is_ok(), valid);
+                if let Ok(value) = result {
+                    assert_eq!(value.as_object().unwrap().capacity(), 1);
+                    de.end().unwrap();
+                }
+            });
+            assert!(allocations.peak_mem() < 64 * 1024);
+            allocations.result().unwrap();
+        }
+    }
 
     #[test]
     fn test_deserialize_with_f64_fp() {
