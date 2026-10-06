@@ -5,6 +5,7 @@ use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::ptr::{copy_nonoverlapping, NonNull};
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
@@ -14,7 +15,8 @@ use lazy_static::lazy_static;
 
 use crate::{
     thin::{ThinMut, ThinMutExt, ThinRef, ThinRefExt},
-    Defrag, DefragAllocator, IValue, TypeTag,
+    value::TypeTag,
+    Defrag, DefragAllocator, IValue,
 };
 
 #[repr(C)]
@@ -73,6 +75,10 @@ fn ctor_init_cache() {
 #[doc(hidden)]
 pub fn init_cache() {
     lazy_static::initialize(&STRING_CACHE);
+}
+
+pub(crate) fn reinit_cache() {
+    STRING_CACHE.clear();
 }
 
 struct WeakIString {
@@ -275,7 +281,13 @@ impl IString {
             let mut guard = shard.write();
             if hd.rc.fetch_sub(1, AtomicOrdering::Relaxed) == 1 {
                 // Reference count reached zero, free the string
-                assert!(guard.remove(hd.str()).is_some());
+                // A cache reset can replace this allocation while old handles remain alive.
+                if guard
+                    .get_key_value(hd.str())
+                    .is_some_and(|(entry, _)| entry.ptr.as_ptr().cast_const() == hd.ptr())
+                {
+                    guard.remove(hd.str());
+                }
 
                 // Shrink the shard if it's mostly empty.
                 // The second condition is necessary because `HashMap` sometimes
@@ -298,6 +310,24 @@ impl IString {
             Self::layout(self.len()).unwrap().size() as f64
                 / self.header().rc.load(AtomicOrdering::Relaxed) as f64
         }
+    }
+
+    /// Identity of this string's heap allocation: the untagged header address,
+    /// the length in bytes and the number of live owners.
+    ///
+    /// `None` for the empty string, which shares a static header. Every other
+    /// string is allocated, and all clones of it report the same address. Use
+    /// this instead of `as_ptr()`, which points at the bytes rather than the
+    /// header. Reads the header without writing it or touching the cache. The
+    /// owner count is a relaxed snapshot.
+    pub(crate) fn heap_identity(&self) -> Option<(NonZeroUsize, usize, usize)> {
+        let header = self.header();
+        let len = header.len();
+        if len == 0 {
+            return None;
+        }
+        let owners = header.rc.load(AtomicOrdering::Relaxed);
+        NonZeroUsize::new(header.ptr() as usize).map(|address| (address, len, owners))
     }
 }
 
@@ -403,7 +433,7 @@ impl PartialOrd for IString {
 }
 impl Hash for IString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.raw_hash(state);
+        self.as_str().hash(state);
     }
 }
 
@@ -422,6 +452,68 @@ impl<A: DefragAllocator> Defrag<A> for IString {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_encoding_never_waits_for_the_cache() {
+        use crate::{IArray, IValue, StreamEncoder, StreamEncoderConfig};
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        let shared = IString::from("a string shared by two array slots");
+        let doc: IValue = IArray::try_from(vec![
+            IValue::from(shared.clone()),
+            IValue::from(shared.clone()),
+        ])
+        .unwrap()
+        .into();
+
+        let mut encoder = StreamEncoder::new(StreamEncoderConfig {
+            table_budget_bytes: 1 << 20,
+            max_def_bytes: 0,
+        });
+        // With every shard locked, interning or freeing a string would block.
+        let guards: Vec<_> = STRING_CACHE.shards().iter().map(|s| s.write()).collect();
+        let (sender, receiver) = channel();
+        let used = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let used = encoder.encode_into(&mut Vec::new(), &doc, true);
+                sender.send(used).unwrap();
+            });
+            let used = receiver.recv_timeout(Duration::from_secs(10));
+            // Release the locks first, so that a blocked encoder can finish.
+            drop(guards);
+            used
+        });
+        let used = used.expect("encoding waited for the string cache");
+        assert_eq!((used.defs, used.refs), (1, 1));
+    }
+
+    #[mockalloc::test]
+    fn heap_identity_names_the_shared_allocation() {
+        let first = IString::intern("heap identity of a long string");
+        let (address, len, owners) = first.heap_identity().unwrap();
+        assert_eq!((len, owners), (first.len(), 1));
+        assert_eq!(address.get() % 8, 0);
+        assert_eq!(
+            first.as_ptr() as usize,
+            address.get() + std::mem::size_of::<Header>()
+        );
+        let second = first.clone();
+        assert_eq!(second.heap_identity(), Some((address, len, 2)));
+        drop(second);
+        assert_eq!(first.heap_identity(), Some((address, len, 1)));
+        let other = IString::intern("another long string with other bytes");
+        let (other_address, other_len, _) = other.heap_identity().unwrap();
+        assert_ne!(other_address, address);
+        assert_eq!(other_len, other.len());
+    }
+
+    #[mockalloc::test]
+    fn heap_identity_ignores_only_the_empty_string() {
+        assert_eq!(IString::intern("").heap_identity(), None);
+        let short = IString::intern("a");
+        assert_eq!(short.heap_identity().unwrap().1, 1);
+    }
 
     #[mockalloc::test]
     fn can_intern() {

@@ -139,6 +139,51 @@ case that is important in the original JSON.
 
 Removing from an `IObject` will disrupt the insertion order.
 
+### String streams
+
+`StreamEncoder` shares strings across the documents of one ordered stream. A
+string with at least two owners and at least 8 bytes is
+written inline once, wrapped in CBOR tag 6 (a definition), and every later
+occurrence is written as tag 7 plus an ID (a reference). IDs are implicit: the
+n-th definition of the stream is ID n, so `StreamDecoder` rebuilds the table by
+decoding the documents in the order they were encoded. A reference costs 2, 3, 4
+or 6 bytes for IDs below 24, 256, 65,536 and 2^32. Typed numeric arrays keep their
+existing CBOR tags, and `encode`/`decode` and the compressed APIs keep their
+standalone formats.
+
+```rust
+use ijson::{IValue, StreamDecoder, StreamEncoder, StreamEncoderConfig};
+
+let mut encoder = StreamEncoder::new(StreamEncoderConfig {
+    table_budget_bytes: 64 << 20,
+    max_def_bytes: 0, // no bound
+});
+let first: IValue = serde_json::from_str(r#"{"k":"a string stored in two documents"}"#).unwrap();
+let second: IValue = serde_json::from_str(r#"{"k":"a string stored in two documents"}"#).unwrap();
+
+let (mut first_bytes, mut second_bytes) = (Vec::new(), Vec::new());
+encoder.encode_into(&mut first_bytes, &first, true); // defines the string
+encoder.encode_into(&mut second_bytes, &second, true); // references it
+
+let mut decoder = StreamDecoder::new();
+assert_eq!(decoder.decode(&first_bytes, true).unwrap(), first);
+assert_eq!(decoder.decode(&second_bytes, true).unwrap(), second);
+```
+
+The encoder recognizes a string by the address of its shared allocation, so it
+neither hashes nor copies string bytes and only reads them. The caller must keep
+all defined string allocations alive and at the same address until the stream
+ends. The encoder holds no owned handles. A freed string whose address another
+string of the same length takes over goes unnoticed, and the reader gets the old
+text; only a string of another length at a registered address is noticed, which
+poisons the encoder: that string and every later one is written inline. The table budget bounds the
+encoder's memory: when one more definition
+would exceed it, new strings stay inline while earlier ones keep being
+referenced. If a document that defined strings is not written, call `poison()`;
+every later document is then plain CBOR. `StreamEncoder::next_id` before a
+document and `StreamDecoder::len` before reading it must agree, which lets a
+framing layer detect skipped, repeated or reordered documents.
+
 ## Technical details
 
 ### `IValue`

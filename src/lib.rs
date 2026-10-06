@@ -56,7 +56,9 @@ pub mod cbor;
 mod de;
 mod ser;
 pub use cbor::{
-    decode, decode_compressed, decode_with_depth_limit, encode, encode_compressed, CborDecodeError,
+    decode, decode_compressed, decode_with_depth_limit, encode, encode_compressed, encode_into,
+    CborDecodeError, DocUse, StreamDecoder, StreamDecoderStats, StreamEncoder, StreamEncoderConfig,
+    StreamEncoderStats,
 };
 pub use de::{from_value, FPHAConfig, IValueDeserSeed};
 pub use ser::to_value;
@@ -83,14 +85,27 @@ pub trait Defrag<A: DefragAllocator> {
 /// Any json that still uses a shared string will continue using it.
 /// But new strings will be reinitialized instead of reused the old ones.
 pub fn reinit_shared_string_cache() {
+    #[cfg(not(feature = "thread_safe"))]
     unsafe_string::reinit_cache();
+    #[cfg(feature = "thread_safe")]
+    string::reinit_cache();
 }
 
 /// Initialized shared string cache. Either thread safe or thread unsafe (in case
 /// the user know the string cache is protected by other means or the application is
 /// single threaded). Return `Ok(())` on succeed and error if the cache is already initialized.
+/// With the `thread_safe` feature, initialization is idempotent and always concurrent.
 pub fn init_shared_string_cache(thread_safe: bool) -> Result<(), String> {
-    unsafe_string::init_cache(thread_safe)
+    #[cfg(not(feature = "thread_safe"))]
+    {
+        unsafe_string::init_cache(thread_safe)
+    }
+    #[cfg(feature = "thread_safe")]
+    {
+        let _ = thread_safe;
+        string::init_cache();
+        Ok(())
+    }
 }
 
 #[cfg(all(test, not(miri)))]

@@ -1227,7 +1227,14 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
-            assert_eq!(x.mem_allocated(), 0.0);
+            assert_eq!(
+                x.mem_allocated(),
+                if cfg!(feature = "thread_safe") {
+                    12.0
+                } else {
+                    0.0
+                }
+            );
         }
 
         let s = String::from("foofoofoo");
@@ -1239,7 +1246,14 @@ mod tests {
         assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
         assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
         assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
-        assert_eq!(x.mem_allocated(), 24.0);
+        assert_eq!(
+            x.mem_allocated(),
+            if cfg!(feature = "thread_safe") {
+                32.0
+            } else {
+                24.0
+            }
+        );
     }
 
     #[mockalloc::test]
