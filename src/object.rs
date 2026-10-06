@@ -816,9 +816,20 @@ impl IObject {
     /// # Errors
     /// Returns an `AllocError` if reserving space for the entry fails.
     pub fn entry(&mut self, key: impl Into<IString>) -> Result<Entry<'_>, IJsonError> {
+        let key = key.into();
+        // A full object only needs to grow if the key is absent.
+        if self.len() == self.capacity() {
+            if let Ok(bucket) = self.header().split().find_bucket(&key) {
+                return Ok(Entry::Occupied(OccupiedEntry {
+                    // SAFETY: finding an occupied entry proves the object is non-static.
+                    header: unsafe { self.header_mut() },
+                    bucket,
+                }));
+            }
+        }
         self.reserve(1)?;
         // Safety: cannot be static after reserving space
-        Ok(unsafe { self.header_mut().entry(key.into()) })
+        Ok(unsafe { self.header_mut().entry(key) })
     }
     /// Returns a view of an entry within this object, whilst avoiding
     /// cloning the key if the entry is already occupied.
@@ -826,6 +837,16 @@ impl IObject {
     /// # Errors
     /// Returns an `AllocError` if reserving space for the entry fails.
     pub fn entry_or_clone(&mut self, key: &IString) -> Result<Entry<'_>, IJsonError> {
+        // Reuse the occupied bucket instead of reserving or probing a second time.
+        if self.len() == self.capacity() {
+            if let Ok(bucket) = self.header().split().find_bucket(key) {
+                return Ok(Entry::Occupied(OccupiedEntry {
+                    // SAFETY: finding an occupied entry proves the object is non-static.
+                    header: unsafe { self.header_mut() },
+                    bucket,
+                }));
+            }
+        }
         self.reserve(1)?;
         // Safety: cannot be static after reserving space
         Ok(unsafe { self.header_mut().entry_or_clone(key) })

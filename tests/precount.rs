@@ -13,6 +13,53 @@ fn parse(s: &str, compact: bool) -> Result<IValue, serde_json::Error> {
 }
 
 #[test]
+fn replacing_compact_object_fields_does_not_grow_capacity() {
+    for count in [0, 1, 5, 8, 9, 16, 17, 100] {
+        let fields = (0..count)
+            .map(|i| format!("\"field{i}\":{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        for borrowed_key in [false, true] {
+            let mut value = parse(&format!("{{{fields}}}"), true).unwrap();
+            let object = value.as_object_mut().unwrap();
+            assert_eq!(object.capacity(), count);
+            for i in 0..count {
+                let key = ijson::IString::from(format!("field{i}").as_str());
+                let entry = if borrowed_key {
+                    object.entry_or_clone(&key)
+                } else {
+                    object.entry(key)
+                };
+                entry
+                    .unwrap()
+                    .and_modify(|value| *value = IValue::from(i + 1000))
+                    .or_insert(IValue::NULL);
+                assert_eq!(object.len(), count);
+                assert_eq!(object.capacity(), count);
+            }
+
+            // A genuinely new field must still reserve space, including on {}.
+            let key = ijson::IString::from("new_field");
+            let entry = if borrowed_key {
+                object.entry_or_clone(&key)
+            } else {
+                object.entry(key)
+            };
+            entry.unwrap().or_insert(IValue::from(true));
+            assert_eq!(object.len(), count + 1);
+            assert!(object.capacity() > count);
+            assert_eq!(object.get("new_field"), Some(&IValue::from(true)));
+            for i in 0..count {
+                assert_eq!(
+                    object.get(format!("field{i}").as_str()),
+                    Some(&IValue::from(i + 1000))
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn buffered_objects_preserve_values_errors_and_capacity() {
     for input in [
         r#"{"a":1,"b":2,"c":3,"d":4,"e":5}"#,
