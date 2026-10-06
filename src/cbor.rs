@@ -188,7 +188,10 @@ pub fn decode_with_depth_limit(bytes: &[u8], limit_depth: bool) -> Result<IValue
         usize::MAX
     };
     let cbor: Value = ciborium::de::from_reader_with_recursion_limit(bytes, recursion_limit)
-        .map_err(|_| CborDecodeError::DecodeError)?;
+        .map_err(|err| match err {
+            ciborium::de::Error::RecursionLimitExceeded => CborDecodeError::DepthLimitExceeded,
+            _ => CborDecodeError::DecodeError,
+        })?;
     cbor_to_ivalue(cbor, 0, limit_depth)
 }
 
@@ -446,7 +449,7 @@ mod tests {
         }
 
         let bytes = encode(&value);
-        assert!(decode(&bytes).is_err());
+        assert_eq!(decode(&bytes), Err(CborDecodeError::DepthLimitExceeded));
         assert_eq!(decode_with_depth_limit(&bytes, false).unwrap(), value);
     }
 
