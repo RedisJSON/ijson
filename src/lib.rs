@@ -55,7 +55,9 @@ pub use value::{
 pub mod cbor;
 mod de;
 mod ser;
-pub use cbor::{decode, decode_compressed, encode, encode_compressed, CborDecodeError};
+pub use cbor::{
+    decode, decode_compressed, decode_with_depth_limit, encode, encode_compressed, CborDecodeError,
+};
 pub use de::{from_value, FPHAConfig, IValueDeserSeed};
 pub use ser::to_value;
 
