@@ -184,6 +184,20 @@ every later document is then plain CBOR. `StreamEncoder::next_id` before a
 document and `StreamDecoder::len` before reading it must agree, which lets a
 framing layer detect skipped, repeated or reordered documents.
 
+To reuse a full table, call `StreamEncoder::reset_if_needed()` between documents
+that may define strings. It clears the table only after an eligible definition
+missed the table budget, preserving its allocation. Signal that reset in your
+framing and call `StreamDecoder::reset()` before decoding the next document
+that introduces definitions. Inline documents can precede that marker; they do
+not use the dictionary. Both dictionaries then assign IDs from 0 again.
+
+With resets, use cumulative `stats().defs` for framing positions rather than the
+current table length, and require a reset-bearing record to introduce a definition.
+Otherwise, skipping a reset-only record could silently reuse old IDs. Statistics
+and `max_def_bytes` stay cumulative across the entire stream; redefining text
+spends its bytes again. Reader resets release old dictionary handles while loaded
+values keep their own. Neither reset API clears a poisoned or failed state.
+
 ## Technical details
 
 ### `IValue`

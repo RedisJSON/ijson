@@ -12,6 +12,9 @@
 //! never hashes or copies string bytes to find repeats. An address identifies a
 //! string only while that string is alive. Callers must keep every defined
 //! allocation alive and at the same address until the stream ends.
+//!
+//! Callers may explicitly reset both dictionaries between documents. IDs then restart,
+//! while statistics and the definition-byte allowance remain cumulative.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -42,11 +45,13 @@ pub struct StreamEncoderConfig {
     /// old and new allocations while it grows. When one more definition would
     /// exceed it no more strings are defined: strings already defined keep being
     /// referenced and everything else is written inline. Zero defines nothing.
+    /// An explicit reset allows new definitions to reuse the table allocation.
     pub table_budget_bytes: usize,
     /// Bound on the UTF-8 bytes of the strings the encoder defines; zero sets no bound. A
     /// definition that would pass it is written inline, and the strings defined so far keep
     /// being referenced. A reader keeps every defined string until the end of the stream, so
     /// this bound is also the most memory the strings of the stream can pin in a reader.
+    /// Resets release old reader handles but do not replenish this cumulative allowance.
     pub max_def_bytes: usize,
 }
 
@@ -76,6 +81,7 @@ pub struct StreamEncoderStats {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StreamDecoderStats {
     /// Definitions read, equal to the length of the ID table.
+    /// After resets this remains cumulative and can exceed the current table length.
     pub defs: u64,
     /// UTF-8 bytes of the strings defined.
     pub def_bytes: u64,
@@ -151,11 +157,13 @@ pub struct StreamEncoder {
     max_def_bytes: usize,
     /// Maps string allocation addresses to IDs and lengths; does not own the strings.
     table: AddressTable,
+    reset_pending: bool,
     /// Whether this document may add definitions; temporary Flex documents may only reference.
     allow_define: bool,
     /// Sticky failure state: encode later strings inline, without DEF or REF.
     poisoned: bool,
     /// Stream counters for reporting; definition bytes also enforce max_def_bytes.
+    /// Definition counts provide cumulative stream positions across resets.
     stats: StreamEncoderStats,
 }
 
@@ -166,6 +174,7 @@ impl StreamEncoder {
             budget: config.table_budget_bytes,
             max_def_bytes: config.max_def_bytes,
             table: AddressTable::default(),
+            reset_pending: false,
             allow_define: false,
             poisoned: false,
             stats: StreamEncoderStats::default(),
@@ -176,10 +185,22 @@ impl StreamEncoder {
     /// defined so far. Read it before encoding a document to learn the ID of its
     /// first definition. A poisoned encoder defines nothing more, so what it
     /// reports no longer matters.
+    /// Counts the current dictionary; `stats().defs` counts the entire stream.
     pub fn next_id(&self) -> u32 {
         // IDs stop below `u32::MAX`, see `has_room`.
         // Strings in the ID table.
         self.table.len() as u32
+    }
+
+    /// Reuses the table after a budget miss. Call only between definition-capable documents,
+    /// and signal the reader before the next document that introduces definitions.
+    pub fn reset_if_needed(&mut self) -> bool {
+        if !self.reset_pending || self.poisoned {
+            return false;
+        }
+        self.table.clear();
+        self.reset_pending = false;
+        true
     }
 
     /// Stops all sharing: every later string is written inline, with no
@@ -231,6 +252,7 @@ impl StreamEncoder {
     /// allocation while the table grows. No allocation can fail gracefully, so the
     /// budget is checked in advance. A table that is full and cannot grow stays so,
     /// because nothing is added to it from then on.
+    /// An explicit reset reuses its existing allocation for a new dictionary.
     fn has_room(&self) -> bool {
         let table_growth = if self.table.len() == self.table.capacity() {
             table_alloc_bytes(next_buckets(self.table.capacity()))
@@ -272,6 +294,10 @@ impl StreamEncoder {
         if !self.allow_define {
             return Choice::Text;
         }
+        // Cumulative definition positions must remain representable in a u32 stream header.
+        if self.stats.defs >= u64::from(u32::MAX) {
+            return Choice::Text;
+        }
         // Occurrences left inline because the string had a single owner.
         if owners < 2 {
             return Choice::Text;
@@ -287,6 +313,7 @@ impl StreamEncoder {
             return Choice::Text;
         }
         if !self.has_room() {
+            self.reset_pending = !self.table.is_empty();
             return Choice::Text;
         }
         let id = self.next_id();
@@ -346,6 +373,7 @@ impl StreamDecoder {
     /// The number of strings defined so far, which is the ID the next definition
     /// receives. A document whose encoder-side [`next_id`](StreamEncoder::next_id)
     /// differs from this was not decoded in order.
+    /// Counts only the current dictionary after a reset.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -353,6 +381,12 @@ impl StreamDecoder {
     /// Whether nothing was defined yet.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Releases this dictionary's handles without discarding statistics or clearing failures.
+    /// Already decoded values retain their own string handles.
+    pub fn reset(&mut self) {
+        self.entries.clear();
     }
 
     /// Decodes one document, which must be the whole of `payload`.
@@ -487,6 +521,48 @@ mod tests {
             "model {model_peak} far above actual {peak}"
         );
         assert!(final_bytes <= peak);
+    }
+
+    #[test]
+    fn repeated_resets_keep_writer_allocations_within_budget() {
+        let texts: Vec<_> = (0..40)
+            .map(|i| format!("reset allocation string {i:04}"))
+            .collect();
+        let refs: Vec<_> = texts.iter().map(String::as_str).collect();
+        let value = shared_array(&refs);
+        let mut bytes = Vec::with_capacity(4096);
+        let mut resets = 0;
+        let allocations = record_allocs(|| {
+            let mut encoder = StreamEncoder::new(StreamEncoderConfig {
+                table_budget_bytes: 700,
+                ..config()
+            });
+            for _ in 0..64 {
+                resets += usize::from(encoder.reset_if_needed());
+                bytes.clear();
+                encoder.encode_into(&mut bytes, &value, true);
+                assert!(encoder.used_bytes() <= 700);
+            }
+            assert!(encoder.stats().defs > 40);
+        });
+        assert_eq!(resets, 63);
+        assert!(allocations.peak_mem() <= 700);
+    }
+
+    #[test]
+    fn cumulative_definition_positions_do_not_wrap_after_resets() {
+        let first = shared_array(&["a previously defined string"]);
+        let second = shared_array(&["a string beyond the position limit"]);
+        let mut encoder = StreamEncoder::new(config());
+        encoder.encode_into(&mut Vec::new(), &first, true);
+        encoder.stats.defs = u64::from(u32::MAX);
+        assert_eq!(
+            encoder.encode_into(&mut Vec::new(), &second, true),
+            DocUse::default()
+        );
+        assert!(!encoder.reset_if_needed());
+        assert_eq!(encoder.encode_into(&mut Vec::new(), &first, true).refs, 2);
+        assert_eq!(encoder.stats().defs, u64::from(u32::MAX));
     }
 
     #[test]
