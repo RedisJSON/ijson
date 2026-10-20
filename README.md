@@ -198,6 +198,51 @@ and `max_def_bytes` stay cumulative across the entire stream; redefining text
 spends its bytes again. Reader resets release old dictionary handles while loaded
 values keep their own. Neither reset API clears a poisoned or failed state.
 
+#### Other value representations
+
+`StreamEncoder<D>` accepts any implementation of `StringDictionary`, defaulting
+to `AddressDictionary`. `ContentDictionary` matches ordinary `&str` values by
+content and owns copies, so sources can be freed after each document. Its budget
+includes copied UTF-8 bytes, table storage and simultaneous growth allocations.
+It admits all strings of at least 8 bytes, including strings that occur only once.
+
+```rust
+use ijson::{ContentDictionary, StreamDecoder, StreamEncoder, StreamEncoderConfig};
+
+let mut encoder = StreamEncoder::with_dictionary(
+    StreamEncoderConfig { table_budget_bytes: 4096, max_def_bytes: 0 },
+    ContentDictionary::default(),
+);
+let mut bytes = Vec::new();
+encoder.encode_with(&mut bytes, true, |strings, out| {
+    ciborium::into_writer(&strings.string("text from another value representation"), out)
+}).unwrap();
+assert_eq!(
+    StreamDecoder::new().decode(&bytes, true).unwrap().as_string().unwrap().as_str(),
+    "text from another value representation",
+);
+```
+
+A custom Serde serializer wraps each participating string value and object key
+with `strings.string(...)`. Wrapping does not register a definition; serialization
+does. Serialize one complete CBOR document directly in wire order, without
+pre-serializing, discarding or reordering encoded pieces. Propagate errors:
+`encode_with` discards appended bytes and poisons the encoder on failure.
+Unwrapped strings remain ordinary inline CBOR.
+
+A custom dictionary supplies identity, eligibility, storage and allocation
+accounting. Its input is a `StreamString`: text plus an optional interned allocation
+identity and owner count. Ordinary string slices have no allocation identity.
+`borrows_strings()` returning `true` means the caller must preserve defined source
+storage; `false` means the dictionary maintains valid identities after sources die.
+Choose one dictionary for the stream. Pass a fresh dictionary, or ensure retained
+allocations already fit the budget. `Box<dyn StringDictionary>` supports choosing
+the implementation at initialization without runtime type checks.
+
+All dictionaries use the same DEF/REF format and existing `StreamDecoder`.
+The decoder reconstructs its own `IString` table from definitions; it does not
+need the writer's cache or value representation.
+
 ## Technical details
 
 ### `IValue`

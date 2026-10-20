@@ -63,11 +63,11 @@ use crate::array::ArraySliceRef;
 use crate::{DestructuredRef, IArray, INumber, IObject, IString, IValue};
 
 mod stream;
-use stream::{DecoderCell, EncoderCell};
 pub use stream::{
-    DocUse, StreamDecoder, StreamDecoderStats, StreamEncoder, StreamEncoderConfig,
-    StreamEncoderStats,
+    AddressDictionary, ContentDictionary, DocUse, StreamDecoder, StreamDecoderStats, StreamEncoder,
+    StreamEncoderConfig, StreamEncoderStats, StreamString, StreamStrings, StringDictionary,
 };
+use stream::{DecoderCell, EncoderCell};
 
 use tag::{
     TYPED_F16_LE as TAG_F16_LE, TYPED_F32_LE as TAG_F32_LE, TYPED_F64_LE as TAG_F64_LE,
@@ -251,7 +251,7 @@ impl WriteStrings for Inline {
 }
 
 /// A string is text, a definition or a reference, as the stream encoder decides.
-impl<'a> WriteStrings for &'a EncoderCell<'a> {
+impl<D: StringDictionary> WriteStrings for &EncoderCell<'_, D> {
     fn write_string<S: serde::Serializer>(
         self,
         string: &IString,

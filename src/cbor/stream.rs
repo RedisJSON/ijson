@@ -15,6 +15,9 @@
 //!
 //! Callers may explicitly reset both dictionaries between documents. IDs then restart,
 //! while statistics and the definition-byte allowance remain cumulative.
+//!
+//! The address-based behavior above is the default. [`ContentDictionary`] accepts
+//! ordinary string slices and owns their contents for serializers outside ijson.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -27,8 +30,11 @@ use serde::Serialize;
 use super::{reference_id, EncodedValue, StringRefs, TAG_DEF, TAG_REF};
 use crate::{CborDecodeError, IString, IValue};
 
+mod dictionary;
+pub use dictionary::{AddressDictionary, ContentDictionary, StreamString, StringDictionary};
+
 /// The encoder as the serializers see it, borrowed for one string at a time.
-pub(super) type EncoderCell<'a> = RefCell<&'a mut StreamEncoder>;
+pub(super) type EncoderCell<'a, D = AddressDictionary> = RefCell<&'a mut StreamEncoder<D>>;
 
 /// The decoder as the deserializers see it, borrowed for one string at a time.
 pub(super) type DecoderCell<'a> = RefCell<&'a mut StreamDecoder>;
@@ -46,6 +52,8 @@ pub struct StreamEncoderConfig {
     /// exceed it no more strings are defined: strings already defined keep being
     /// referenced and everything else is written inline. Zero defines nothing.
     /// An explicit reset allows new definitions to reuse the table allocation.
+    /// With [`ContentDictionary`], this also includes owned string bytes.
+    /// Fixed dictionary-object storage and the output buffer are outside this budget.
     pub table_budget_bytes: usize,
     /// Bound on the UTF-8 bytes of the strings the encoder defines; zero sets no bound. A
     /// definition that would pass it is written inline, and the strings defined so far keep
@@ -147,16 +155,16 @@ enum Choice {
 /// [`poison`](Self::poison), because its definitions would shift the IDs of every
 /// later document.
 ///
-/// The caller must keep every defined string allocation alive and at the same
-/// address until the stream ends. The encoder stores addresses, not owned handles;
-/// dropping or moving those strings can make later references resolve to wrong text.
-pub struct StreamEncoder {
+/// The default [`AddressDictionary`] requires stable allocations; a
+/// [`ContentDictionary`] owns copies and admits strings without owner counts.
+pub struct StreamEncoder<D: StringDictionary = AddressDictionary> {
     /// Heap budget for the address table, including growth allocations.
     budget: usize,
     /// Cumulative UTF-8 definition payload limit; zero means unlimited, not a total RAM bound.
     max_def_bytes: usize,
     /// Maps string allocation addresses to IDs and lengths; does not own the strings.
-    table: AddressTable,
+    // The default dictionary has the address-only behavior described above.
+    table: D,
     reset_pending: bool,
     /// Whether this document may add definitions; temporary Flex documents may only reference.
     allow_define: bool,
@@ -170,14 +178,53 @@ pub struct StreamEncoder {
 impl StreamEncoder {
     /// Creates an encoder that has defined nothing yet.
     pub fn new(config: StreamEncoderConfig) -> Self {
-        Self {
+        Self::with_dictionary(config, AddressDictionary::default())
+    }
+
+    /// Creates an encoder with the supplied dictionary, clearing any old entries.
+    pub fn with_dictionary<D: StringDictionary>(
+        config: StreamEncoderConfig,
+        mut dictionary: D,
+    ) -> StreamEncoder<D> {
+        dictionary.clear();
+        StreamEncoder {
             budget: config.table_budget_bytes,
             max_def_bytes: config.max_def_bytes,
-            table: AddressTable::default(),
+            table: dictionary,
             reset_pending: false,
             allow_define: false,
             poisoned: false,
             stats: StreamEncoderStats::default(),
+        }
+    }
+}
+
+impl<D: StringDictionary> StreamEncoder<D> {
+    /// Whether definitions depend on source storage remaining alive.
+    pub fn borrows_strings(&self) -> bool {
+        self.table.borrows_strings()
+    }
+
+    /// Appends the CBOR encoding of `value` to `out`, after whatever `out`
+    /// already holds, and reports what the document used.
+    ///
+    /// When the returned [`DocUse`] is zero the bytes are exactly those of
+    /// [`encode`](crate::encode). With `allow_define` false no string is defined,
+    /// but strings defined earlier are still referenced. If an address turns out to
+    /// be reused by a string of another length, the encoder is poisoned and that
+    /// string and the rest of the document are written inline.
+    pub fn encode_into(&mut self, out: &mut Vec<u8>, value: &IValue, allow_define: bool) -> DocUse {
+        let (defs, refs) = (self.stats.defs, self.stats.refs);
+        self.allow_define = allow_define;
+        let encoder = RefCell::new(&mut *self);
+        let cbor = EncodedValue {
+            value,
+            strings: &encoder,
+        };
+        ciborium::into_writer(&cbor, out).expect("write to Vec never fails");
+        DocUse {
+            defs: self.stats.defs - defs,
+            refs: self.stats.refs - refs,
         }
     }
 
@@ -215,27 +262,34 @@ impl StreamEncoder {
         self.poisoned
     }
 
-    /// Appends the CBOR encoding of `value` to `out`, after whatever `out`
-    /// already holds, and reports what the document used.
+    /// Serializes one complete CBOR document using [`StreamStrings::string`] for
+    /// each string occurrence, including object keys. The callback must serialize
+    /// directly in wire order, without pre-serializing or discarding definitions.
     ///
-    /// When the returned [`DocUse`] is zero the bytes are exactly those of
-    /// [`encode`](crate::encode). With `allow_define` false no string is defined,
-    /// but strings defined earlier are still referenced. If an address turns out to
-    /// be reused by a string of another length, the encoder is poisoned and that
-    /// string and the rest of the document are written inline.
-    pub fn encode_into(&mut self, out: &mut Vec<u8>, value: &IValue, allow_define: bool) -> DocUse {
+    /// On error, appended bytes are discarded and the encoder is poisoned, so later
+    /// documents cannot reference definitions that were never written.
+    pub fn encode_with<E>(
+        &mut self,
+        out: &mut Vec<u8>,
+        allow_define: bool,
+        encode: impl FnOnce(&StreamStrings<'_>, &mut Vec<u8>) -> Result<(), E>,
+    ) -> Result<DocUse, E> {
         let (defs, refs) = (self.stats.defs, self.stats.refs);
+        let start = out.len();
         self.allow_define = allow_define;
-        let encoder = RefCell::new(&mut *self);
-        let cbor = EncodedValue {
-            value,
-            strings: &encoder,
+        let mut choose = |string: &StreamString<'_>| self.choose(string);
+        let strings = StreamStrings {
+            choose: RefCell::new(&mut choose),
         };
-        ciborium::into_writer(&cbor, out).expect("write to Vec never fails");
-        DocUse {
+        if let Err(error) = encode(&strings, out) {
+            out.truncate(start);
+            self.poison();
+            return Err(error);
+        }
+        Ok(DocUse {
             defs: self.stats.defs - defs,
             refs: self.stats.refs - refs,
-        }
+        })
     }
 
     /// Counters and the current size of the ID table.
@@ -243,40 +297,18 @@ impl StreamEncoder {
         self.stats
     }
 
-    /// Heap bytes held by the ID table.
-    fn used_bytes(&self) -> usize {
-        table_bytes(self.table.capacity())
-    }
-
-    /// Whether one more definition fits the budget, counting the old and the new
-    /// allocation while the table grows. No allocation can fail gracefully, so the
-    /// budget is checked in advance. A table that is full and cannot grow stays so,
-    /// because nothing is added to it from then on.
-    /// An explicit reset reuses its existing allocation for a new dictionary.
-    fn has_room(&self) -> bool {
-        let table_growth = if self.table.len() == self.table.capacity() {
-            table_alloc_bytes(next_buckets(self.table.capacity()))
-        } else {
-            0
-        };
-        (table_growth == 0 || self.used_bytes() + table_growth <= self.budget)
-            && self.table.len() < u32::MAX as usize
-    }
-
-    fn choose(&mut self, string: &IString) -> Choice {
+    fn choose(&mut self, string: &StreamString<'_>) -> Choice {
         if self.poisoned {
             return Choice::Text;
         }
         // Occurrences left inline because the string was shorter than 8 bytes,
         // which includes the empty string and every string kept inside its handle.
-        let Some((address, len, owners)) = string.heap_identity() else {
+        let len = string.as_str().len();
+        if len < MIN_DEFINED_LEN {
             // The empty string and strings kept inside their handle, all below `MIN_DEFINED_LEN`.
             return Choice::Text;
-        };
-        if len < MIN_DEFINED_LEN {
-            return Choice::Text;
         }
-        if let Some(&slot) = self.table.get(&address.get()) {
+        if let Some((id, defined_len)) = self.table.get(string) {
             // Times a registered address belonged to a string of another length, which
             // means its string was freed and the address reused. Each one poisons the
             // encoder: that string and every later one is written inline. Zero proves
@@ -284,12 +316,12 @@ impl StreamEncoder {
             // at a reused address goes unnoticed.
             // only a length change shows a recycled address; an equal length is
             // prevented by the caller keeping the allocation alive, never by this check.
-            if slot.len as usize != len {
+            if defined_len != len {
                 self.poisoned = true;
                 return Choice::Text;
             }
             self.stats.refs += 1;
-            return Choice::Reference(slot.id);
+            return Choice::Reference(id);
         }
         if !self.allow_define {
             return Choice::Text;
@@ -298,33 +330,31 @@ impl StreamEncoder {
         if self.stats.defs >= u64::from(u32::MAX) {
             return Choice::Text;
         }
-        // Occurrences left inline because the string had a single owner.
-        if owners < 2 {
+        if !self.table.can_define(string) {
             return Choice::Text;
         }
         // Occurrences left inline because the table had no room, could not
         // represent the string, or the bound on defined bytes
         // ([`StreamEncoderConfig::max_def_bytes`]) would have been passed.
-        let Ok(slot_len) = u32::try_from(len) else {
+        if u32::try_from(len).is_err() {
             return Choice::Text;
-        };
+        }
         if self.max_def_bytes != 0 && self.stats.def_bytes + len as u64 > self.max_def_bytes as u64
         {
             return Choice::Text;
         }
-        if !self.has_room() {
+        let id = self.next_id();
+        if !self.table.insert(string, id, self.budget) {
             self.reset_pending = !self.table.is_empty();
             return Choice::Text;
         }
-        let id = self.next_id();
-        self.table.insert(address.get(), Slot { id, len: slot_len });
         self.stats.defs += 1;
         self.stats.def_bytes += len as u64;
         Choice::Define
     }
 }
 
-impl fmt::Debug for StreamEncoder {
+impl<D: StringDictionary> fmt::Debug for StreamEncoder<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StreamEncoder")
             .field("next_id", &self.next_id())
@@ -334,19 +364,55 @@ impl fmt::Debug for StreamEncoder {
     }
 }
 
+/// String wrappers for a single document, borrowed from its stream encoder.
+pub struct StreamStrings<'a> {
+    choose: RefCell<&'a mut dyn FnMut(&StreamString<'_>) -> Choice>,
+}
+
+impl fmt::Debug for StreamStrings<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamStrings").finish_non_exhaustive()
+    }
+}
+
+impl<'e> StreamStrings<'e> {
+    /// Wraps a string without registering it until the wrapper is serialized.
+    pub fn string<'a, T: Into<StreamString<'a>> + 'a>(
+        &'a self,
+        string: T,
+    ) -> impl Serialize + 'a + use<'a, 'e, T> {
+        struct StringValue<'a, 'e>(&'a StreamStrings<'e>, StreamString<'a>);
+        impl Serialize for StringValue<'_, '_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let choice = (self.0.choose.borrow_mut())(&self.1);
+                serialize_choice(choice, self.1.as_str(), serializer)
+            }
+        }
+        StringValue(self, string.into())
+    }
+}
+
 /// Writes one string occurrence of a document as text, a definition or a
 /// reference.
-pub(super) fn serialize_string<S: serde::Serializer>(
-    encoder: &EncoderCell<'_>,
+pub(super) fn serialize_string<S: serde::Serializer, D: StringDictionary>(
+    encoder: &EncoderCell<'_, D>,
     string: &IString,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
     // The choice is made, and a definition registered, right before the bytes are
     // written, and no borrow is held while they are.
-    let choice = encoder.borrow_mut().choose(string);
+    let choice = encoder.borrow_mut().choose(&string.into());
+    serialize_choice(choice, string.as_str(), serializer)
+}
+
+fn serialize_choice<S: serde::Serializer>(
+    choice: Choice,
+    string: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
     match choice {
-        Choice::Text => serializer.serialize_str(string.as_str()),
-        Choice::Define => RequireAny(TAG_DEF, string.as_str()).serialize(serializer),
+        Choice::Text => serializer.serialize_str(string),
+        Choice::Define => RequireAny(TAG_DEF, string).serialize(serializer),
         Choice::Reference(id) => RequireAny(TAG_REF, id).serialize(serializer),
     }
 }
@@ -541,7 +607,7 @@ mod tests {
                 resets += usize::from(encoder.reset_if_needed());
                 bytes.clear();
                 encoder.encode_into(&mut bytes, &value, true);
-                assert!(encoder.used_bytes() <= 700);
+                assert!(encoder.table.used_bytes() <= 700);
             }
             assert!(encoder.stats().defs > 40);
         });
@@ -591,7 +657,7 @@ mod tests {
             .iter()
             .map(|index| {
                 let address = strings[*index].heap_identity().unwrap().0;
-                encoder.table[&address.get()].id
+                encoder.table.entries[&address.get()].id
             })
             .collect();
         assert_eq!(ids, [0, 1, 2]);
@@ -615,7 +681,7 @@ mod tests {
             .unwrap()
             .0;
         // As if the string had been freed and another one of this length took its place.
-        encoder.table.get_mut(&address.get()).unwrap().len += 1;
+        encoder.table.entries.get_mut(&address.get()).unwrap().len += 1;
 
         out.clear();
         assert_eq!(encoder.encode_into(&mut out, &doc, true), DocUse::default());
@@ -641,7 +707,7 @@ mod tests {
         // to 32 buckets needs 288 + 560 bytes at once.
         assert_eq!(used, DocUse { defs: 14, refs: 14 });
         assert_eq!(encoder.table.len(), 14);
-        assert_eq!(encoder.used_bytes(), 288);
+        assert_eq!(encoder.table.used_bytes(), 288);
         // The 26 strings that found no room are met twice.
         let items: Vec<Value> = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(items.iter().filter(|item| item.is_text()).count(), 52);
@@ -670,7 +736,7 @@ mod tests {
             let mut bytes = Vec::new();
             let used = encoder.encode_into(&mut bytes, &doc, true);
             assert_eq!(used.defs, encoder.table.len() as u64);
-            assert!(encoder.used_bytes() <= budget, "{encoder:?}");
+            assert!(encoder.table.used_bytes() <= budget, "{encoder:?}");
             assert_eq!(StreamDecoder::new().decode(&bytes, true).unwrap(), doc);
             (used.defs, used.defs < STRINGS as u64)
         };

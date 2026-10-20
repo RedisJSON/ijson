@@ -57,8 +57,9 @@ mod de;
 mod ser;
 pub use cbor::{
     decode, decode_compressed, decode_with_depth_limit, encode, encode_compressed, encode_into,
-    CborDecodeError, DocUse, StreamDecoder, StreamDecoderStats, StreamEncoder, StreamEncoderConfig,
-    StreamEncoderStats,
+    AddressDictionary, CborDecodeError, ContentDictionary, DocUse, StreamDecoder,
+    StreamDecoderStats, StreamEncoder, StreamEncoderConfig, StreamEncoderStats, StreamString,
+    StreamStrings, StringDictionary,
 };
 pub use de::{from_value, FPHAConfig, IValueDeserSeed};
 pub use ser::to_value;
