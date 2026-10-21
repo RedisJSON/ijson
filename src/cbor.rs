@@ -19,7 +19,7 @@ use ciborium::value::Value;
 use ciborium_ll::tag;
 use half::{bf16, f16};
 use serde::de::DeserializeSeed;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Converts a typed slice to/from little-endian bytes using each type's own
 /// `to_le_bytes` / `from_le_bytes`, which are correct on every host endianness.
@@ -477,16 +477,9 @@ impl<'de> serde::de::Visitor<'de> for ValueSeed<'_, '_> {
     fn visit_map<A: serde::de::MapAccess<'de>>(self, mut access: A) -> Result<IValue, A::Error> {
         let mut object = IObject::with_capacity(access.size_hint().unwrap_or(0).min(1024))
             .map_err(|_| self.context.fail(CborDecodeError::AllocError))?;
-        while let Some(key) = access.next_key::<Value>()? {
-            let key = match key {
-                Value::Text(key) => IString::from(key),
-                Value::Tag(tag, inner) if self.context.refs.is_string_tag(tag) => self
-                    .context
-                    .refs
-                    .resolve(tag, *inner)
-                    .map_err(|error| self.context.fail(error))?,
-                _ => return Err(self.context.fail(CborDecodeError::InvalidValue)),
-            };
+        while let Some(key) = access.next_key_seed(KeySeed {
+            context: self.context,
+        })? {
             let value = access.next_value_seed(self.child())?;
             object
                 .insert(key, value)
@@ -496,12 +489,273 @@ impl<'de> serde::de::Visitor<'de> for ValueSeed<'_, '_> {
     }
 
     fn visit_enum<A: serde::de::EnumAccess<'de>>(self, access: A) -> Result<IValue, A::Error> {
+        use serde::de::VariantAccess;
         // Keep ciborium's tag and bignum normalization; valid tags hold one byte string or ID.
         // Stream definitions hold one text string.
-        self.convert(Value::deserialize(
-            serde::de::value::EnumAccessDeserializer::new(access),
-        )?)
+        // The variant name is always "@@TAGGED@@"; skip it without allocating a String.
+        let (_, data): (serde::de::IgnoredAny, _) = access.variant()?;
+        // The payload is a 2-tuple: element 1 is the tag number, element 2 its content.
+        data.tuple_variant(2, TaggedValue { seed: self })
     }
+}
+
+/// Reads a stream string tag (6 or 7) directly from the CBOR reader, without a `Value`.
+/// Returns `None`, with nothing consumed after the tag, when `tag` is not a stream string tag.
+fn stream_string<'c, 'de, A: serde::de::SeqAccess<'de>>(
+    context: &DecodeContext<'c>,
+    tag: u64,
+    access: &mut A,
+) -> Result<Option<IString>, A::Error> {
+    // Without a stream decoder no tag is a string tag.
+    let StringRefs::Stream(cell) = context.refs else {
+        return Ok(None);
+    };
+    let missing = || <A::Error as serde::de::Error>::custom("expected val");
+    let result = match tag {
+        // Definition: the text is interned and takes the next ID.
+        TAG_DEF => access
+            .next_element_seed(DefText { cell })?
+            .ok_or_else(missing)?,
+        // Reference: an ID below the number of definitions, resolved to the shared handle.
+        TAG_REF => {
+            let id = access.next_element_seed(RefId)?.ok_or_else(missing)?;
+            id.and_then(|id| cell.borrow_mut().reference_id(id))
+        }
+        _ => return Ok(None),
+    };
+    // A refused definition or reference fails the whole decode with its own error kind.
+    result.map(Some).map_err(|error| context.fail(error))
+}
+
+struct TaggedValue<'a, 'd> {
+    seed: ValueSeed<'a, 'd>,
+}
+
+impl<'de> serde::de::Visitor<'de> for TaggedValue<'_, '_> {
+    type Value = IValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a valid CBOR item")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<IValue, A::Error> {
+        // Element 1 of the tag pair: the tag number.
+        let tag: u64 = access
+            .next_element()?
+            .ok_or_else(|| <A::Error as serde::de::Error>::custom("expected tag"))?;
+        // Tags 6 and 7 are read here, with no intermediate `Value`.
+        if let Some(string) = stream_string(self.seed.context, tag, &mut access)? {
+            return Ok(string.into());
+        }
+        // Typed arrays keep ciborium's value path.
+        let inner: Value = access
+            .next_element()?
+            .ok_or_else(|| <A::Error as serde::de::Error>::custom("expected val"))?;
+        self.seed.convert(Value::Tag(tag, Box::new(inner)))
+    }
+}
+
+/// Implements the scalar `Visitor` methods a seed refuses, each as `self.reject()`.
+macro_rules! reject_scalars {
+    ($($name:ident: $ty:ty),* $(,)?) => {$(
+        fn $name<E: serde::de::Error>(self, _: $ty) -> Result<Self::Value, E> {
+            self.reject()
+        }
+    )*};
+}
+
+/// Implements the argument-less `Visitor` methods a seed refuses.
+macro_rules! reject_empty {
+    ($($name:ident),* $(,)?) => {$(
+        fn $name<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            self.reject()
+        }
+    )*};
+}
+
+/// Implements the `seq`, `map` and `enum` `Visitor` methods a seed refuses.
+macro_rules! reject_compound {
+    () => {};
+    (seq $($rest:tt)*) => {
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, _: A) -> Result<Self::Value, A::Error> {
+            self.reject()
+        }
+        reject_compound!($($rest)*);
+    };
+    (map $($rest:tt)*) => {
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, _: A) -> Result<Self::Value, A::Error> {
+            self.reject()
+        }
+        reject_compound!($($rest)*);
+    };
+    (enum $($rest:tt)*) => {
+        fn visit_enum<A: serde::de::EnumAccess<'de>>(self, _: A) -> Result<Self::Value, A::Error> {
+            self.reject()
+        }
+        reject_compound!($($rest)*);
+    };
+}
+
+/// The text of a definition, borrowed from the reader and interned once.
+/// Non-text content yields `Err(InvalidValue)` inside `Ok`, so the caller gets a
+/// `CborDecodeError` and not a serde error.
+struct DefText<'c> {
+    cell: &'c DecoderCell<'c>,
+}
+
+impl DefText<'_> {
+    fn reject<E>(self) -> Result<Result<IString, CborDecodeError>, E> {
+        Ok(Err(CborDecodeError::InvalidValue))
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for DefText<'_> {
+    type Value = Result<IString, CborDecodeError>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for DefText<'_> {
+    type Value = Result<IString, CborDecodeError>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a stream definition text")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Self::Value, E> {
+        Ok(self.cell.borrow_mut().define_str(text))
+    }
+
+    reject_scalars!(
+        visit_u64: u64,
+        visit_i64: i64,
+        visit_i128: i128,
+        visit_u128: u128,
+        visit_f64: f64,
+        visit_bool: bool,
+        visit_bytes: &[u8],
+    );
+    reject_empty!(visit_unit, visit_none);
+    reject_compound!(seq map enum);
+}
+
+/// The ID of a reference. Anything but an unsigned integer is `InvalidStringReference`.
+struct RefId;
+
+impl RefId {
+    fn reject<E>(self) -> Result<Result<usize, CborDecodeError>, E> {
+        Ok(Err(CborDecodeError::InvalidStringReference))
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for RefId {
+    type Value = Result<usize, CborDecodeError>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for RefId {
+    type Value = Result<usize, CborDecodeError>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a stream reference id")
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, id: u64) -> Result<Self::Value, E> {
+        Ok(usize::try_from(id).map_err(|_| CborDecodeError::InvalidStringReference))
+    }
+
+    fn visit_i128<E: serde::de::Error>(self, id: i128) -> Result<Self::Value, E> {
+        Ok(usize::try_from(id).map_err(|_| CborDecodeError::InvalidStringReference))
+    }
+    fn visit_u128<E: serde::de::Error>(self, id: u128) -> Result<Self::Value, E> {
+        Ok(usize::try_from(id).map_err(|_| CborDecodeError::InvalidStringReference))
+    }
+
+    reject_scalars!(
+        visit_i64: i64,
+        visit_f64: f64,
+        visit_bool: bool,
+        visit_str: &str,
+        visit_bytes: &[u8],
+    );
+    reject_empty!(visit_unit, visit_none);
+    reject_compound!(seq map enum);
+}
+
+/// An object key: text, or a stream string tag. Inline text is interned directly from the reader.
+struct KeySeed<'a, 'd> {
+    context: &'a DecodeContext<'d>,
+}
+
+impl KeySeed<'_, '_> {
+    fn reject<E: serde::de::Error>(self) -> Result<IString, E> {
+        Err(self.context.fail(CborDecodeError::InvalidValue))
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for KeySeed<'_, '_> {
+    type Value = IString;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<IString, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for KeySeed<'_, '_> {
+    type Value = IString;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an object key")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, key: &str) -> Result<IString, E> {
+        Ok(IString::from(key))
+    }
+
+    fn visit_enum<A: serde::de::EnumAccess<'de>>(self, access: A) -> Result<IString, A::Error> {
+        use serde::de::VariantAccess;
+        // A tagged key arrives as the same ("@@TAGGED@@", (tag, content)) enum as a value:
+        // skip the name, then read the 2-tuple through `visit_seq` below.
+        let (_, data): (serde::de::IgnoredAny, _) = access.variant()?;
+        data.tuple_variant(2, self)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<IString, A::Error> {
+        let tag: u64 = access
+            .next_element()?
+            .ok_or_else(|| <A::Error as serde::de::Error>::custom("expected tag"))?;
+        // Only stream string tags can be keys; any other tag is invalid.
+        match stream_string(self.context, tag, &mut access)? {
+            Some(string) => Ok(string),
+            None => Err(self.context.fail(CborDecodeError::InvalidValue)),
+        }
+    }
+
+    reject_scalars!(
+        visit_u64: u64,
+        visit_i64: i64,
+        visit_i128: i128,
+        visit_u128: u128,
+        visit_f64: f64,
+        visit_bool: bool,
+        visit_bytes: &[u8],
+    );
+    reject_empty!(visit_unit, visit_none);
+    reject_compound!(map);
 }
 
 // ── Decode ────────────────────────────────────────────────────────────────────

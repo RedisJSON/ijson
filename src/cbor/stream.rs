@@ -495,6 +495,10 @@ impl StreamDecoder {
         let Value::Text(text) = inner else {
             return Err(CborDecodeError::InvalidValue);
         };
+        self.define_str(&text)
+    }
+
+    pub(super) fn define_str(&mut self, text: &str) -> Result<IString, CborDecodeError> {
         if text.len() < MIN_DEFINED_LEN {
             return Err(CborDecodeError::InvalidValue);
         }
@@ -506,9 +510,13 @@ impl StreamDecoder {
     }
 
     fn reference(&mut self, inner: Value) -> Result<IString, CborDecodeError> {
+        self.reference_id(reference_id(inner)?)
+    }
+
+    pub(super) fn reference_id(&mut self, id: usize) -> Result<IString, CborDecodeError> {
         let string = self
             .entries
-            .get(reference_id(inner)?)
+            .get(id)
             .cloned()
             .ok_or(CborDecodeError::InvalidStringReference)?;
         self.stats.refs += 1;
