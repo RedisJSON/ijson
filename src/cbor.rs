@@ -729,20 +729,15 @@ impl<'de> serde::de::Visitor<'de> for KeySeed<'_, '_> {
     fn visit_enum<A: serde::de::EnumAccess<'de>>(self, access: A) -> Result<IString, A::Error> {
         use serde::de::VariantAccess;
         // A tagged key arrives as the same ("@@TAGGED@@", (tag, content)) enum as a value:
-        // skip the name, then read the 2-tuple through `visit_seq` below.
+        // skip the name, then read the 2-tuple with `TaggedKey`. A plain array reaches
+        // `visit_seq` of this visitor instead, which refuses it.
         let (_, data): (serde::de::IgnoredAny, _) = access.variant()?;
-        data.tuple_variant(2, self)
-    }
-
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<IString, A::Error> {
-        let tag: u64 = access
-            .next_element()?
-            .ok_or_else(|| <A::Error as serde::de::Error>::custom("expected tag"))?;
-        // Only stream string tags can be keys; any other tag is invalid.
-        match stream_string(self.context, tag, &mut access)? {
-            Some(string) => Ok(string),
-            None => Err(self.context.fail(CborDecodeError::InvalidValue)),
-        }
+        data.tuple_variant(
+            2,
+            TaggedKey {
+                context: self.context,
+            },
+        )
     }
 
     reject_scalars!(
@@ -755,7 +750,31 @@ impl<'de> serde::de::Visitor<'de> for KeySeed<'_, '_> {
         visit_bytes: &[u8],
     );
     reject_empty!(visit_unit, visit_none);
-    reject_compound!(map);
+    reject_compound!(seq map);
+}
+
+/// The `(tag, content)` pair of a tagged object key.
+struct TaggedKey<'a, 'd> {
+    context: &'a DecodeContext<'d>,
+}
+
+impl<'de> serde::de::Visitor<'de> for TaggedKey<'_, '_> {
+    type Value = IString;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a tagged object key")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<IString, A::Error> {
+        let tag: u64 = access
+            .next_element()?
+            .ok_or_else(|| <A::Error as serde::de::Error>::custom("expected tag"))?;
+        // Only stream string tags can be keys; any other tag is invalid.
+        match stream_string(self.context, tag, &mut access)? {
+            Some(string) => Ok(string),
+            None => Err(self.context.fail(CborDecodeError::InvalidValue)),
+        }
+    }
 }
 
 // ── Decode ────────────────────────────────────────────────────────────────────

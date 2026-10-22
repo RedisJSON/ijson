@@ -534,6 +534,26 @@ fn encoding_never_changes_string_owner_counts() {
 // own test binary: cbor_stream_address_reuse.rs.
 
 #[test]
+fn a_plain_array_is_not_an_object_key() {
+    let _guard = serial();
+    let text = || Value::Text("abcdefgh".into());
+    let arrays = [
+        Value::Array(vec![Value::Integer(6.into()), text()]),
+        Value::Array(vec![Value::Integer(7.into()), Value::Integer(0.into())]),
+        Value::Array(vec![Value::Integer(6.into())]),
+        Value::Array(vec![]),
+    ];
+    for key in arrays {
+        let doc = Value::Map(vec![(key, Value::Integer(1.into()))]);
+        assert_eq!(
+            StreamDecoder::new().decode(&cbor_bytes(&doc), true),
+            Err(CborDecodeError::InvalidValue),
+            "{doc:?}"
+        );
+    }
+}
+
+#[test]
 fn decoding_rejects_forged_references() {
     let _guard = serial();
     let defined = define("the only defined string");
