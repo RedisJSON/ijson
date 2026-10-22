@@ -10,7 +10,6 @@ static ALLOCATOR: Mockalloc<System> = Mockalloc(System);
 fn stream_config() -> StreamEncoderConfig {
     StreamEncoderConfig {
         table_budget_bytes: 64 << 20,
-        max_def_bytes: 0,
     }
 }
 
@@ -78,7 +77,7 @@ fn stream_encoding_borrows_large_string_content() {
     let mut encoder = StreamEncoder::new(stream_config());
     let allocations = record_allocs(|| {
         let mut out = Vec::new();
-        assert_eq!(encoder.encode_into(&mut out, &value, true).defs, 1);
+        assert_eq!(encoder.encode_into(&mut out, &value).defs, 1);
         assert!(out.len() > 4 * 1024 * 1024);
         std::hint::black_box(&out);
     });
@@ -90,7 +89,7 @@ fn stream_encoding_borrows_large_string_content() {
 
     let allocations = record_allocs(|| {
         let mut out = Vec::new();
-        assert_eq!(encoder.encode_into(&mut out, &value, true).refs, 1);
+        assert_eq!(encoder.encode_into(&mut out, &value).refs, 1);
         assert_eq!(out.len(), 2);
     });
     assert!(
@@ -109,7 +108,7 @@ fn stream_encoding_borrows_array_elements() {
     let mut encoder = StreamEncoder::new(stream_config());
     let allocations = record_allocs(|| {
         let mut out = Vec::new();
-        assert_eq!(encoder.encode_into(&mut out, &value, true).defs, 0);
+        assert_eq!(encoder.encode_into(&mut out, &value).defs, 0);
         assert!(out.len() > 262_144);
         std::hint::black_box(&out);
     });
@@ -129,7 +128,7 @@ fn stream_encoding_of_shared_strings_needs_less_memory_than_plain_encoding() {
     let mut encoder = StreamEncoder::new(stream_config());
     let stream = record_allocs(|| {
         let mut out = Vec::new();
-        let used = encoder.encode_into(&mut out, &value, true);
+        let used = encoder.encode_into(&mut out, &value);
         assert_eq!((used.defs, used.refs), (1, 262_143));
         std::hint::black_box(&out);
     });
@@ -145,7 +144,7 @@ fn stream_encoding_of_shared_strings_needs_less_memory_than_plain_encoding() {
 fn stream_decoding_builds_array_without_an_intermediate_tree() {
     let value = shared_elements(262_144);
     let mut bytes = Vec::new();
-    StreamEncoder::new(stream_config()).encode_into(&mut bytes, &value, true);
+    StreamEncoder::new(stream_config()).encode_into(&mut bytes, &value);
     let inline = encode(&value);
     let plain = record_allocs(|| {
         assert_eq!(decode(&inline).unwrap(), value);

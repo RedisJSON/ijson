@@ -8,7 +8,6 @@ fn init_cache() {
 fn config(budget: usize) -> StreamEncoderConfig {
     StreamEncoderConfig {
         table_budget_bytes: budget,
-        max_def_bytes: 0,
     }
 }
 
@@ -36,7 +35,7 @@ fn reset_reuses_ids_and_reader_handles_but_preserves_statistics() {
         }
         let value = repeated(owner);
         let mut bytes = Vec::new();
-        let used = encoder.encode_into(&mut bytes, &value, true);
+        let used = encoder.encode_into(&mut bytes, &value);
         loaded.push(decoder.decode(&bytes, true).unwrap());
         assert_eq!(loaded.last(), Some(&value));
         assert!(encoder.next_id() <= 3);
@@ -57,44 +56,31 @@ fn full_table_keeps_hits_and_cold_misses_do_not_request_reset() {
         .collect();
     let mut encoder = StreamEncoder::new(config(84));
     for owner in &owners[..3] {
-        encoder.encode_into(&mut Vec::new(), &repeated(owner), true);
+        encoder.encode_into(&mut Vec::new(), &repeated(owner));
     }
     for owner in &owners[..3] {
         assert!(!encoder.reset_if_needed());
         assert_eq!(
-            encoder
-                .encode_into(&mut Vec::new(), &repeated(owner), true)
-                .refs,
+            encoder.encode_into(&mut Vec::new(), &repeated(owner)).refs,
             2
         );
     }
-    encoder.encode_into(&mut Vec::new(), &repeated(&owners[3]), false);
-    assert!(!encoder.reset_if_needed());
-    encoder.encode_into(&mut Vec::new(), &repeated(&owners[3]), true);
+    encoder.encode_into(&mut Vec::new(), &repeated(&owners[3]));
     encoder.poison();
     assert!(!encoder.reset_if_needed());
 }
 
 #[test]
-fn unusable_budget_and_payload_limit_do_not_request_resets() {
+fn unusable_budget_does_not_request_resets() {
     let owners: Vec<_> = (0..4).map(|i| IString::from(format!("{i:016}"))).collect();
     for budget in [0, 1, 83] {
         let mut encoder = StreamEncoder::new(config(budget));
         for owner in &owners {
-            encoder.encode_into(&mut Vec::new(), &repeated(owner), true);
+            encoder.encode_into(&mut Vec::new(), &repeated(owner));
             assert!(!encoder.reset_if_needed());
         }
         assert_eq!(encoder.stats().defs, 0);
     }
-    let mut encoder = StreamEncoder::new(StreamEncoderConfig {
-        max_def_bytes: 48,
-        ..config(84)
-    });
-    for owner in &owners {
-        encoder.encode_into(&mut Vec::new(), &repeated(owner), true);
-    }
-    assert!(!encoder.reset_if_needed());
-    assert_eq!(encoder.stats().def_bytes, 48);
 }
 
 #[test]

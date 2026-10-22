@@ -156,14 +156,13 @@ use ijson::{IValue, StreamDecoder, StreamEncoder, StreamEncoderConfig};
 
 let mut encoder = StreamEncoder::new(StreamEncoderConfig {
     table_budget_bytes: 64 << 20,
-    max_def_bytes: 0, // no bound
 });
 let first: IValue = serde_json::from_str(r#"{"k":"a string stored in two documents"}"#).unwrap();
 let second: IValue = serde_json::from_str(r#"{"k":"a string stored in two documents"}"#).unwrap();
 
 let (mut first_bytes, mut second_bytes) = (Vec::new(), Vec::new());
-encoder.encode_into(&mut first_bytes, &first, true); // defines the string
-encoder.encode_into(&mut second_bytes, &second, true); // references it
+encoder.encode_into(&mut first_bytes, &first); // defines the string
+encoder.encode_into(&mut second_bytes, &second); // references it
 
 let mut decoder = StreamDecoder::new();
 assert_eq!(decoder.decode(&first_bytes, true).unwrap(), first);
@@ -194,9 +193,31 @@ not use the dictionary. Both dictionaries then assign IDs from 0 again.
 With resets, use cumulative `stats().defs` for framing positions rather than the
 current table length, and require a reset-bearing record to introduce a definition.
 Otherwise, skipping a reset-only record could silently reuse old IDs. Statistics
-and `max_def_bytes` stay cumulative across the entire stream; redefining text
-spends its bytes again. Reader resets release old dictionary handles while loaded
+stay cumulative across the entire stream. Reader resets release old dictionary handles while loaded
 values keep their own. Neither reset API clears a poisoned or failed state.
+
+### Standalone documents
+
+A fresh `StreamEncoder` and a fresh `StreamDecoder` per document make that document stand
+alone: ids start at 0, nothing else is needed to read it, and strings that repeat inside the
+document are defined once. A string only counts as repeated here if it has two or more owners,
+so a document that holds a shared string once also gets a definition that nothing references.
+Compare `DocUse` with the plain size and write the plain bytes when the definitions do not pay:
+a reference saves at least 3 bytes and a definition costs 1, so keep the stream form only when
+`3 * refs > defs`.
+
+```rust
+use ijson::{IValue, StreamDecoder, StreamEncoder, StreamEncoderConfig};
+
+let value: IValue = serde_json::from_str(
+    r#"[{"a repeated object key": 1}, {"a repeated object key": 2}]"#,
+).unwrap();
+let mut bytes = Vec::new();
+let used = StreamEncoder::new(StreamEncoderConfig { table_budget_bytes: 1 << 20 })
+    .encode_into(&mut bytes, &value);
+assert!(used.refs * 3 > used.defs);
+assert_eq!(StreamDecoder::new().decode(&bytes, true).unwrap(), value);
+```
 
 #### Other value representations
 
@@ -210,11 +231,11 @@ It admits all strings of at least 8 bytes, including strings that occur only onc
 use ijson::{ContentDictionary, StreamDecoder, StreamEncoder, StreamEncoderConfig};
 
 let mut encoder = StreamEncoder::with_dictionary(
-    StreamEncoderConfig { table_budget_bytes: 4096, max_def_bytes: 0 },
+    StreamEncoderConfig { table_budget_bytes: 4096 },
     ContentDictionary::default(),
 );
 let mut bytes = Vec::new();
-encoder.encode_with(&mut bytes, true, |strings, out| {
+encoder.encode_with(&mut bytes, |strings, out| {
     ciborium::into_writer(&strings.string("text from another value representation"), out)
 }).unwrap();
 assert_eq!(
@@ -233,8 +254,8 @@ Unwrapped strings remain ordinary inline CBOR.
 A custom dictionary supplies identity, eligibility, storage and allocation
 accounting. Its input is a `StreamString`: text plus an optional interned allocation
 identity and owner count. Ordinary string slices have no allocation identity.
-`borrows_strings()` returning `true` means the caller must preserve defined source
-storage; `false` means the dictionary maintains valid identities after sources die.
+A dictionary that borrows its strings, like `AddressDictionary`, needs the caller to keep the
+source storage alive; one that owns copies, like `ContentDictionary`, does not.
 Choose one dictionary for the stream. Pass a fresh dictionary, or ensure retained
 allocations already fit the budget. `Box<dyn StringDictionary>` supports choosing
 the implementation at initialization without runtime type checks.

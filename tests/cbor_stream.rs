@@ -23,7 +23,6 @@ fn init_cache() {
 fn config() -> StreamEncoderConfig {
     StreamEncoderConfig {
         table_budget_bytes: 64 << 20,
-        max_def_bytes: 0,
     }
 }
 
@@ -47,7 +46,7 @@ fn reference(id: u64) -> Value {
 
 fn encode_doc(encoder: &mut StreamEncoder, value: &IValue) -> (Vec<u8>, DocUse) {
     let mut out = Vec::new();
-    let used = encoder.encode_into(&mut out, value, true);
+    let used = encoder.encode_into(&mut out, value);
     (out, used)
 }
 
@@ -244,14 +243,14 @@ fn encoding_appends_after_bytes_the_caller_already_wrote() {
     );
     let mut encoder = StreamEncoder::new(config());
     let mut out = vec![2, 0, 0, 0, 0];
-    let used = encoder.encode_into(&mut out, &first, true);
+    let used = encoder.encode_into(&mut out, &first);
     assert_eq!(used.defs, 1);
     assert_eq!(&out[..5], &[2, 0, 0, 0, 0]);
     let mut decoder = StreamDecoder::new();
     assert_eq!(decoder.decode(&out[5..], true).unwrap(), first);
 
     let start = out.len();
-    encoder.encode_into(&mut out, &second, true);
+    encoder.encode_into(&mut out, &second);
     assert_eq!(&out[start..], &[0x81, 0xC7, 0x00]);
 }
 
@@ -446,38 +445,6 @@ fn poisoned_encoder_writes_plain_documents() {
 }
 
 #[test]
-fn lookup_only_mode_references_known_strings_and_defines_nothing() {
-    let _guard = serial();
-    let (known, unknown) = (
-        "a string defined by a stream doc",
-        "a string only seen by lookups",
-    );
-    let first = json(&format!(r#"["{known}","{unknown}"]"#));
-    let second = json(&format!(r#"["{known}","{unknown}"]"#));
-    let mut encoder = StreamEncoder::new(config());
-    let mut out = Vec::new();
-    let used = encoder.encode_into(&mut out, &json(&format!(r#"["{known}"]"#)), true);
-    assert_eq!(used.defs, 1);
-
-    out.clear();
-    let used = encoder.encode_into(&mut out, &first, false);
-    assert_eq!(used, DocUse { defs: 0, refs: 1 });
-    assert_eq!(
-        out,
-        cbor_bytes(&Value::Array(vec![
-            reference(0),
-            Value::Text(unknown.into())
-        ]))
-    );
-    assert_eq!(encoder.next_id(), 1);
-
-    out.clear();
-    let used = encoder.encode_into(&mut out, &second, true);
-    assert_eq!(used, DocUse { defs: 1, refs: 1 });
-    assert_eq!(encoder.next_id(), 2);
-}
-
-#[test]
 fn table_budget_freezes_new_definitions_but_keeps_references() {
     let _guard = serial();
     let strings: Vec<IString> = (0..40)
@@ -537,72 +504,6 @@ fn twice(owner: &IString) -> IValue {
     IArray::try_from(vec![IValue::from(owner.clone()), owner.clone().into()])
         .unwrap()
         .into()
-}
-
-#[test]
-fn a_cap_on_defined_bytes_stops_definitions_but_not_references() {
-    let _guard = serial();
-    // Four strings of 40 bytes, each used by two documents: the first pass could define them
-    // all, and a cap of 80 bytes holds two.
-    let owners: Vec<IString> = (0..4).map(|i| IString::from(format!("{i:040}"))).collect();
-    let values: Vec<IValue> = owners.iter().chain(owners.iter()).map(twice).collect();
-    let mut encoder = StreamEncoder::new(StreamEncoderConfig {
-        max_def_bytes: 80,
-        ..config()
-    });
-    let docs = encode_stream(&mut encoder, &values);
-
-    let stats = encoder.stats();
-    assert_eq!((stats.defs, stats.def_bytes), (2, 80));
-    // Each document names its string twice; two strings in each pass never fit.
-    for index in [2, 3, 6, 7] {
-        assert_eq!(docs[index].used, DocUse::default());
-        assert_eq!(docs[index].bytes, encode(&values[index]));
-    }
-    // The strings that were defined are referenced by the second pass as well.
-    assert_eq!(docs[4].used, DocUse { defs: 0, refs: 2 });
-    assert_eq!(docs[5].used, DocUse { defs: 0, refs: 2 });
-    assert_eq!(docs[6].used, DocUse::default());
-    assert_eq!(docs[6].bytes, encode(&values[6]));
-    assert!(!encoder.is_poisoned());
-    let (read, decoder) = read_all(&docs.iter().collect::<Vec<_>>()).unwrap();
-    assert_eq!(read, values);
-    assert_eq!(decoder.stats().def_bytes, 80);
-}
-
-#[test]
-fn a_string_longer_than_the_cap_is_never_defined_and_smaller_ones_still_are() {
-    let _guard = serial();
-    let long = IString::from("L".repeat(62));
-    assert_eq!(long.len(), 62);
-    let first = IString::from("thirty bytes of one string....");
-    let second = IString::from("thirty bytes of other string..");
-    assert_eq!((first.len(), second.len()), (30, 30));
-    let values = [twice(&long), twice(&first), twice(&second), twice(&long)];
-    let mut encoder = StreamEncoder::new(StreamEncoderConfig {
-        max_def_bytes: 50,
-        ..config()
-    });
-    let docs = encode_stream(&mut encoder, &values);
-
-    // 30 bytes fit; 30 more would make 60. The long string defined nothing, twice.
-    assert_eq!(docs[0].used, DocUse::default());
-    assert_eq!(docs[1].used, DocUse { defs: 1, refs: 1 });
-    assert_eq!(docs[2].used, DocUse::default());
-    assert_eq!(docs[3].used, DocUse::default());
-    assert_eq!(encoder.stats().def_bytes, 30);
-    let (read, _) = read_all(&docs.iter().collect::<Vec<_>>()).unwrap();
-    assert_eq!(read, values);
-}
-
-#[test]
-fn a_cap_of_zero_means_none() {
-    let _guard = serial();
-    let owners: Vec<IString> = (0..4).map(|i| IString::from(format!("{i:040}"))).collect();
-    let values: Vec<IValue> = owners.iter().map(twice).collect();
-    let mut encoder = StreamEncoder::new(config());
-    encode_stream(&mut encoder, &values);
-    assert_eq!(encoder.stats().defs, 4);
 }
 
 #[test]
@@ -960,4 +861,24 @@ fn random_documents_round_trip_in_order() {
             );
         }
     }
+}
+
+#[test]
+fn a_fresh_encoder_and_decoder_make_a_document_stand_alone() {
+    let _guard = serial();
+    let value = json(
+        r#"[{"a repeated object key": 1}, {"a repeated object key": 2}, {"a repeated object key": 3}]"#,
+    );
+    let mut bytes = Vec::new();
+    let used = StreamEncoder::new(config()).encode_into(&mut bytes, &value);
+    assert_eq!(used, DocUse { defs: 1, refs: 2 });
+    assert!(bytes.len() < encode(&value).len());
+    // No other document is needed, in any order and any number of times.
+    for _ in 0..2 {
+        assert_eq!(StreamDecoder::new().decode(&bytes, true).unwrap(), value);
+    }
+    // A second document written by another fresh encoder restarts its ids at 0.
+    let mut other = Vec::new();
+    StreamEncoder::new(config()).encode_into(&mut other, &value);
+    assert_eq!(other, bytes);
 }

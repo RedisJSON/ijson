@@ -55,12 +55,6 @@ pub struct StreamEncoderConfig {
     /// With [`ContentDictionary`], this also includes owned string bytes.
     /// Fixed dictionary-object storage and the output buffer are outside this budget.
     pub table_budget_bytes: usize,
-    /// Bound on the UTF-8 bytes of the strings the encoder defines; zero sets no bound. A
-    /// definition that would pass it is written inline, and the strings defined so far keep
-    /// being referenced. A reader keeps every defined string until the end of the stream, so
-    /// this bound is also the most memory the strings of the stream can pin in a reader.
-    /// Resets release old reader handles but do not replenish this cumulative allowance.
-    pub max_def_bytes: usize,
 }
 
 /// The definitions and references in one encoded document. A document with
@@ -160,17 +154,13 @@ enum Choice {
 pub struct StreamEncoder<D: StringDictionary = AddressDictionary> {
     /// Heap budget for the address table, including growth allocations.
     budget: usize,
-    /// Cumulative UTF-8 definition payload limit; zero means unlimited, not a total RAM bound.
-    max_def_bytes: usize,
     /// Maps string allocation addresses to IDs and lengths; does not own the strings.
     // The default dictionary has the address-only behavior described above.
     table: D,
     reset_pending: bool,
-    /// Whether this document may add definitions; temporary Flex documents may only reference.
-    allow_define: bool,
     /// Sticky failure state: encode later strings inline, without DEF or REF.
     poisoned: bool,
-    /// Stream counters for reporting; definition bytes also enforce max_def_bytes.
+    /// Stream counters for reporting.
     /// Definition counts provide cumulative stream positions across resets.
     stats: StreamEncoderStats,
 }
@@ -189,10 +179,8 @@ impl StreamEncoder {
         dictionary.clear();
         StreamEncoder {
             budget: config.table_budget_bytes,
-            max_def_bytes: config.max_def_bytes,
             table: dictionary,
             reset_pending: false,
-            allow_define: false,
             poisoned: false,
             stats: StreamEncoderStats::default(),
         }
@@ -200,22 +188,15 @@ impl StreamEncoder {
 }
 
 impl<D: StringDictionary> StreamEncoder<D> {
-    /// Whether definitions depend on source storage remaining alive.
-    pub fn borrows_strings(&self) -> bool {
-        self.table.borrows_strings()
-    }
-
     /// Appends the CBOR encoding of `value` to `out`, after whatever `out`
     /// already holds, and reports what the document used.
     ///
     /// When the returned [`DocUse`] is zero the bytes are exactly those of
-    /// [`encode`](crate::encode). With `allow_define` false no string is defined,
-    /// but strings defined earlier are still referenced. If an address turns out to
-    /// be reused by a string of another length, the encoder is poisoned and that
-    /// string and the rest of the document are written inline.
-    pub fn encode_into(&mut self, out: &mut Vec<u8>, value: &IValue, allow_define: bool) -> DocUse {
+    /// [`encode`](crate::encode). If an address turns out to be reused by a string of
+    /// another length, the encoder is poisoned and that string and the rest of the
+    /// document are written inline.
+    pub fn encode_into(&mut self, out: &mut Vec<u8>, value: &IValue) -> DocUse {
         let (defs, refs) = (self.stats.defs, self.stats.refs);
-        self.allow_define = allow_define;
         let encoder = RefCell::new(&mut *self);
         let cbor = EncodedValue {
             value,
@@ -271,12 +252,10 @@ impl<D: StringDictionary> StreamEncoder<D> {
     pub fn encode_with<E>(
         &mut self,
         out: &mut Vec<u8>,
-        allow_define: bool,
         encode: impl FnOnce(&StreamStrings<'_>, &mut Vec<u8>) -> Result<(), E>,
     ) -> Result<DocUse, E> {
         let (defs, refs) = (self.stats.defs, self.stats.refs);
         let start = out.len();
-        self.allow_define = allow_define;
         let mut choose = |string: &StreamString<'_>| self.choose(string);
         let strings = StreamStrings {
             choose: RefCell::new(&mut choose),
@@ -323,9 +302,6 @@ impl<D: StringDictionary> StreamEncoder<D> {
             self.stats.refs += 1;
             return Choice::Reference(id);
         }
-        if !self.allow_define {
-            return Choice::Text;
-        }
         // Cumulative definition positions must remain representable in a u32 stream header.
         if self.stats.defs >= u64::from(u32::MAX) {
             return Choice::Text;
@@ -333,14 +309,8 @@ impl<D: StringDictionary> StreamEncoder<D> {
         if !self.table.can_define(string) {
             return Choice::Text;
         }
-        // Occurrences left inline because the table had no room, could not
-        // represent the string, or the bound on defined bytes
-        // ([`StreamEncoderConfig::max_def_bytes`]) would have been passed.
+        // Occurrences left inline because the table had no room or could not represent the string.
         if u32::try_from(len).is_err() {
-            return Choice::Text;
-        }
-        if self.max_def_bytes != 0 && self.stats.def_bytes + len as u64 > self.max_def_bytes as u64
-        {
             return Choice::Text;
         }
         let id = self.next_id();
@@ -543,7 +513,6 @@ mod tests {
     fn config() -> StreamEncoderConfig {
         StreamEncoderConfig {
             table_budget_bytes: 1 << 20,
-            max_def_bytes: 0,
         }
     }
 
@@ -614,7 +583,7 @@ mod tests {
             for _ in 0..64 {
                 resets += usize::from(encoder.reset_if_needed());
                 bytes.clear();
-                encoder.encode_into(&mut bytes, &value, true);
+                encoder.encode_into(&mut bytes, &value);
                 assert!(encoder.table.used_bytes() <= 700);
             }
             assert!(encoder.stats().defs > 40);
@@ -628,14 +597,14 @@ mod tests {
         let first = shared_array(&["a previously defined string"]);
         let second = shared_array(&["a string beyond the position limit"]);
         let mut encoder = StreamEncoder::new(config());
-        encoder.encode_into(&mut Vec::new(), &first, true);
+        encoder.encode_into(&mut Vec::new(), &first);
         encoder.stats.defs = u64::from(u32::MAX);
         assert_eq!(
-            encoder.encode_into(&mut Vec::new(), &second, true),
+            encoder.encode_into(&mut Vec::new(), &second),
             DocUse::default()
         );
         assert!(!encoder.reset_if_needed());
-        assert_eq!(encoder.encode_into(&mut Vec::new(), &first, true).refs, 2);
+        assert_eq!(encoder.encode_into(&mut Vec::new(), &first).refs, 2);
         assert_eq!(encoder.stats().defs, u64::from(u32::MAX));
     }
 
@@ -660,7 +629,7 @@ mod tests {
         let doc: IValue = IArray::try_from(items).unwrap().into();
         let mut encoder = StreamEncoder::new(config());
         let mut out = Vec::new();
-        assert_eq!(encoder.encode_into(&mut out, &doc, true).defs, 3);
+        assert_eq!(encoder.encode_into(&mut out, &doc).defs, 3);
         let ids: Vec<u32> = [2, 1, 0]
             .iter()
             .map(|index| {
@@ -679,7 +648,7 @@ mod tests {
         let mut encoder = StreamEncoder::new(config());
         let mut out = Vec::new();
         assert_eq!(
-            encoder.encode_into(&mut out, &doc, true),
+            encoder.encode_into(&mut out, &doc),
             DocUse { defs: 1, refs: 1 }
         );
         let address = doc.as_array().unwrap()[0]
@@ -692,7 +661,7 @@ mod tests {
         encoder.table.entries.get_mut(&address.get()).unwrap().len += 1;
 
         out.clear();
-        assert_eq!(encoder.encode_into(&mut out, &doc, true), DocUse::default());
+        assert_eq!(encoder.encode_into(&mut out, &doc), DocUse::default());
         assert_eq!(out, crate::encode(&doc));
         assert!(encoder.is_poisoned());
         assert_eq!((encoder.stats().defs, encoder.stats().refs), (1, 1));
@@ -710,7 +679,7 @@ mod tests {
             ..config()
         });
         let mut bytes = Vec::new();
-        let used = encoder.encode_into(&mut bytes, &doc, true);
+        let used = encoder.encode_into(&mut bytes, &doc);
         // 84, 152, 288 and 560 bytes for 4, 8, 16 and 32 buckets: the move from 16
         // to 32 buckets needs 288 + 560 bytes at once.
         assert_eq!(used, DocUse { defs: 14, refs: 14 });
@@ -742,7 +711,7 @@ mod tests {
                 ..config()
             });
             let mut bytes = Vec::new();
-            let used = encoder.encode_into(&mut bytes, &doc, true);
+            let used = encoder.encode_into(&mut bytes, &doc);
             assert_eq!(used.defs, encoder.table.len() as u64);
             assert!(encoder.table.used_bytes() <= budget, "{encoder:?}");
             assert_eq!(StreamDecoder::new().decode(&bytes, true).unwrap(), doc);

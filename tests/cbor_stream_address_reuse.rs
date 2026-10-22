@@ -154,7 +154,6 @@ fn init_cache() {
 fn config() -> StreamEncoderConfig {
     StreamEncoderConfig {
         table_budget_bytes: 8 << 20,
-        max_def_bytes: 0,
     }
 }
 
@@ -188,7 +187,7 @@ fn free_and_reuse(intruder_len: usize) -> Reused {
     let address = original.as_ptr();
     let first = array_of(&[&original, &original]);
     let mut first_bytes = Vec::new();
-    let used = encoder.encode_into(&mut first_bytes, &first, true);
+    let used = encoder.encode_into(&mut first_bytes, &first);
     assert_eq!(used, DocUse { defs: 1, refs: 1 });
 
     // The document goes first and the string last, so that its block is the one
@@ -227,7 +226,7 @@ fn caller_owned_strings_keep_their_addresses_until_the_stream_ends() {
     let first = array_of(&[&owner, &owner]);
     let mut first_bytes = Vec::new();
     assert_eq!(
-        encoder.encode_into(&mut first_bytes, &first, true),
+        encoder.encode_into(&mut first_bytes, &first),
         DocUse { defs: 1, refs: 1 }
     );
     drop(first);
@@ -238,7 +237,7 @@ fn caller_owned_strings_keep_their_addresses_until_the_stream_ends() {
     let second = array_of(&[&intruder, &intruder, &owner]);
     let mut second_bytes = Vec::new();
     assert_eq!(
-        encoder.encode_into(&mut second_bytes, &second, true),
+        encoder.encode_into(&mut second_bytes, &second),
         DocUse { defs: 1, refs: 2 }
     );
     assert!(!encoder.is_poisoned());
@@ -256,7 +255,7 @@ fn a_string_of_another_length_at_a_registered_address_is_never_resolved_to_the_o
 
     let second = array_of(&[&reused.intruder, &reused.intruder]);
     let mut second_bytes = Vec::new();
-    let used = reused.encoder.encode_into(&mut second_bytes, &second, true);
+    let used = reused.encoder.encode_into(&mut second_bytes, &second);
     assert_eq!(used, DocUse::default());
     assert_eq!(second_bytes, encode(&second));
     assert!(reused.encoder.is_poisoned());
@@ -277,7 +276,7 @@ fn a_stale_hit_after_a_definition_in_the_same_document_keeps_the_definition() {
     let fresh = IString::from("a string defined before the stale hit");
     let second = array_of(&[&fresh, &reused.intruder, &fresh]);
     let mut second_bytes = vec![2, 0, 0, 0, 0];
-    let used = reused.encoder.encode_into(&mut second_bytes, &second, true);
+    let used = reused.encoder.encode_into(&mut second_bytes, &second);
     // The definition written before the stale hit stays; everything after it is inline.
     assert_eq!(used, DocUse { defs: 1, refs: 0 });
     assert_eq!(second_bytes[..5], [2, 0, 0, 0, 0]);
@@ -302,7 +301,7 @@ fn a_string_of_the_same_length_at_a_registered_address_goes_unnoticed_if_the_cal
 
     let second = array_of(&[&reused.intruder, &reused.intruder]);
     let mut second_bytes = Vec::new();
-    let used = reused.encoder.encode_into(&mut second_bytes, &second, true);
+    let used = reused.encoder.encode_into(&mut second_bytes, &second);
     assert_eq!(used, DocUse { defs: 0, refs: 2 });
     assert_eq!(second_bytes, [0x82, 0xC7, 0x00, 0xC7, 0x00]);
     assert!(!reused.encoder.is_poisoned());

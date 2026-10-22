@@ -50,10 +50,7 @@ impl Written {
 }
 
 fn config(table_budget_bytes: usize) -> StreamEncoderConfig {
-    StreamEncoderConfig {
-        table_budget_bytes,
-        max_def_bytes: 0,
-    }
+    StreamEncoderConfig { table_budget_bytes }
 }
 
 fn inline_bytes(docs: &[IValue]) -> u64 {
@@ -71,7 +68,7 @@ fn write_corpus(docs: &[IValue], config: StreamEncoderConfig) -> Written {
     for (index, doc) in docs.iter().enumerate() {
         let base_id = encoder.next_id();
         let mut record = vec![0; STREAM_HEADER_LEN];
-        if encoder.encode_into(&mut record, doc, true) == DocUse::default() {
+        if encoder.encode_into(&mut record, doc) == DocUse::default() {
             // Self-contained: the marker is the only framing.
             bytes += (record.len() - (STREAM_HEADER_LEN - 1)) as u64;
         } else {

@@ -56,10 +56,6 @@ impl<'a> From<&'a IString> for StreamString<'a> {
 /// entry allocations, including simultaneous old/new tables during growth.
 /// IDs are assigned by the encoder; dictionaries must return them unchanged.
 pub trait StringDictionary {
-    /// Whether definitions depend on source storage remaining alive and unchanged.
-    /// Borrowing dictionaries must not define strings from temporary values.
-    fn borrows_strings(&self) -> bool;
-
     /// Number of definitions in the current dictionary.
     fn len(&self) -> usize;
 
@@ -83,9 +79,6 @@ pub trait StringDictionary {
 }
 
 impl<D: StringDictionary + ?Sized> StringDictionary for Box<D> {
-    fn borrows_strings(&self) -> bool {
-        (**self).borrows_strings()
-    }
     fn len(&self) -> usize {
         (**self).len()
     }
@@ -136,10 +129,6 @@ impl AddressDictionary {
 }
 
 impl StringDictionary for AddressDictionary {
-    fn borrows_strings(&self) -> bool {
-        true
-    }
-
     fn len(&self) -> usize {
         self.entries.len()
     }
@@ -192,10 +181,6 @@ impl ContentDictionary {
 }
 
 impl StringDictionary for ContentDictionary {
-    fn borrows_strings(&self) -> bool {
-        false
-    }
-
     fn len(&self) -> usize {
         self.entries.len()
     }

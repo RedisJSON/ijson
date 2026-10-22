@@ -150,12 +150,11 @@ fn encode_in_child(
     }
     let mut encoder = StreamEncoder::new(StreamEncoderConfig {
         table_budget_bytes: 64 << 20,
-        max_def_bytes: 0,
     });
     let mut out = Vec::new();
     for doc in docs {
         out.clear();
-        encoder.encode_into(&mut out, doc, true);
+        encoder.encode_into(&mut out, doc);
     }
     let stats = encoder.stats();
     if stats.defs == DOCS as u64 && stats.refs == DOCS as u64 {

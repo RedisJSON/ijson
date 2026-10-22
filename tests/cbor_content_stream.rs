@@ -12,7 +12,6 @@ static ALLOCATOR: Mockalloc<std::alloc::System> = Mockalloc(std::alloc::System);
 fn config(budget: usize) -> StreamEncoderConfig {
     StreamEncoderConfig {
         table_budget_bytes: budget,
-        max_def_bytes: 0,
     }
 }
 
@@ -50,7 +49,7 @@ fn external_strings_are_owned_and_keys_and_values_share_ids() {
     ];
     let mut first = Vec::new();
     let used = encoder
-        .encode_with(&mut first, true, |strings, out| {
+        .encode_with(&mut first, |strings, out| {
             ciborium::into_writer(
                 &Document {
                     strings,
@@ -66,7 +65,7 @@ fn external_strings_are_owned_and_keys_and_values_share_ids() {
 
     let mut second = Vec::new();
     let used = encoder
-        .encode_with(&mut second, true, |strings, out| {
+        .encode_with(&mut second, |strings, out| {
             ciborium::into_writer(&strings.string(&String::from("another shared value")), out)
         })
         .unwrap();
@@ -102,7 +101,7 @@ fn content_budget_counts_owned_bytes_and_resets_release_them() {
         let text = format!("{index:04}{}", "x".repeat(96));
         let mut bytes = Vec::new();
         let used = encoder
-            .encode_with(&mut bytes, true, |strings, out| {
+            .encode_with(&mut bytes, |strings, out| {
                 ciborium::into_writer(&strings.string(&text), out)
             })
             .unwrap();
@@ -125,7 +124,7 @@ fn content_budget_counts_owned_bytes_and_resets_release_them() {
 fn failed_serialization_discards_bytes_and_poisons_later_references() {
     let mut encoder = StreamEncoder::with_dictionary(config(4096), ContentDictionary::default());
     let mut bytes = vec![42];
-    let result = encoder.encode_with(&mut bytes, true, |strings, out| {
+    let result = encoder.encode_with(&mut bytes, |strings, out| {
         ciborium::into_writer(&strings.string("a definition in a failed document"), out).unwrap();
         Err::<(), _>("serializer failed")
     });
@@ -135,7 +134,7 @@ fn failed_serialization_discards_bytes_and_poisons_later_references() {
 
     let mut later = Vec::new();
     let used = encoder
-        .encode_with(&mut later, true, |strings, out| {
+        .encode_with(&mut later, |strings, out| {
             ciborium::into_writer(&strings.string("a definition in a failed document"), out)
         })
         .unwrap();
@@ -158,8 +157,8 @@ fn dictionary_policy_does_not_change_the_wire_format() {
     for value in &values {
         let (mut a, mut c) = (Vec::new(), Vec::new());
         assert_eq!(
-            address.encode_into(&mut a, value, true),
-            content.encode_into(&mut c, value, true)
+            address.encode_into(&mut a, value),
+            content.encode_into(&mut c, value)
         );
         assert_eq!(a, c);
         assert_eq!(decoder.decode(&c, true).unwrap(), *value);
@@ -193,35 +192,24 @@ fn owned_dictionary_growth_and_repeated_resets_fit_the_allocation_budget() {
 }
 
 #[test]
-fn lookup_only_and_disabled_content_dictionaries_write_valid_plain_values() {
+fn a_disabled_content_dictionary_writes_valid_plain_values() {
     for budget in [0, 4096] {
         let mut encoder =
             StreamEncoder::with_dictionary(config(budget), ContentDictionary::default());
         let mut bytes = Vec::new();
         let used = encoder
-            .encode_with(&mut bytes, true, |strings, out| {
+            .encode_with(&mut bytes, |strings, out| {
                 ciborium::into_writer(&strings.string("already defined text"), out)
             })
             .unwrap();
         assert_eq!(used.defs, u64::from(budget != 0));
         bytes.clear();
         let used = encoder
-            .encode_with(&mut bytes, false, |strings, out| {
+            .encode_with(&mut bytes, |strings, out| {
                 ciborium::into_writer(&strings.string("already defined text"), out)
             })
             .unwrap();
         assert_eq!(used.refs, u64::from(budget != 0));
         assert_eq!(used.defs, 0);
-        bytes.clear();
-        let used = encoder
-            .encode_with(&mut bytes, false, |strings, out| {
-                ciborium::into_writer(&strings.string("unseen lookup-only text"), out)
-            })
-            .unwrap();
-        assert_eq!(used, DocUse::default());
-        assert_eq!(
-            ijson::decode(&bytes).unwrap().as_string().unwrap().as_str(),
-            "unseen lookup-only text"
-        );
     }
 }

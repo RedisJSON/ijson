@@ -640,14 +640,13 @@ mod tests {
 
         let mut encoder = StreamEncoder::new(StreamEncoderConfig {
             table_budget_bytes: 1 << 20,
-            max_def_bytes: 0,
         });
         // With the cache locked, interning or freeing a string would block.
         let guard = cache.lock().unwrap();
         let (sender, receiver) = channel();
         let used = std::thread::scope(|scope| {
             scope.spawn(|| {
-                let used = encoder.encode_into(&mut Vec::new(), &doc, true);
+                let used = encoder.encode_into(&mut Vec::new(), &doc);
                 sender.send(used).unwrap();
             });
             let used = receiver.recv_timeout(Duration::from_secs(10));
