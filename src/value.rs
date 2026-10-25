@@ -238,7 +238,7 @@ impl IValue {
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
     pub(crate) unsafe fn new_ptr(p: *mut u8, tag: TypeTag) -> Self {
         Self {
-            ptr: NonNull::new_unchecked(p.add(tag as usize)),
+            ptr: NonNull::new_unchecked(p.wrapping_add(tag as usize)),
         }
     }
     // Safety: Reference must be aligned to at least ALIGNMENT

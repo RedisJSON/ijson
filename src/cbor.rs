@@ -87,14 +87,6 @@ pub(crate) const TAG_REF: u64 = 7;
 
 const MAX_DEPTH: u32 = 128;
 
-/// Reads the ID of a string reference: a nonnegative integer that fits `usize`.
-fn reference_id(value: Value) -> Result<usize, CborDecodeError> {
-    let Value::Integer(id) = value else {
-        return Err(CborDecodeError::InvalidStringReference);
-    };
-    usize::try_from(id).map_err(|_| CborDecodeError::InvalidStringReference)
-}
-
 /// Error returned when CBOR decoding fails.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CborDecodeError {
@@ -365,23 +357,6 @@ enum StringRefs<'a> {
     Stream(&'a DecoderCell<'a>),
 }
 
-impl StringRefs<'_> {
-    fn is_string_tag(self, tag: u64) -> bool {
-        match self {
-            Self::None => false,
-            Self::Stream(_) => tag == TAG_DEF || tag == TAG_REF,
-        }
-    }
-
-    /// Resolves the content of a tag accepted by [`Self::is_string_tag`].
-    fn resolve(self, tag: u64, inner: Value) -> Result<IString, CborDecodeError> {
-        match self {
-            Self::None => Err(CborDecodeError::UnknownTag(tag)),
-            Self::Stream(decoder) => decoder.borrow_mut().resolve(tag, inner),
-        }
-    }
-}
-
 struct DecodeContext<'a> {
     refs: StringRefs<'a>,
     limit_depth: bool,
@@ -403,7 +378,7 @@ struct ValueSeed<'a, 'd> {
 
 impl ValueSeed<'_, '_> {
     fn convert<E: serde::de::Error>(self, value: Value) -> Result<IValue, E> {
-        leaf_to_ivalue(value, self.context.refs).map_err(|error| self.context.fail(error))
+        leaf_to_ivalue(value).map_err(|error| self.context.fail(error))
     }
 
     fn child(self) -> Self {
@@ -830,7 +805,7 @@ pub fn decode_compressed(bytes: &[u8]) -> Result<IValue, CborDecodeError> {
 
 /// Converts what the visitor leaves to ciborium: numbers (ciborium has already turned bignums into
 /// integers) and tags. The nesting limit was checked before the visitor ran.
-fn leaf_to_ivalue(val: Value, refs: StringRefs<'_>) -> Result<IValue, CborDecodeError> {
+fn leaf_to_ivalue(val: Value) -> Result<IValue, CborDecodeError> {
     match val {
         Value::Float(f) => Ok(INumber::try_from(f).map(Into::into).unwrap_or(IValue::NULL)),
         Value::Integer(i) => {
@@ -841,9 +816,6 @@ fn leaf_to_ivalue(val: Value, refs: StringRefs<'_>) -> Result<IValue, CborDecode
             } else {
                 Err(CborDecodeError::InvalidValue)
             }
-        }
-        Value::Tag(tag, inner) if refs.is_string_tag(tag) => {
-            refs.resolve(tag, *inner).map(Into::into)
         }
         Value::Tag(tag, inner) => decode_typed_array(tag, *inner),
         _ => Err(CborDecodeError::InvalidValue),

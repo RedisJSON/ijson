@@ -23,11 +23,10 @@ use std::cell::RefCell;
 use std::fmt;
 
 use ciborium::tag::RequireAny;
-use ciborium::value::Value;
 use hashbrown::HashMap;
 use serde::Serialize;
 
-use super::{reference_id, EncodedValue, StringRefs, TAG_DEF, TAG_REF};
+use super::{EncodedValue, StringRefs, TAG_DEF, TAG_REF};
 use crate::{CborDecodeError, IString, IValue};
 
 mod dictionary;
@@ -453,21 +452,6 @@ impl StreamDecoder {
         self.stats
     }
 
-    pub(super) fn resolve(&mut self, tag: u64, inner: Value) -> Result<IString, CborDecodeError> {
-        if tag == TAG_DEF {
-            self.define(inner)
-        } else {
-            self.reference(inner)
-        }
-    }
-
-    fn define(&mut self, inner: Value) -> Result<IString, CborDecodeError> {
-        let Value::Text(text) = inner else {
-            return Err(CborDecodeError::InvalidValue);
-        };
-        self.define_str(&text)
-    }
-
     pub(super) fn define_str(&mut self, text: &str) -> Result<IString, CborDecodeError> {
         if text.len() < MIN_DEFINED_LEN {
             return Err(CborDecodeError::InvalidValue);
@@ -477,10 +461,6 @@ impl StreamDecoder {
         self.stats.def_bytes += string.len() as u64;
         self.entries.push(string.clone());
         Ok(string)
-    }
-
-    fn reference(&mut self, inner: Value) -> Result<IString, CborDecodeError> {
-        self.reference_id(reference_id(inner)?)
     }
 
     pub(super) fn reference_id(&mut self, id: usize) -> Result<IString, CborDecodeError> {
@@ -686,7 +666,7 @@ mod tests {
         assert_eq!(encoder.table.len(), 14);
         assert_eq!(encoder.table.used_bytes(), 288);
         // The 26 strings that found no room are met twice.
-        let items: Vec<Value> = ciborium::from_reader(bytes.as_slice()).unwrap();
+        let items: Vec<ciborium::value::Value> = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert_eq!(items.iter().filter(|item| item.is_text()).count(), 52);
     }
 
