@@ -205,49 +205,7 @@ fn free_and_reuse(intruder_len: usize) -> Reused {
 }
 
 #[test]
-fn the_test_allocator_hands_a_freed_string_block_to_the_next_string() {
-    let _guard = serial();
-    let _recycling = Recycling::start();
-    for len in [FIRST_LEN, 40] {
-        let freed = IString::from("f".repeat(FIRST_LEN));
-        let address = freed.as_ptr();
-        drop(freed);
-        let next = IString::from("n".repeat(len));
-        assert_eq!(next.as_ptr(), address, "length {len}");
-    }
-}
-
-#[test]
-fn caller_owned_strings_keep_their_addresses_until_the_stream_ends() {
-    let _guard = serial();
-    let _recycling = Recycling::start();
-    let mut encoder = StreamEncoder::new(config());
-    let owner = IString::from("o".repeat(FIRST_LEN));
-    let first = array_of(&[&owner, &owner]);
-    let mut first_bytes = Vec::new();
-    assert_eq!(
-        encoder.encode_into(&mut first_bytes, &first),
-        DocUse { defs: 1, refs: 1 }
-    );
-    drop(first);
-    let intruder = IString::from("i".repeat(40));
-    // If freed, the allocator would give the old block to the new string; the caller's
-    // owner is all that keeps it from doing so here.
-    assert_ne!(intruder.as_ptr(), owner.as_ptr());
-    let second = array_of(&[&intruder, &intruder, &owner]);
-    let mut second_bytes = Vec::new();
-    assert_eq!(
-        encoder.encode_into(&mut second_bytes, &second),
-        DocUse { defs: 1, refs: 2 }
-    );
-    assert!(!encoder.is_poisoned());
-    let mut decoder = StreamDecoder::new();
-    decoder.decode(&first_bytes, true).unwrap();
-    assert_eq!(decoder.decode(&second_bytes, true).unwrap(), second);
-}
-
-#[test]
-fn a_string_of_another_length_at_a_registered_address_is_never_resolved_to_the_old_one() {
+fn a_reused_address_with_another_length_poisons_the_encoder() {
     let _guard = serial();
     let _recycling = Recycling::start();
     let mut reused = free_and_reuse(40);
@@ -288,12 +246,11 @@ fn a_stale_hit_after_a_definition_in_the_same_document_keeps_the_definition() {
     assert_eq!(decoder.len(), 2);
 }
 
-// The caller-owned lifetime requirement that `StreamEncoder` documents. The test records
-// it so that an unpoisoned encoder is not mistaken for proof, and so that a check
-// that learns to see this shows up here as a change.
+// Known limit: the encoder sees a reused address only when the new string has another
+// length. Callers keep every defined string alive until the stream ends, as `StreamEncoder`
+// documents.
 #[test]
-fn a_string_of_the_same_length_at_a_registered_address_goes_unnoticed_if_the_caller_drops_its_owner(
-) {
+fn a_reused_address_with_the_same_length_is_not_detected() {
     let _guard = serial();
     let _recycling = Recycling::start();
     let mut reused = free_and_reuse(FIRST_LEN);

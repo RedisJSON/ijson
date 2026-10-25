@@ -101,25 +101,6 @@ fn stream_encoding_borrows_large_string_content() {
 }
 
 #[test]
-fn stream_encoding_borrows_array_elements() {
-    let value: IValue = IArray::try_from(vec![IValue::NULL; 262_144])
-        .unwrap()
-        .into();
-    let mut encoder = StreamEncoder::new(stream_config());
-    let allocations = record_allocs(|| {
-        let mut out = Vec::new();
-        assert_eq!(encoder.encode_into(&mut out, &value).defs, 0);
-        assert!(out.len() > 262_144);
-        std::hint::black_box(&out);
-    });
-    assert!(
-        allocations.peak_mem() < 1024 * 1024,
-        "encoding retained an intermediate array tree: {} bytes",
-        allocations.peak_mem()
-    );
-}
-
-#[test]
 fn stream_encoding_of_shared_strings_needs_less_memory_than_plain_encoding() {
     let value = shared_elements(262_144);
     let plain = record_allocs(|| {

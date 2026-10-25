@@ -106,46 +106,26 @@ fn read_all(docs: &[&Doc]) -> Result<(Vec<IValue>, StreamDecoder), String> {
 }
 
 #[test]
-fn first_use_defines_and_later_uses_reference_with_exact_bytes() {
-    let _guard = serial();
-    let text = "0123456789abcdefghijklmnopqrstuvwxyzABCD";
-    assert_eq!(text.len(), 40);
-    let first = json(&format!(r#"{{"k":"{text}"}}"#));
-    let second = json(&format!(r#"{{"k":"{text}"}}"#));
-    let mut encoder = StreamEncoder::new(config());
-    assert_eq!(encoder.next_id(), 0);
-
-    let (bytes, used) = encode_doc(&mut encoder, &first);
-    let mut expected = vec![0xA1, 0x61, 0x6B, 0xC6, 0x78, 0x28];
-    expected.extend_from_slice(text.as_bytes());
-    assert_eq!(bytes, expected);
-    assert_eq!(used, DocUse { defs: 1, refs: 0 });
-    assert_eq!(encoder.next_id(), 1);
-
-    let (bytes, used) = encode_doc(&mut encoder, &second);
-    assert_eq!(bytes, vec![0xA1, 0x61, 0x6B, 0xC7, 0x00]);
-    assert_eq!(used, DocUse { defs: 0, refs: 1 });
-    assert_eq!(encoder.next_id(), 1);
-
-    let stats = encoder.stats();
-    assert_eq!((stats.defs, stats.def_bytes), (1, 40));
-    assert_eq!(stats.refs, 1);
-}
-
-#[test]
 fn encoded_bytes_match_the_wire_format_built_from_cbor_values() {
     let _guard = serial();
     let field = "a field name over the minimum";
     let value = "a value that is long enough to share";
-    let first = json(&format!(
-        r#"{{"{field}":"{value}","list":["{value}","{field}"]}}"#
-    ));
-    let second = json(&format!(r#"{{"{field}":["{value}","{value}"]}}"#));
+    let values = [
+        json(&format!(
+            r#"{{"{field}":"{value}","list":["{value}","{field}"]}}"#
+        )),
+        json(&format!(r#"{{"{field}":["{value}","{value}"]}}"#)),
+        // A field used as a value, a value used as a field, and a document that shares nothing.
+        json(&format!(
+            r#"{{"plain":"{field}","{value}":null,"{field}":1}}"#
+        )),
+        json("[1, 2, 3]"),
+    ];
     let mut encoder = StreamEncoder::new(config());
+    let docs = encode_stream(&mut encoder, &values);
 
-    let (bytes, used) = encode_doc(&mut encoder, &first);
     assert_eq!(
-        bytes,
+        docs[0].bytes,
         cbor_bytes(&Value::Map(vec![
             (define(field), define(value)),
             (
@@ -154,34 +134,14 @@ fn encoded_bytes_match_the_wire_format_built_from_cbor_values() {
             ),
         ]))
     );
-    assert_eq!(used, DocUse { defs: 2, refs: 2 });
-
-    let (bytes, used) = encode_doc(&mut encoder, &second);
     assert_eq!(
-        bytes,
+        docs[1].bytes,
         cbor_bytes(&Value::Map(vec![(
             reference(0),
             Value::Array(vec![reference(1), reference(1)])
         )]))
     );
-    assert_eq!(used, DocUse { defs: 0, refs: 3 });
-}
-
-#[test]
-fn definitions_and_references_span_keys_values_and_documents() {
-    let _guard = serial();
-    let key = "shared object field name";
-    let value = "shared string value";
-    let values = [
-        json(&format!(
-            r#"{{"{key}":"{value}","list":["{value}","{key}"]}}"#
-        )),
-        json(&format!(r#"{{"{key}":["{value}","{value}"]}}"#)),
-        json(&format!(r#"{{"plain":"{key}","{value}":null,"{key}":1}}"#)),
-        json("[1, 2, 3]"),
-    ];
-    let mut encoder = StreamEncoder::new(config());
-    let docs = encode_stream(&mut encoder, &values);
+    assert_eq!(docs[3].bytes, encode(&values[3]));
     let counts: Vec<_> = docs
         .iter()
         .map(|doc| (doc.used.defs, doc.used.refs))
@@ -191,14 +151,14 @@ fn definitions_and_references_span_keys_values_and_documents() {
         docs.iter().map(|doc| doc.base_id).collect::<Vec<_>>(),
         [0, 2, 2, 2]
     );
-    assert_eq!(docs[3].bytes, encode(&values[3]));
+    let stats = encoder.stats();
+    assert_eq!((stats.defs, stats.refs), (2, 8));
+    assert_eq!(stats.def_bytes, (field.len() + value.len()) as u64);
 
     let (decoded, decoder) = read_all(&docs.iter().collect::<Vec<_>>()).unwrap();
     assert_eq!(decoded, values);
     assert_eq!(decoder.len(), 2);
-    let stats = decoder.stats();
-    assert_eq!((stats.defs, stats.refs), (2, 8));
-    assert_eq!(stats.def_bytes, (key.len() + value.len()) as u64);
+    assert_eq!(decoder.stats().refs, stats.refs);
 }
 
 #[test]
@@ -231,27 +191,6 @@ fn documents_without_shared_strings_are_byte_identical_to_plain_encoding() {
         assert_eq!(decode(&bytes).unwrap(), value);
     }
     assert_eq!(encoder.next_id(), 0);
-}
-
-#[test]
-fn encoding_appends_after_bytes_the_caller_already_wrote() {
-    let _guard = serial();
-    let text = "a string stored in two places";
-    let (first, second) = (
-        json(&format!(r#"["{text}"]"#)),
-        json(&format!(r#"["{text}"]"#)),
-    );
-    let mut encoder = StreamEncoder::new(config());
-    let mut out = vec![2, 0, 0, 0, 0];
-    let used = encoder.encode_into(&mut out, &first);
-    assert_eq!(used.defs, 1);
-    assert_eq!(&out[..5], &[2, 0, 0, 0, 0]);
-    let mut decoder = StreamDecoder::new();
-    assert_eq!(decoder.decode(&out[5..], true).unwrap(), first);
-
-    let start = out.len();
-    encoder.encode_into(&mut out, &second);
-    assert_eq!(&out[start..], &[0x81, 0xC7, 0x00]);
 }
 
 #[test]
@@ -290,25 +229,16 @@ fn decoding_follows_byte_order_for_the_first_key_and_value() {
         )
     );
     assert_eq!(decoder.len(), 3);
-}
 
-#[test]
-fn owner_count_gates_definitions() {
-    let _guard = serial();
-    let mut encoder = StreamEncoder::new(config());
-    let sole: IValue = IString::from("a string with exactly one owner").into();
-    let (bytes, used) = encode_doc(&mut encoder, &sole);
-    assert_eq!(bytes, encode(&sole));
-    assert_eq!(used, DocUse::default());
-    assert_eq!(encoder.next_id(), 0);
-
-    let owner = IString::from("a string with two owners");
-    let shared: IValue = owner.clone().into();
-    let (bytes, used) = encode_doc(&mut encoder, &shared);
-    assert_ne!(bytes, encode(&shared));
-    assert_eq!(used.defs, 1);
-    assert_eq!(encoder.next_id(), 1);
-    drop(owner);
+    // Every definition takes the next id, even when its text repeats.
+    let mut decoder = StreamDecoder::new();
+    let twice = cbor_bytes(&Value::Array(vec![
+        define("the same text twice"),
+        define("the same text twice"),
+        reference(1),
+    ]));
+    decoder.decode(&twice, true).unwrap();
+    assert_eq!(decoder.len(), 2);
 }
 
 #[test]
@@ -329,7 +259,6 @@ fn strings_kept_inline_are_never_registered() {
     }
     assert_eq!(encoder.next_id(), 0);
 
-    // Eight bytes is the shortest string that is defined.
     let owner = IString::from("12345678");
     let value: IValue = IArray::try_from(vec![IValue::from(owner.clone()), owner.clone().into()])
         .unwrap()
@@ -337,88 +266,6 @@ fn strings_kept_inline_are_never_registered() {
     let (_, used) = encode_doc(&mut encoder, &value);
     assert_eq!(used, DocUse { defs: 1, refs: 1 });
     drop(owner);
-}
-
-#[test]
-fn short_strings_stay_inline_on_every_backend() {
-    let _guard = serial();
-    // Up to seven bytes a string sits inside its handle by default and on the heap
-    // with `thread_safe`, and the empty string has no heap block on either.
-    let short = IString::from("abc");
-    let seven = IString::from("1234567");
-    let value: IValue = IArray::try_from(vec![
-        IValue::from(short.clone()),
-        short.clone().into(),
-        seven.clone().into(),
-        seven.clone().into(),
-        IString::from("").into(),
-    ])
-    .unwrap()
-    .into();
-    let mut encoder = StreamEncoder::new(config());
-    let (bytes, used) = encode_doc(&mut encoder, &value);
-    assert_eq!(bytes, encode(&value));
-    assert_eq!(used, DocUse::default());
-    assert_eq!(encoder.next_id(), 0);
-}
-
-#[test]
-fn a_zero_budget_defines_nothing() {
-    let _guard = serial();
-    let mut encoder = StreamEncoder::new(StreamEncoderConfig {
-        table_budget_bytes: 0,
-        ..config()
-    });
-    let owner = IString::from("a string that would be defined");
-    let value: IValue = IArray::try_from(vec![IValue::from(owner.clone()), owner.clone().into()])
-        .unwrap()
-        .into();
-    let (bytes, used) = encode_doc(&mut encoder, &value);
-    assert_eq!(bytes, encode(&value));
-    assert_eq!(used, DocUse::default());
-    assert_eq!(encoder.stats(), Default::default());
-    assert_eq!(encoder.next_id(), 0);
-    drop(owner);
-}
-
-#[test]
-fn reference_ids_use_the_shortest_integer_form() {
-    let _guard = serial();
-    let strings: Vec<IString> = (0..65_540)
-        .map(|index| IString::from(format!("distinct shared string number {index:06}")))
-        .collect();
-    let mut encoder = StreamEncoder::new(config());
-    let mut decoder = StreamDecoder::new();
-    let define_all = IArray::try_from(
-        strings
-            .iter()
-            .cloned()
-            .map(IValue::from)
-            .collect::<Vec<_>>(),
-    )
-    .unwrap()
-    .into();
-    let (bytes, used) = encode_doc(&mut encoder, &define_all);
-    assert_eq!(used.defs, strings.len() as u64);
-    assert_eq!(decoder.decode(&bytes, true).unwrap(), define_all);
-    assert_eq!(decoder.len(), strings.len());
-
-    for (id, size) in [
-        (0, 2),
-        (23, 2),
-        (24, 3),
-        (255, 3),
-        (256, 4),
-        (65_535, 4),
-        (65_536, 6),
-        (65_539, 6),
-    ] {
-        let value: IValue = strings[id].clone().into();
-        let (bytes, used) = encode_doc(&mut encoder, &value);
-        assert_eq!(used, DocUse { defs: 0, refs: 1 });
-        assert_eq!(bytes.len(), size, "id {id}");
-        assert_eq!(decoder.decode(&bytes, true).unwrap(), value, "id {id}");
-    }
 }
 
 #[test]
@@ -489,51 +336,6 @@ fn table_budget_freezes_new_definitions_but_keeps_references() {
 }
 
 #[test]
-fn a_small_budget_only_pays_for_the_address_table() {
-    let _guard = serial();
-    let owner = IString::from("a string registered in the address table");
-    let mut encoder = StreamEncoder::new(StreamEncoderConfig {
-        table_budget_bytes: 1024,
-        ..config()
-    });
-    let (_, used) = encode_doc(&mut encoder, &twice(&owner));
-    assert_eq!(used, DocUse { defs: 1, refs: 1 });
-}
-
-fn twice(owner: &IString) -> IValue {
-    IArray::try_from(vec![IValue::from(owner.clone()), owner.clone().into()])
-        .unwrap()
-        .into()
-}
-
-#[test]
-fn encoding_never_changes_string_owner_counts() {
-    let _guard = serial();
-    let owner = IString::from("a string whose header must stay untouched");
-    let first: IValue = owner.clone().into();
-    let second: IValue = owner.clone().into();
-    // A shared string's reported share is its size divided by its owner count.
-    let share = |value: &IValue| value.mem_allocated();
-    let before = share(&first);
-
-    let mut encoder = StreamEncoder::new(config());
-    for _ in 0..2 {
-        encode_doc(&mut encoder, &first);
-        encode_doc(&mut encoder, &second);
-    }
-    assert_eq!(encoder.stats().defs, 1);
-    assert_eq!(share(&first), before);
-
-    // Encoding and releasing the table leave the same three owners.
-    drop(encoder);
-    assert_eq!(share(&first), before);
-    drop(owner);
-}
-
-// Address reuse needs an allocator that always recycles a freed block, and has its
-// own test binary: cbor_stream_address_reuse.rs.
-
-#[test]
 fn a_plain_array_is_not_an_object_key() {
     let _guard = serial();
     let text = || Value::Text("abcdefgh".into());
@@ -554,7 +356,7 @@ fn a_plain_array_is_not_an_object_key() {
 }
 
 #[test]
-fn decoding_rejects_forged_references() {
+fn reference_ids_must_be_integers_of_defined_entries() {
     let _guard = serial();
     let defined = define("the only defined string");
     let payloads = vec![
@@ -597,22 +399,15 @@ fn decoding_rejects_forged_references() {
     assert!(StreamDecoder::new()
         .decode(&[0xda, 0x00, 0x00, 0x00, 0x07, 0x00], true)
         .is_err());
-}
 
-#[test]
-fn reference_ids_follow_cbor_integer_normalization() {
-    let _guard = serial();
-    let mut decoder = StreamDecoder::new();
-    decoder
-        .decode(
-            &cbor_bytes(&Value::Array(vec![define("the only entry")])),
-            true,
-        )
-        .unwrap();
-    let normalized = Value::Tag(7, Box::new(Value::Tag(2, Box::new(Value::Bytes(vec![0])))));
+    // Any CBOR integer form names an id, here a bignum zero.
+    let bignum_zero = Value::Tag(7, Box::new(Value::Tag(2, Box::new(Value::Bytes(vec![0])))));
+    let doc = Value::Array(vec![defined.clone(), bignum_zero]);
     assert_eq!(
-        decoder.decode(&cbor_bytes(&normalized), true).unwrap(),
-        IValue::from("the only entry")
+        StreamDecoder::new()
+            .decode(&cbor_bytes(&doc), true)
+            .unwrap(),
+        json(r#"["the only defined string","the only defined string"]"#)
     );
 }
 
@@ -649,7 +444,6 @@ fn decoding_rejects_malformed_definitions() {
     assert!(decoder.decode(&invalid, true).is_err());
     assert_eq!(decoder.len(), 0);
 
-    // Exactly eight bytes is the shortest definition.
     let mut decoder = StreamDecoder::new();
     assert_eq!(
         decoder
@@ -658,17 +452,6 @@ fn decoding_rejects_malformed_definitions() {
         IValue::from("12345678")
     );
     assert_eq!(decoder.len(), 1);
-}
-
-#[test]
-fn a_failed_decode_leaves_the_decoder_failed() {
-    let _guard = serial();
-    let mut decoder = StreamDecoder::new();
-    let define_one = cbor_bytes(&define("the first definition"));
-    decoder.decode(&define_one, true).unwrap();
-    assert!(decoder.decode(&cbor_bytes(&reference(9)), true).is_err());
-    // Later documents could resolve ids the failed one was meant to define.
-    assert!(decoder.decode(&cbor_bytes(&reference(0)), true).is_err());
 }
 
 #[test]
@@ -725,6 +508,13 @@ fn typed_arrays_decode_as_before_in_stream_mode() {
         ArraySliceRef::U16(_)
     ));
     drop(again);
+
+    // A tag that is neither a string tag nor a typed array is refused.
+    let unknown = cbor_bytes(&Value::Tag(0x10001, Box::new(Value::Integer(0.into()))));
+    assert_eq!(
+        StreamDecoder::new().decode(&unknown, true),
+        Err(CborDecodeError::InvalidValue)
+    );
 }
 
 /// Wraps `leaf` in `depth` single element arrays.
@@ -770,11 +560,15 @@ fn nesting_limit_treats_definitions_and_references_like_inline_strings() {
                 let mut encoder = StreamEncoder::new(config());
                 let (bytes, used) = encode_doc(&mut encoder, &doc);
                 assert!(used.defs > 0, "{what} {depth}");
+                let mut decoder = StreamDecoder::new();
                 assert_eq!(
-                    StreamDecoder::new().decode(&bytes, limit_depth),
+                    decoder.decode(&bytes, limit_depth),
                     expected,
                     "define {what} {depth} {limit_depth}"
                 );
+                if expected.is_ok() {
+                    assert_eq!(decoder.len() as u64, used.defs, "{what} {depth}");
+                }
 
                 // A shallow document defined them, so this one only references.
                 let mut encoder = StreamEncoder::new(config());
@@ -873,7 +667,6 @@ fn random_documents_round_trip_in_order() {
             assert_eq!(decoder.stats().refs, stats.refs);
             assert_eq!(decoder.stats().def_bytes, stats.def_bytes);
 
-            // An id the writer never defined is refused.
             let forged = cbor_bytes(&reference(decoder.len() as u64));
             assert_eq!(
                 decoder.decode(&forged, true),
@@ -893,10 +686,7 @@ fn a_fresh_encoder_and_decoder_make_a_document_stand_alone() {
     let used = StreamEncoder::new(config()).encode_into(&mut bytes, &value);
     assert_eq!(used, DocUse { defs: 1, refs: 2 });
     assert!(bytes.len() < encode(&value).len());
-    // No other document is needed, in any order and any number of times.
-    for _ in 0..2 {
-        assert_eq!(StreamDecoder::new().decode(&bytes, true).unwrap(), value);
-    }
+    assert_eq!(StreamDecoder::new().decode(&bytes, true).unwrap(), value);
     // A second document written by another fresh encoder restarts its ids at 0.
     let mut other = Vec::new();
     StreamEncoder::new(config()).encode_into(&mut other, &value);

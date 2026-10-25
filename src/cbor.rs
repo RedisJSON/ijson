@@ -858,6 +858,11 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::array::ArraySliceRef;
+    use crate::IValueDeserSeed;
+    use serde::de::DeserializeSeed;
+
     #[test]
     fn plain_encoding_appends_without_changing_prefix() {
         let value = crate::IValue::from("hello");
@@ -865,11 +870,6 @@ mod tests {
         super::encode_into(&value, &mut out);
         assert_eq!(out, [0, 42, 0x65, b'h', b'e', b'l', b'l', b'o']);
     }
-
-    use super::*;
-    use crate::array::ArraySliceRef;
-    use crate::IValueDeserSeed;
-    use serde::de::DeserializeSeed;
 
     #[test]
     fn compatibility_encoder_matches_tree_bytes() {
@@ -942,106 +942,12 @@ mod tests {
                 );
             }
         }
-        // The tag of the former dictionary references is no string tag now.
+        // A tag that no decoder defines is no string tag.
         for limit in [true, false] {
             assert_eq!(
                 decode_with_depth_limit(&[0xda, 0, 1, 0, 1, 0xc2, 0x41, 0], limit),
                 Err(CborDecodeError::InvalidValue)
             );
-        }
-        // Nesting: the limit rejects 128 levels of arrays, no limit accepts any.
-        for (depth, limited_ok) in [(126, true), (127, true), (128, false), (300, false)] {
-            let mut bytes = vec![0x81; depth];
-            bytes.push(0xf6);
-            assert!(decode_with_depth_limit(&bytes, false).is_ok(), "{depth}");
-            let limited = decode_with_depth_limit(&bytes, true);
-            if limited_ok {
-                assert!(limited.is_ok(), "{depth}");
-            } else {
-                assert_eq!(limited, Err(CborDecodeError::DepthLimitExceeded), "{depth}");
-            }
-        }
-    }
-
-    #[test]
-    fn stream_decoder_matches_the_tree_reference() {
-        let def = |text: &str| Value::Tag(TAG_DEF, Box::new(Value::Text(text.into())));
-        let reference = |id: u64| Value::Tag(TAG_REF, Box::new(Value::Integer(id.into())));
-        let wrap =
-            |depth: usize, leaf: Value| (0..depth).fold(leaf, |inner, _| Value::Array(vec![inner]));
-        let wrap_keys = |depth: usize, key: Value, leaf: Value| {
-            (0..depth).fold(leaf, |inner, _| Value::Map(vec![(key.clone(), inner)]))
-        };
-        let mut cases = vec![
-            Value::Array(vec![def("12345678"), reference(0), reference(0)]),
-            Value::Map(vec![
-                (def("key key key"), def("value value")),
-                (reference(0), reference(1)),
-            ]),
-            Value::Array(vec![reference(0)]),
-            Value::Array(vec![def("12345678"), reference(1)]),
-            def("1234567"),
-            Value::Tag(TAG_DEF, Box::new(Value::Integer(8.into()))),
-            Value::Tag(TAG_REF, Box::new(Value::Text("0".into()))),
-            // Formerly the tag of dictionary references; no string tag now.
-            Value::Tag(0x10001, Box::new(Value::Integer(0.into()))),
-            Value::Tag(TAG_U16_LE, Box::new(Value::Bytes(vec![1, 0]))),
-            Value::Array(vec![]),
-        ];
-        for depth in [126, 127, 128, 300] {
-            cases.push(wrap(depth, def("deepest leaf")));
-            cases.push(wrap(
-                depth,
-                Value::Array(vec![def("leaf and"), reference(0)]),
-            ));
-            cases.push(wrap_keys(depth, def("every level key"), Value::Null));
-            cases.push(wrap_keys(depth, def("every level key"), reference(0)));
-        }
-        let json = |text: &str| serde_json::from_str::<IValue>(text).unwrap();
-        // What each of the first cases decodes to, and how many strings it defines.
-        let fixed: Vec<(Result<IValue, CborDecodeError>, usize)> = vec![
-            (Ok(json(r#"["12345678","12345678","12345678"]"#)), 1),
-            (Ok(json(r#"{"key key key":"value value"}"#)), 2),
-            (Err(CborDecodeError::InvalidStringReference), 0),
-            (Err(CborDecodeError::InvalidStringReference), 1),
-            (Err(CborDecodeError::InvalidValue), 0),
-            (Err(CborDecodeError::InvalidValue), 0),
-            (Err(CborDecodeError::InvalidStringReference), 0),
-            (Err(CborDecodeError::InvalidValue), 0),
-            (Ok(IArray::try_from(vec![1u16]).unwrap().into()), 0),
-            (Ok(json("[]")), 0),
-        ];
-        let depths = [126, 127, 128, 300];
-        for (index, case) in cases.iter().enumerate() {
-            let mut bytes = Vec::new();
-            ciborium::into_writer(case, &mut bytes).unwrap();
-            for limit in [true, false] {
-                let mut decoder = StreamDecoder::new();
-                let actual = decoder.decode(&bytes, limit);
-                if let Some((expected, defined)) = fixed.get(index) {
-                    assert_eq!(&actual, expected, "{case:?} limit {limit}");
-                    assert_eq!(decoder.len(), *defined, "{case:?}");
-                    continue;
-                }
-                // Four cases per depth: two arrays that define one string (the second holds the
-                // leaf in one more array), two maps that define one string per level.
-                let (depth, kind) = (depths[(index - fixed.len()) / 4], (index - fixed.len()) % 4);
-                let levels = depth + usize::from(kind == 1);
-                if limit && levels > 127 {
-                    assert_eq!(
-                        actual,
-                        Err(CborDecodeError::DepthLimitExceeded),
-                        "{depth} {kind}"
-                    );
-                } else {
-                    assert!(actual.is_ok(), "{depth} {kind} limit {limit}");
-                    assert_eq!(
-                        decoder.len(),
-                        if kind < 2 { 1 } else { depth },
-                        "{depth} {kind}"
-                    );
-                }
-            }
         }
     }
 

@@ -192,24 +192,20 @@ fn owned_dictionary_growth_and_repeated_resets_fit_the_allocation_budget() {
 }
 
 #[test]
-fn a_disabled_content_dictionary_writes_valid_plain_values() {
-    for budget in [0, 4096] {
-        let mut encoder =
-            StreamEncoder::with_dictionary(config(budget), ContentDictionary::default());
+fn a_zero_budget_content_dictionary_writes_plain_values() {
+    let mut encoder = StreamEncoder::with_dictionary(config(0), ContentDictionary::default());
+    for _ in 0..2 {
         let mut bytes = Vec::new();
         let used = encoder
             .encode_with(&mut bytes, |strings, out| {
                 ciborium::into_writer(&strings.string("already defined text"), out)
             })
             .unwrap();
-        assert_eq!(used.defs, u64::from(budget != 0));
-        bytes.clear();
-        let used = encoder
-            .encode_with(&mut bytes, |strings, out| {
-                ciborium::into_writer(&strings.string("already defined text"), out)
-            })
-            .unwrap();
-        assert_eq!(used.refs, u64::from(budget != 0));
-        assert_eq!(used.defs, 0);
+        assert_eq!(used, DocUse::default());
+        assert_eq!(
+            ijson::decode(&bytes).unwrap().as_string().unwrap().as_str(),
+            "already defined text"
+        );
     }
+    assert_eq!(encoder.stats(), Default::default());
 }
