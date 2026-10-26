@@ -382,7 +382,9 @@ impl From<IString> for String {
 
 impl PartialEq for IString {
     fn eq(&self, other: &Self) -> bool {
-        self.0.raw_eq(&other.0)
+        // After a cache reset the same text can live in two allocations, so compare the text when
+        // the pointers differ.
+        self.0.raw_eq(&other.0) || self.as_str() == other.as_str()
     }
 }
 

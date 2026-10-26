@@ -816,7 +816,11 @@ impl Hash for IValue {
         use ValueType::*;
         match self.type_() {
             // Inline and interned types can be trivially hashed
-            Null | Bool | String => self.ptr.hash(state),
+            Null | Bool => self.ptr.hash(state),
+            // Hash the text, as equality does: one string can have two allocations after a
+            // cache reset.
+            // Safety: We checked the type
+            String => unsafe { self.as_string_unchecked() }.hash(state),
             // Safety: We checked the type
             Array => unsafe { self.as_array_unchecked() }.hash(state),
             // Safety: We checked the type
