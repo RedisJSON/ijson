@@ -238,7 +238,7 @@ impl IValue {
     // Safety: Pointer must be non-null and aligned to at least ALIGNMENT
     pub(crate) unsafe fn new_ptr(p: *mut u8, tag: TypeTag) -> Self {
         Self {
-            ptr: NonNull::new_unchecked(p.add(tag as usize)),
+            ptr: NonNull::new_unchecked(p.wrapping_add(tag as usize)),
         }
     }
     // Safety: Reference must be aligned to at least ALIGNMENT
@@ -816,7 +816,11 @@ impl Hash for IValue {
         use ValueType::*;
         match self.type_() {
             // Inline and interned types can be trivially hashed
-            Null | Bool | String => self.ptr.hash(state),
+            Null | Bool => self.ptr.hash(state),
+            // Hash the text, as equality does: one string can have two allocations after a
+            // cache reset.
+            // Safety: We checked the type
+            String => unsafe { self.as_string_unchecked() }.hash(state),
             // Safety: We checked the type
             Array => unsafe { self.as_array_unchecked() }.hash(state),
             // Safety: We checked the type
@@ -1227,7 +1231,14 @@ mod tests {
             assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
             assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
             assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
-            assert_eq!(x.mem_allocated(), 0.0);
+            assert_eq!(
+                x.mem_allocated(),
+                if cfg!(feature = "thread_safe") {
+                    12.0
+                } else {
+                    0.0
+                }
+            );
         }
 
         let s = String::from("foofoofoo");
@@ -1239,7 +1250,14 @@ mod tests {
         assert!(matches!(x.clone().destructure(), Destructured::String(u) if u == s));
         assert!(matches!(x.clone().destructure_ref(), DestructuredRef::String(u) if *u == s));
         assert!(matches!(x.clone().destructure_mut(), DestructuredMut::String(u) if *u == s));
-        assert_eq!(x.mem_allocated(), 24.0);
+        assert_eq!(
+            x.mem_allocated(),
+            if cfg!(feature = "thread_safe") {
+                32.0
+            } else {
+                24.0
+            }
+        );
     }
 
     #[mockalloc::test]

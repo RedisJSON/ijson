@@ -5,13 +5,21 @@
 //!
 //! Use [`encode`] / [`decode`] for raw CBOR, or [`encode_compressed`] /
 //! [`decode_compressed`] for zstd-compressed CBOR.
+//!
+//! [`StreamEncoder`] and [`StreamDecoder`] share strings across the documents
+//! of one ordered stream: the first use of a string defines it inline and later
+//! uses refer to it by an implicit ID.
 
 use std::fmt;
 
 use bytemuck::Pod;
-use ciborium::value::{Integer, Value};
+#[cfg(test)]
+use ciborium::value::Integer;
+use ciborium::value::Value;
 use ciborium_ll::tag;
 use half::{bf16, f16};
+use serde::de::DeserializeSeed;
+use serde::Serialize;
 
 /// Converts a typed slice to/from little-endian bytes using each type's own
 /// `to_le_bytes` / `from_le_bytes`, which are correct on every host endianness.
@@ -54,6 +62,13 @@ impl_le_bytes!(
 use crate::array::ArraySliceRef;
 use crate::{DestructuredRef, IArray, INumber, IObject, IString, IValue};
 
+mod stream;
+pub use stream::{
+    AddressDictionary, ContentDictionary, DocUse, StreamDecoder, StreamDecoderStats, StreamEncoder,
+    StreamEncoderConfig, StreamEncoderStats, StreamString, StreamStrings, StringDictionary,
+};
+use stream::{DecoderCell, EncoderCell};
+
 use tag::{
     TYPED_F16_LE as TAG_F16_LE, TYPED_F32_LE as TAG_F32_LE, TYPED_F64_LE as TAG_F64_LE,
     TYPED_I16_LE as TAG_I16_LE, TYPED_I32_LE as TAG_I32_LE, TYPED_I64_LE as TAG_I64_LE,
@@ -63,6 +78,12 @@ use tag::{
 
 /// Private CBOR tag for BF16 arrays (no RFC 8746 standard tag exists for BF16).
 const TAG_BF16_LE: u64 = 0x10000;
+
+/// CBOR tag that defines a stream string: it wraps the text, which takes the next ID.
+pub(crate) const TAG_DEF: u64 = 6;
+
+/// CBOR tag that references an earlier stream definition by its ID.
+pub(crate) const TAG_REF: u64 = 7;
 
 const MAX_DEPTH: u32 = 128;
 
@@ -83,6 +104,8 @@ pub enum CborDecodeError {
     CastError,
     /// Zstd decompression failed.
     DecompressError,
+    /// A stream string reference had an invalid payload or an out-of-range ID.
+    InvalidStringReference,
 }
 
 impl fmt::Display for CborDecodeError {
@@ -95,6 +118,7 @@ impl fmt::Display for CborDecodeError {
             CborDecodeError::DepthLimitExceeded => write!(f, "nesting depth limit exceeded"),
             CborDecodeError::CastError => write!(f, "failed to cast byte slice"),
             CborDecodeError::DecompressError => write!(f, "zstd decompression failed"),
+            CborDecodeError::InvalidStringReference => write!(f, "invalid string reference"),
         }
     }
 }
@@ -106,10 +130,18 @@ impl std::error::Error for CborDecodeError {}
 /// Encodes an [`IValue`] tree into CBOR bytes, preserving typed array tags via
 /// RFC 8746.
 pub fn encode(value: &IValue) -> Vec<u8> {
-    let cbor = ivalue_to_cbor(value);
     let mut out = Vec::new();
-    ciborium::into_writer(&cbor, &mut out).expect("write to Vec never fails");
+    encode_into(value, &mut out);
     out
+}
+
+/// Appends CBOR bytes to an existing buffer, preserving its prefix and typed array tags.
+pub fn encode_into(value: &IValue, out: &mut Vec<u8>) {
+    let cbor = EncodedValue {
+        value,
+        strings: Inline,
+    };
+    ciborium::into_writer(&cbor, out).expect("write to Vec never fails");
 }
 
 /// Encodes an [`IValue`] tree as CBOR and then compresses it with zstd (level 3).
@@ -122,17 +154,24 @@ pub fn encode_compressed(value: &IValue) -> Vec<u8> {
         .expect("zstd compress")
 }
 
+#[cfg(test)]
 fn ivalue_to_cbor(value: &IValue) -> Value {
     match value.destructure_ref() {
         DestructuredRef::Null => Value::Null,
         DestructuredRef::Bool(b) => Value::Bool(b),
         DestructuredRef::Number(n) => number_to_cbor(n),
-        DestructuredRef::String(s) => Value::Text(s.as_str().to_owned()),
+        DestructuredRef::String(s) => string_to_cbor(s),
         DestructuredRef::Array(a) => array_to_cbor(a),
         DestructuredRef::Object(o) => object_to_cbor(o),
     }
 }
 
+#[cfg(test)]
+fn string_to_cbor(value: &IString) -> Value {
+    Value::Text(value.as_str().to_owned())
+}
+
+#[cfg(test)]
 fn number_to_cbor(n: &INumber) -> Value {
     if n.has_decimal_point() {
         Value::Float(n.to_f64().unwrap())
@@ -143,6 +182,7 @@ fn number_to_cbor(n: &INumber) -> Value {
     }
 }
 
+#[cfg(test)]
 fn array_to_cbor(a: &IArray) -> Value {
     match a.as_slice() {
         ArraySliceRef::Heterogeneous(s) => Value::Array(s.iter().map(ivalue_to_cbor).collect()),
@@ -161,16 +201,555 @@ fn array_to_cbor(a: &IArray) -> Value {
     }
 }
 
+#[cfg(test)]
 fn object_to_cbor(o: &IObject) -> Value {
     Value::Map(
         o.iter()
-            .map(|(k, v)| (Value::Text(k.as_str().to_owned()), ivalue_to_cbor(v)))
+            .map(|(k, v)| (string_to_cbor(k), ivalue_to_cbor(v)))
             .collect(),
     )
 }
 
+#[cfg(test)]
 fn typed_le_tag<T: LeBytes>(tag: u64, s: &[T]) -> Value {
     Value::Tag(tag, Box::new(Value::Bytes(T::slice_to_le_bytes(s))))
+}
+
+/// How the strings of a document are written. It is a type parameter, not a value checked
+/// per string, so that a document encoded without a stream runs code with no trace of the
+/// stream: a per-string branch alone made the plain encoder about 40% slower on an array of
+/// eight million small values.
+trait WriteStrings: Copy {
+    fn write_string<S: serde::Serializer>(
+        self,
+        string: &IString,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error>;
+}
+
+/// Every string is text.
+#[derive(Clone, Copy)]
+struct Inline;
+
+impl WriteStrings for Inline {
+    #[inline(always)]
+    fn write_string<S: serde::Serializer>(
+        self,
+        string: &IString,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(string.as_str())
+    }
+}
+
+/// A string is text, a definition or a reference, as the stream encoder decides.
+impl<D: StringDictionary> WriteStrings for &EncoderCell<'_, D> {
+    fn write_string<S: serde::Serializer>(
+        self,
+        string: &IString,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        stream::serialize_string(self, string, serializer)
+    }
+}
+
+struct EncodedValue<'a, W> {
+    value: &'a IValue,
+    strings: W,
+}
+
+struct EncodedString<'a, W>(&'a IString, W);
+
+impl<W: WriteStrings> serde::Serialize for EncodedString<'_, W> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.1.write_string(self.0, serializer)
+    }
+}
+
+struct EncodedBytes<'a>(&'a [u8]);
+
+impl serde::Serialize for EncodedBytes<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(self.0)
+    }
+}
+
+fn serialize_typed<T: LeBytes, S: serde::Serializer>(
+    tag: u64,
+    values: &[T],
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let converted;
+    let bytes = if cfg!(target_endian = "little") {
+        bytemuck::cast_slice(values)
+    } else {
+        converted = T::slice_to_le_bytes(values);
+        &converted
+    };
+    ciborium::tag::RequireAny(tag, EncodedBytes(bytes)).serialize(serializer)
+}
+
+impl<W: WriteStrings> serde::Serialize for EncodedValue<'_, W> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::{SerializeMap, SerializeSeq};
+        match self.value.destructure_ref() {
+            DestructuredRef::Null => serializer.serialize_unit(),
+            DestructuredRef::Bool(value) => serializer.serialize_bool(value),
+            DestructuredRef::Number(value) => {
+                if value.has_decimal_point() {
+                    serializer.serialize_f64(value.to_f64().unwrap())
+                } else if let Some(value) = value.to_i64() {
+                    serializer.serialize_i64(value)
+                } else {
+                    serializer.serialize_u64(value.to_u64().unwrap())
+                }
+            }
+            DestructuredRef::String(value) => {
+                EncodedString(value, self.strings).serialize(serializer)
+            }
+            DestructuredRef::Object(value) => {
+                let mut map = serializer.serialize_map(Some(value.len() as usize))?;
+                for (key, value) in value.iter() {
+                    map.serialize_entry(
+                        &EncodedString(key, self.strings),
+                        &EncodedValue {
+                            value,
+                            strings: self.strings,
+                        },
+                    )?;
+                }
+                map.end()
+            }
+            DestructuredRef::Array(value) => match value.as_slice() {
+                ArraySliceRef::Heterogeneous(values) => {
+                    let mut seq = serializer.serialize_seq(Some(values.len()))?;
+                    for value in values {
+                        seq.serialize_element(&EncodedValue {
+                            value,
+                            strings: self.strings,
+                        })?;
+                    }
+                    seq.end()
+                }
+                ArraySliceRef::I8(values) => serialize_typed(TAG_I8, values, serializer),
+                ArraySliceRef::U8(values) => serialize_typed(TAG_U8, values, serializer),
+                ArraySliceRef::I16(values) => serialize_typed(TAG_I16_LE, values, serializer),
+                ArraySliceRef::U16(values) => serialize_typed(TAG_U16_LE, values, serializer),
+                ArraySliceRef::F16(values) => serialize_typed(TAG_F16_LE, values, serializer),
+                ArraySliceRef::BF16(values) => serialize_typed(TAG_BF16_LE, values, serializer),
+                ArraySliceRef::I32(values) => serialize_typed(TAG_I32_LE, values, serializer),
+                ArraySliceRef::U32(values) => serialize_typed(TAG_U32_LE, values, serializer),
+                ArraySliceRef::F32(values) => serialize_typed(TAG_F32_LE, values, serializer),
+                ArraySliceRef::I64(values) => serialize_typed(TAG_I64_LE, values, serializer),
+                ArraySliceRef::U64(values) => serialize_typed(TAG_U64_LE, values, serializer),
+                ArraySliceRef::F64(values) => serialize_typed(TAG_F64_LE, values, serializer),
+            },
+        }
+    }
+}
+
+/// How the tagged string references of a document resolve.
+#[derive(Clone, Copy)]
+enum StringRefs<'a> {
+    /// No tag is a string reference.
+    None,
+    /// Definitions and references of a stream use tags 6 and 7.
+    Stream(&'a DecoderCell<'a>),
+}
+
+struct DecodeContext<'a> {
+    refs: StringRefs<'a>,
+    limit_depth: bool,
+    error: std::cell::Cell<Option<CborDecodeError>>,
+}
+
+impl DecodeContext<'_> {
+    fn fail<E: serde::de::Error>(&self, error: CborDecodeError) -> E {
+        self.error.set(Some(error.clone()));
+        E::custom(error)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ValueSeed<'a, 'd> {
+    context: &'a DecodeContext<'d>,
+    depth: u32,
+}
+
+impl ValueSeed<'_, '_> {
+    fn convert<E: serde::de::Error>(self, value: Value) -> Result<IValue, E> {
+        leaf_to_ivalue(value).map_err(|error| self.context.fail(error))
+    }
+
+    fn child(self) -> Self {
+        Self {
+            depth: self.depth + 1,
+            ..self
+        }
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for ValueSeed<'_, '_> {
+    type Value = IValue;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<IValue, D::Error> {
+        if self.context.limit_depth && self.depth >= MAX_DEPTH {
+            return Err(self.context.fail(CborDecodeError::DepthLimitExceeded));
+        }
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for ValueSeed<'_, '_> {
+    type Value = IValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value with CBOR typed arrays or stream string references")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<IValue, E> {
+        Ok(IValue::NULL)
+    }
+    fn visit_none<E: serde::de::Error>(self) -> Result<IValue, E> {
+        Ok(IValue::NULL)
+    }
+    fn visit_bool<E: serde::de::Error>(self, value: bool) -> Result<IValue, E> {
+        Ok(value.into())
+    }
+    fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<IValue, E> {
+        self.convert(value.into())
+    }
+    fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<IValue, E> {
+        self.convert(value.into())
+    }
+    fn visit_i128<E: serde::de::Error>(self, value: i128) -> Result<IValue, E> {
+        self.convert(value.into())
+    }
+    fn visit_u128<E: serde::de::Error>(self, value: u128) -> Result<IValue, E> {
+        self.convert(value.into())
+    }
+    fn visit_f64<E: serde::de::Error>(self, value: f64) -> Result<IValue, E> {
+        self.convert(value.into())
+    }
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<IValue, E> {
+        Ok(IString::from(value).into())
+    }
+    fn visit_bytes<E: serde::de::Error>(self, _: &[u8]) -> Result<IValue, E> {
+        Err(self.context.fail(CborDecodeError::InvalidValue))
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<IValue, A::Error> {
+        let mut array = IArray::with_capacity(access.size_hint().unwrap_or(0).min(1024))
+            .map_err(|_| self.context.fail(CborDecodeError::AllocError))?;
+        while let Some(value) = access.next_element_seed(self.child())? {
+            array
+                .push(value)
+                .map_err(|_| self.context.fail(CborDecodeError::AllocError))?;
+        }
+        Ok(array.into())
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut access: A) -> Result<IValue, A::Error> {
+        let mut object = IObject::with_capacity(access.size_hint().unwrap_or(0).min(1024))
+            .map_err(|_| self.context.fail(CborDecodeError::AllocError))?;
+        while let Some(key) = access.next_key_seed(KeySeed {
+            context: self.context,
+        })? {
+            let value = access.next_value_seed(self.child())?;
+            object
+                .insert(key, value)
+                .map_err(|_| self.context.fail(CborDecodeError::AllocError))?;
+        }
+        Ok(object.into())
+    }
+
+    fn visit_enum<A: serde::de::EnumAccess<'de>>(self, access: A) -> Result<IValue, A::Error> {
+        use serde::de::VariantAccess;
+        // Keep ciborium's tag and bignum normalization; valid tags hold one byte string or ID.
+        // Stream definitions hold one text string.
+        // The variant name is always "@@TAGGED@@"; skip it without allocating a String.
+        let (_, data): (serde::de::IgnoredAny, _) = access.variant()?;
+        // The payload is a 2-tuple: element 1 is the tag number, element 2 its content.
+        data.tuple_variant(2, TaggedValue { seed: self })
+    }
+}
+
+/// Reads a stream string tag (6 or 7) directly from the CBOR reader, without a `Value`.
+/// Returns `None`, with nothing consumed after the tag, when `tag` is not a stream string tag.
+fn stream_string<'c, 'de, A: serde::de::SeqAccess<'de>>(
+    context: &DecodeContext<'c>,
+    tag: u64,
+    access: &mut A,
+) -> Result<Option<IString>, A::Error> {
+    // Without a stream decoder no tag is a string tag.
+    let StringRefs::Stream(cell) = context.refs else {
+        return Ok(None);
+    };
+    let missing = || <A::Error as serde::de::Error>::custom("expected val");
+    let result = match tag {
+        // Definition: the text is interned and takes the next ID.
+        TAG_DEF => access
+            .next_element_seed(DefText { cell })?
+            .ok_or_else(missing)?,
+        // Reference: an ID below the number of definitions, resolved to the shared handle.
+        TAG_REF => {
+            let id = access.next_element_seed(RefId)?.ok_or_else(missing)?;
+            id.and_then(|id| cell.borrow_mut().reference_id(id))
+        }
+        _ => return Ok(None),
+    };
+    // A refused definition or reference fails the whole decode with its own error kind.
+    result.map(Some).map_err(|error| context.fail(error))
+}
+
+struct TaggedValue<'a, 'd> {
+    seed: ValueSeed<'a, 'd>,
+}
+
+impl<'de> serde::de::Visitor<'de> for TaggedValue<'_, '_> {
+    type Value = IValue;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a valid CBOR item")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<IValue, A::Error> {
+        // Element 1 of the tag pair: the tag number.
+        let tag: u64 = access
+            .next_element()?
+            .ok_or_else(|| <A::Error as serde::de::Error>::custom("expected tag"))?;
+        // Tags 6 and 7 are read here, with no intermediate `Value`.
+        if let Some(string) = stream_string(self.seed.context, tag, &mut access)? {
+            return Ok(string.into());
+        }
+        // Typed arrays keep ciborium's value path.
+        let inner: Value = access
+            .next_element()?
+            .ok_or_else(|| <A::Error as serde::de::Error>::custom("expected val"))?;
+        self.seed.convert(Value::Tag(tag, Box::new(inner)))
+    }
+}
+
+/// Implements the scalar `Visitor` methods a seed refuses, each as `self.reject()`.
+macro_rules! reject_scalars {
+    ($($name:ident: $ty:ty),* $(,)?) => {$(
+        fn $name<E: serde::de::Error>(self, _: $ty) -> Result<Self::Value, E> {
+            self.reject()
+        }
+    )*};
+}
+
+/// Implements the argument-less `Visitor` methods a seed refuses.
+macro_rules! reject_empty {
+    ($($name:ident),* $(,)?) => {$(
+        fn $name<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+            self.reject()
+        }
+    )*};
+}
+
+/// Implements the `seq`, `map` and `enum` `Visitor` methods a seed refuses.
+macro_rules! reject_compound {
+    () => {};
+    (seq $($rest:tt)*) => {
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, _: A) -> Result<Self::Value, A::Error> {
+            self.reject()
+        }
+        reject_compound!($($rest)*);
+    };
+    (map $($rest:tt)*) => {
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, _: A) -> Result<Self::Value, A::Error> {
+            self.reject()
+        }
+        reject_compound!($($rest)*);
+    };
+    (enum $($rest:tt)*) => {
+        fn visit_enum<A: serde::de::EnumAccess<'de>>(self, _: A) -> Result<Self::Value, A::Error> {
+            self.reject()
+        }
+        reject_compound!($($rest)*);
+    };
+}
+
+/// The text of a definition, borrowed from the reader and interned once.
+/// Non-text content yields `Err(InvalidValue)` inside `Ok`, so the caller gets a
+/// `CborDecodeError` and not a serde error.
+struct DefText<'c> {
+    cell: &'c DecoderCell<'c>,
+}
+
+impl DefText<'_> {
+    fn reject<E>(self) -> Result<Result<IString, CborDecodeError>, E> {
+        Ok(Err(CborDecodeError::InvalidValue))
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for DefText<'_> {
+    type Value = Result<IString, CborDecodeError>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for DefText<'_> {
+    type Value = Result<IString, CborDecodeError>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a stream definition text")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Self::Value, E> {
+        Ok(self.cell.borrow_mut().define_str(text))
+    }
+
+    reject_scalars!(
+        visit_u64: u64,
+        visit_i64: i64,
+        visit_i128: i128,
+        visit_u128: u128,
+        visit_f64: f64,
+        visit_bool: bool,
+        visit_bytes: &[u8],
+    );
+    reject_empty!(visit_unit, visit_none);
+    reject_compound!(seq map enum);
+}
+
+/// The ID of a reference. Anything but an unsigned integer is `InvalidStringReference`.
+struct RefId;
+
+impl RefId {
+    fn reject<E>(self) -> Result<Result<usize, CborDecodeError>, E> {
+        Ok(Err(CborDecodeError::InvalidStringReference))
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for RefId {
+    type Value = Result<usize, CborDecodeError>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for RefId {
+    type Value = Result<usize, CborDecodeError>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a stream reference id")
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, id: u64) -> Result<Self::Value, E> {
+        Ok(usize::try_from(id).map_err(|_| CborDecodeError::InvalidStringReference))
+    }
+
+    fn visit_i128<E: serde::de::Error>(self, id: i128) -> Result<Self::Value, E> {
+        Ok(usize::try_from(id).map_err(|_| CborDecodeError::InvalidStringReference))
+    }
+    fn visit_u128<E: serde::de::Error>(self, id: u128) -> Result<Self::Value, E> {
+        Ok(usize::try_from(id).map_err(|_| CborDecodeError::InvalidStringReference))
+    }
+
+    reject_scalars!(
+        visit_i64: i64,
+        visit_f64: f64,
+        visit_bool: bool,
+        visit_str: &str,
+        visit_bytes: &[u8],
+    );
+    reject_empty!(visit_unit, visit_none);
+    reject_compound!(seq map enum);
+}
+
+/// An object key: text, or a stream string tag. Inline text is interned directly from the reader.
+struct KeySeed<'a, 'd> {
+    context: &'a DecodeContext<'d>,
+}
+
+impl KeySeed<'_, '_> {
+    fn reject<E: serde::de::Error>(self) -> Result<IString, E> {
+        Err(self.context.fail(CborDecodeError::InvalidValue))
+    }
+}
+
+impl<'de> serde::de::DeserializeSeed<'de> for KeySeed<'_, '_> {
+    type Value = IString;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<IString, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for KeySeed<'_, '_> {
+    type Value = IString;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an object key")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, key: &str) -> Result<IString, E> {
+        Ok(IString::from(key))
+    }
+
+    fn visit_enum<A: serde::de::EnumAccess<'de>>(self, access: A) -> Result<IString, A::Error> {
+        use serde::de::VariantAccess;
+        // A tagged key arrives as the same ("@@TAGGED@@", (tag, content)) enum as a value:
+        // skip the name, then read the 2-tuple with `TaggedKey`. A plain array reaches
+        // `visit_seq` of this visitor instead, which refuses it.
+        let (_, data): (serde::de::IgnoredAny, _) = access.variant()?;
+        data.tuple_variant(
+            2,
+            TaggedKey {
+                context: self.context,
+            },
+        )
+    }
+
+    reject_scalars!(
+        visit_u64: u64,
+        visit_i64: i64,
+        visit_i128: i128,
+        visit_u128: u128,
+        visit_f64: f64,
+        visit_bool: bool,
+        visit_bytes: &[u8],
+    );
+    reject_empty!(visit_unit, visit_none);
+    reject_compound!(seq map);
+}
+
+/// The `(tag, content)` pair of a tagged object key.
+struct TaggedKey<'a, 'd> {
+    context: &'a DecodeContext<'d>,
+}
+
+impl<'de> serde::de::Visitor<'de> for TaggedKey<'_, '_> {
+    type Value = IString;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a tagged object key")
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut access: A) -> Result<IString, A::Error> {
+        let tag: u64 = access
+            .next_element()?
+            .ok_or_else(|| <A::Error as serde::de::Error>::custom("expected tag"))?;
+        // Only stream string tags can be keys; any other tag is invalid.
+        match stream_string(self.context, tag, &mut access)? {
+            Some(string) => Ok(string),
+            None => Err(self.context.fail(CborDecodeError::InvalidValue)),
+        }
+    }
 }
 
 // ── Decode ────────────────────────────────────────────────────────────────────
@@ -182,17 +761,40 @@ pub fn decode(bytes: &[u8]) -> Result<IValue, CborDecodeError> {
 
 /// Decodes an [`IValue`] tree, optionally enforcing the standard nesting limit.
 pub fn decode_with_depth_limit(bytes: &[u8], limit_depth: bool) -> Result<IValue, CborDecodeError> {
+    decode_one_value(&mut &*bytes, limit_depth, StringRefs::None)
+}
+
+/// Decodes the first value of `bytes` and leaves the bytes after it in `bytes`.
+fn decode_one_value(
+    bytes: &mut &[u8],
+    limit_depth: bool,
+    refs: StringRefs<'_>,
+) -> Result<IValue, CborDecodeError> {
     let recursion_limit = if limit_depth {
         MAX_DEPTH as usize
     } else {
         usize::MAX
     };
-    let cbor: Value = ciborium::de::from_reader_with_recursion_limit(bytes, recursion_limit)
-        .map_err(|err| match err {
-            ciborium::de::Error::RecursionLimitExceeded => CborDecodeError::DepthLimitExceeded,
-            _ => CborDecodeError::DecodeError,
-        })?;
-    cbor_to_ivalue(cbor, 0, limit_depth)
+    let mut scratch = [0u8; 4096];
+    let mut deserializer = ciborium::de::deserializer_from_reader_with_buffer_and_recursion_limit(
+        bytes,
+        &mut scratch,
+        recursion_limit,
+    );
+    let context = DecodeContext {
+        refs,
+        limit_depth,
+        error: std::cell::Cell::new(None),
+    };
+    ValueSeed {
+        context: &context,
+        depth: 0,
+    }
+    .deserialize(&mut deserializer)
+    .map_err(|error| match error {
+        ciborium::de::Error::RecursionLimitExceeded => CborDecodeError::DepthLimitExceeded,
+        _ => context.error.take().unwrap_or(CborDecodeError::DecodeError),
+    })
 }
 
 /// Decodes an [`IValue`] tree from bytes produced by [`encode_compressed`].
@@ -201,13 +803,10 @@ pub fn decode_compressed(bytes: &[u8]) -> Result<IValue, CborDecodeError> {
     decode(&raw)
 }
 
-fn cbor_to_ivalue(val: Value, depth: u32, limit_depth: bool) -> Result<IValue, CborDecodeError> {
-    if limit_depth && depth >= MAX_DEPTH {
-        return Err(CborDecodeError::DepthLimitExceeded);
-    }
+/// Converts what the visitor leaves to ciborium: numbers (ciborium has already turned bignums into
+/// integers) and tags. The nesting limit was checked before the visitor ran.
+fn leaf_to_ivalue(val: Value) -> Result<IValue, CborDecodeError> {
     match val {
-        Value::Null => Ok(IValue::NULL),
-        Value::Bool(b) => Ok(b.into()),
         Value::Float(f) => Ok(INumber::try_from(f).map(Into::into).unwrap_or(IValue::NULL)),
         Value::Integer(i) => {
             if let Ok(v) = i64::try_from(i.clone()) {
@@ -218,32 +817,7 @@ fn cbor_to_ivalue(val: Value, depth: u32, limit_depth: bool) -> Result<IValue, C
                 Err(CborDecodeError::InvalidValue)
             }
         }
-        Value::Text(s) => Ok(IString::from(s.as_str()).into()),
-        Value::Array(arr) => {
-            let hint = arr.len().min(1024);
-            let mut out = IArray::with_capacity(hint).map_err(|_| CborDecodeError::AllocError)?;
-            for v in arr {
-                let iv = cbor_to_ivalue(v, depth + 1, limit_depth)?;
-                out.push(iv).map_err(|_| CborDecodeError::AllocError)?;
-            }
-            Ok(out.into())
-        }
-        Value::Map(entries) => {
-            let mut obj =
-                IObject::with_capacity(entries.len()).map_err(|_| CborDecodeError::AllocError)?;
-            for (k, v) in entries {
-                let key = match k {
-                    Value::Text(s) => s,
-                    _ => return Err(CborDecodeError::InvalidValue),
-                };
-                let val = cbor_to_ivalue(v, depth + 1, limit_depth)?;
-                obj.insert(&key, val)
-                    .map_err(|_| CborDecodeError::AllocError)?;
-            }
-            Ok(obj.into())
-        }
         Value::Tag(tag, inner) => decode_typed_array(tag, *inner),
-        Value::Bytes(_) => Err(CborDecodeError::InvalidValue),
         _ => Err(CborDecodeError::InvalidValue),
     }
 }
@@ -288,6 +862,94 @@ mod tests {
     use crate::array::ArraySliceRef;
     use crate::IValueDeserSeed;
     use serde::de::DeserializeSeed;
+
+    #[test]
+    fn plain_encoding_appends_without_changing_prefix() {
+        let value = crate::IValue::from("hello");
+        let mut out = vec![0, 42];
+        super::encode_into(&value, &mut out);
+        assert_eq!(out, [0, 42, 0x65, b'h', b'e', b'l', b'l', b'o']);
+    }
+
+    #[test]
+    fn compatibility_encoder_matches_tree_bytes() {
+        let mut cases: Vec<IValue> = vec![
+            IValue::NULL,
+            true.into(),
+            false.into(),
+            i64::MIN.into(),
+            u64::MAX.into(),
+            (-0.0f64).into(),
+            1.5f64.into(),
+            f64::MIN_POSITIVE.into(),
+            f64::MAX.into(),
+            IString::from("shared value").into(),
+            serde_json::from_str(r#"{"shared field":["shared value",null,42,{},[],"literal"]}"#)
+                .unwrap(),
+        ];
+        macro_rules! typed {
+            ($($values:expr),+ $(,)?) => { $(cases.push(IArray::try_from($values).unwrap().into());)+ };
+        }
+        typed!(
+            vec![i8::MIN, i8::MAX],
+            vec![0u8, u8::MAX],
+            vec![i16::MIN, i16::MAX],
+            vec![0u16, u16::MAX],
+            vec![i32::MIN, i32::MAX],
+            vec![0u32, u32::MAX],
+            vec![i64::MIN, i64::MAX],
+            vec![0u64, u64::MAX],
+            vec![f16::from_f32(1.5), f16::NEG_INFINITY],
+            vec![bf16::from_f32(1.5), bf16::NAN],
+            vec![1.5f32, f32::INFINITY],
+            vec![1.5f64, f64::NAN]
+        );
+        for value in cases {
+            let mut expected = Vec::new();
+            ciborium::into_writer(&ivalue_to_cbor(&value), &mut expected).unwrap();
+            let actual = encode(&value);
+            assert_eq!(actual, expected);
+            let decoded = decode(&actual).unwrap();
+            assert_eq!(encode(&decoded), expected);
+        }
+    }
+
+    #[test]
+    fn compatibility_decoder_matches_legacy_inputs() {
+        let json = |text: &str| serde_json::from_str::<IValue>(text).unwrap();
+        let cases: Vec<(Vec<u8>, IValue)> = vec![
+            (vec![0x9f, 0xf6, 0xf5, 0xff], json("[null,true]")),
+            (vec![0x7f, 0x61, b'a', 0x61, b'b', 0xff], json("\"ab\"")),
+            (
+                vec![0xbf, 0x61, b'a', 1, 0x61, b'a', 2, 0xff],
+                json("{\"a\":2}"),
+            ),
+            (
+                vec![0xd8, TAG_U16_LE as u8, 0x5f, 0x41, 1, 0x41, 0, 0xff],
+                IArray::try_from(vec![1u16]).unwrap().into(),
+            ),
+            (vec![0xc2, 0x41, 0], json("0")),
+            (vec![0xc3, 0x41, 0], json("-1")),
+            (vec![0xfb, 0x7f, 0xf0, 0, 0, 0, 0, 0, 0], IValue::NULL),
+            (vec![0xf6, 0xf5], IValue::NULL),
+        ];
+        for (bytes, expected) in cases {
+            for limit in [true, false] {
+                assert_eq!(
+                    decode_with_depth_limit(&bytes, limit),
+                    Ok(expected.clone()),
+                    "{bytes:?}"
+                );
+            }
+        }
+        // A tag that no decoder defines is no string tag.
+        for limit in [true, false] {
+            assert_eq!(
+                decode_with_depth_limit(&[0xda, 0, 1, 0, 1, 0xc2, 0x41, 0], limit),
+                Err(CborDecodeError::InvalidValue)
+            );
+        }
+    }
 
     fn round_trip(value: &IValue) -> IValue {
         let bytes = encode(value);

@@ -26,3 +26,9 @@ runs:
         command: test
         args: -- --test-threads=1
 
+    - name: Test (thread_safe)
+      uses: actions-rs/cargo@v1
+      with:
+        command: test
+        args: --features thread_safe -- --test-threads=1
+
