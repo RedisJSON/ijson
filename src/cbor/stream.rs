@@ -76,6 +76,20 @@ pub struct StreamEncoderStats {
     pub def_bytes: u64,
     /// References written.
     pub refs: u64,
+    /// Bytes the references saved compared with writing their text. Each definition adds one
+    /// byte, its tag, so the stream is `saved_bytes - defs` bytes smaller than plain CBOR.
+    pub saved_bytes: u64,
+}
+
+/// Bytes of a CBOR head that carries `value`.
+fn cbor_head_len(value: u64) -> u64 {
+    match value {
+        0..=23 => 1,
+        24..=0xff => 2,
+        0x100..=0xffff => 3,
+        0x1_0000..=0xffff_ffff => 5,
+        _ => 9,
+    }
 }
 
 /// Counters of a [`StreamDecoder`].
@@ -299,6 +313,9 @@ impl<D: StringDictionary> StreamEncoder<D> {
                 return Choice::Text;
             }
             self.stats.refs += 1;
+            // Text of 8 or more bytes takes at least 9; a reference takes its tag and at most 5.
+            self.stats.saved_bytes +=
+                cbor_head_len(len as u64) + len as u64 - 1 - cbor_head_len(u64::from(id));
             return Choice::Reference(id);
         }
         // Cumulative definition positions must remain representable in a u32 stream header.
@@ -571,6 +588,27 @@ mod tests {
         assert!(!encoder.reset_if_needed());
         assert_eq!(encoder.encode_into(&mut Vec::new(), &first).refs, 2);
         assert_eq!(encoder.stats().defs, u64::from(u32::MAX));
+    }
+
+    #[test]
+    fn saved_bytes_are_the_exact_difference_from_the_plain_encoding() {
+        // Lengths and ids on both sides of each CBOR head size.
+        let texts: Vec<String> = [8, 23, 24, 255, 256, 65_535, 65_536]
+            .iter()
+            .map(|&len| "s".repeat(len))
+            .chain((0..30).map(|i| format!("one of many ids {i:02}")))
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let value = shared_array(&refs);
+        let mut encoder = StreamEncoder::new(config());
+        let mut shared = Vec::new();
+        encoder.encode_into(&mut shared, &value);
+        let stats = encoder.stats();
+        assert_eq!(stats.refs, texts.len() as u64);
+        assert_eq!(
+            crate::encode(&value).len() as u64,
+            shared.len() as u64 + stats.saved_bytes - stats.defs
+        );
     }
 
     #[test]

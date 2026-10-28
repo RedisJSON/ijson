@@ -202,9 +202,9 @@ A fresh `StreamEncoder` and a fresh `StreamDecoder` per document make that docum
 alone: ids start at 0, nothing else is needed to read it, and strings that repeat inside the
 document are defined once. A string only counts as repeated here if it has two or more owners,
 so a document that holds a shared string once also gets a definition that nothing references.
-Compare `DocUse` with the plain size and write the plain bytes when the definitions do not pay:
-a reference saves at least 3 bytes and a definition costs 1, so keep the stream form only when
-`3 * refs > defs`.
+Write the plain bytes when the definitions do not pay: each definition costs 1 byte and
+`stats().saved_bytes` is what the references saved, so keep the stream form only when
+`saved_bytes > defs`.
 
 ```rust
 use ijson::{IValue, StreamDecoder, StreamEncoder, StreamEncoderConfig};
@@ -213,9 +213,11 @@ let value: IValue = serde_json::from_str(
     r#"[{"a repeated object key": 1}, {"a repeated object key": 2}]"#,
 ).unwrap();
 let mut bytes = Vec::new();
-let used = StreamEncoder::new(StreamEncoderConfig { table_budget_bytes: 1 << 20 })
-    .encode_into(&mut bytes, &value);
-assert!(used.refs * 3 > used.defs);
+let mut encoder = StreamEncoder::new(StreamEncoderConfig { table_budget_bytes: 1 << 20 });
+encoder.encode_into(&mut bytes, &value);
+let stats = encoder.stats();
+assert!(stats.saved_bytes > stats.defs);
+assert_eq!(bytes.len() as u64, ijson::encode(&value).len() as u64 - stats.saved_bytes + stats.defs);
 assert_eq!(StreamDecoder::new().decode(&bytes, true).unwrap(), value);
 ```
 
