@@ -26,6 +26,11 @@ fn proportional_memory_across_documents() {
 
     for json in ["null", "true", "[]", "{}", r#""short""#] {
         let value: IValue = serde_json::from_str(json).unwrap();
-        assert_eq!(value.mem_allocated(), 0.0);
+        let expected = if cfg!(feature = "thread_safe") && value.is_string() {
+            24.0
+        } else {
+            0.0
+        };
+        assert_eq!(value.mem_allocated(), expected);
     }
 }

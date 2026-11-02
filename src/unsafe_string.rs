@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use std::fmt::{self, Debug, Formatter};
 use std::hash::Hash;
 use std::mem::{self, transmute};
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::ptr::{addr_of_mut, copy_nonoverlapping, NonNull};
 use std::sync::{atomic::AtomicU32, Mutex, MutexGuard, OnceLock};
@@ -433,6 +434,30 @@ impl IString {
                 / self.header().rc.load(std::sync::atomic::Ordering::Relaxed) as f64
         }
     }
+
+    /// Identity of this string's heap allocation: the untagged header address,
+    /// the length in bytes and the number of live owners.
+    ///
+    /// `None` for the empty string and for strings of 7 bytes or fewer, which are
+    /// stored inside the handle and have no allocation. All clones of a string
+    /// report the same address. Use this instead of `as_ptr()`, which for an
+    /// inline string points into the handle. Reads the header without writing
+    /// it or touching the cache. The owner count is a relaxed snapshot.
+    pub(crate) fn heap_identity(&self) -> Option<(NonZeroUsize, usize, usize)> {
+        if self.is_inline() {
+            return None;
+        }
+        let header = self.header();
+        let len = header.len();
+        if len == 0 {
+            return None;
+        }
+        // SAFETY: the handle is neither inline nor empty, so it is tagged
+        // `StringOrNull` and `ptr()` strips the tag to reach the header.
+        let address = unsafe { self.0.ptr() } as usize;
+        let owners = header.rc.load(std::sync::atomic::Ordering::Relaxed) as usize;
+        NonZeroUsize::new(address).map(|address| (address, len, owners))
+    }
 }
 
 impl Deref for IString {
@@ -572,6 +597,97 @@ impl<A: DefragAllocator> Defrag<A> for IString {
 mod tests {
     use super::*;
     use mockalloc::record_allocs;
+
+    // The unit tests share one cache, which an earlier test may have initialized
+    // without a lock, so this test runs again in a process of its own.
+    #[test]
+    fn stream_encoding_never_waits_for_the_cache_lock() {
+        use crate::{IArray, IValue, StreamEncoder, StreamEncoderConfig};
+        use std::sync::mpsc::channel;
+        use std::time::Duration;
+
+        const NAME: &str = "unsafe_string::tests::stream_encoding_never_waits_for_the_cache_lock";
+        const CHILD: &str = "IJSON_UNIT_TEST_LOCKED_CACHE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", NAME, "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let report = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.status.success() && report.contains("1 passed"),
+                "{report}"
+            );
+            return;
+        }
+
+        init_cache(true).unwrap();
+        let StringCache::ThreadSafe(cache) = &*get_cache_mut() else {
+            unreachable!();
+        };
+        let shared = IString::intern("a string shared by two array slots");
+        let doc: IValue = IArray::try_from(vec![
+            IValue::from(shared.clone()),
+            IValue::from(shared.clone()),
+        ])
+        .unwrap()
+        .into();
+
+        let mut encoder = StreamEncoder::new(StreamEncoderConfig {
+            table_budget_bytes: 1 << 20,
+        });
+        // With the cache locked, interning or freeing a string would block.
+        let guard = cache.lock().unwrap();
+        let (sender, receiver) = channel();
+        let used = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let used = encoder.encode_into(&mut Vec::new(), &doc);
+                sender.send(used).unwrap();
+            });
+            let used = receiver.recv_timeout(Duration::from_secs(10));
+            // Release the lock first, so that a blocked encoder can finish.
+            drop(guard);
+            used
+        });
+        let used = used.expect("encoding waited for the string cache");
+        assert_eq!((used.defs, used.refs), (1, 1));
+    }
+
+    #[mockalloc::test]
+    fn heap_identity_names_the_shared_allocation() {
+        let first = IString::intern("heap identity of a long string");
+        let (address, len, owners) = first.heap_identity().unwrap();
+        assert_eq!((len, owners), (first.len(), 1));
+        assert_eq!(address.get() % ALIGNMENT, 0);
+        assert_eq!(
+            first.as_ptr() as usize,
+            address.get() + mem::size_of::<Header>()
+        );
+        let second = first.clone();
+        assert_eq!(second.heap_identity(), Some((address, len, 2)));
+        drop(second);
+        assert_eq!(first.heap_identity(), Some((address, len, 1)));
+        let other = IString::intern("another long string with other bytes");
+        let (other_address, other_len, _) = other.heap_identity().unwrap();
+        assert_ne!(other_address, address);
+        assert_eq!(other_len, other.len());
+    }
+
+    #[test]
+    fn heap_identity_ignores_the_empty_and_inline_strings() {
+        assert_no_allocs(|| {
+            for text in ["", "a", "hello", "1234567"] {
+                assert_eq!(IString::intern(text).heap_identity(), None, "{text:?}");
+            }
+        });
+        let eight = IString::intern("12345678");
+        assert_eq!(eight.heap_identity().unwrap().1, 8);
+    }
 
     fn assert_no_allocs<F: FnOnce()>(f: F) {
         let alloc_info = record_allocs(f);

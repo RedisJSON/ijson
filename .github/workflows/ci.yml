@@ -26,6 +26,7 @@ jobs:
           - fuzz_json_de
           - fuzz_cbor_decode
           - fuzz_cbor_roundtrip
+          - fuzz_cbor_stream_decode
           - fuzz_object_ops
     steps:
       - name: Checkout repository
