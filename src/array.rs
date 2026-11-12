@@ -1026,25 +1026,7 @@ impl IArray {
     /// a large number of items.
     pub fn insert(&mut self, index: usize, item: impl Into<IValue>) -> Result<(), IJsonError> {
         let item = item.into();
-        let current_tag = self.header().type_tag();
-        let len = self.len();
-
-        if len == 0 {
-            let desired_tag = ArrayTag::from_ivalue(&item);
-            if desired_tag != ArrayTag::Heterogeneous {
-                if self.is_static() {
-                    *self = IArray::with_capacity_and_tag(4, desired_tag)?;
-                } else {
-                    self.promote_to_type(desired_tag)?;
-                }
-            }
-        } else if !(current_tag == ArrayTag::Heterogeneous
-            || self.can_push_directly(&item, current_tag))
-        {
-            self.promote_to_type(current_tag.promote_with(ArrayTag::from_ivalue(&item)))?;
-        }
-
-        self.reserve(1)?;
+        self.prepare_for_item(&item)?;
 
         unsafe {
             // Safety: cannot be static after calling `reserve`
@@ -1193,29 +1175,34 @@ impl IArray {
     /// Pushes a new item onto the back of the array.
     pub fn push(&mut self, item: impl Into<IValue>) -> Result<(), IJsonError> {
         let item = item.into();
-        let current_tag = self.header().type_tag();
-        let len = self.len();
-
-        if len == 0 {
-            let desired_tag = ArrayTag::from_ivalue(&item);
-            if desired_tag != ArrayTag::Heterogeneous {
-                if self.is_static() {
-                    *self = IArray::with_capacity_and_tag(4, desired_tag)?;
-                } else {
-                    self.promote_to_type(desired_tag)?;
-                }
-            }
-        } else if !(current_tag == ArrayTag::Heterogeneous
-            || self.can_push_directly(&item, current_tag))
-        {
-            self.promote_to_type(current_tag.promote_with(ArrayTag::from_ivalue(&item)))?;
-        }
-
-        self.reserve(1)?;
+        self.prepare_for_item(&item)?;
         unsafe {
             self.header_mut().push(item);
         }
         Ok(())
+    }
+
+    /// Retags or promotes the array so `item` can be stored in it, then reserves
+    /// space for one more item.
+    fn prepare_for_item(&mut self, item: &IValue) -> Result<(), IJsonError> {
+        if self.len() == 0 {
+            // Empty: tag follows the item only (may narrow, drops any FPHA type);
+            // non-numeric item -> Heterogeneous.
+            let desired_tag = ArrayTag::from_ivalue(item);
+            if !self.is_static() {
+                self.promote_to_type(desired_tag)?;
+            } else if desired_tag != ArrayTag::Heterogeneous {
+                *self = IArray::with_capacity_and_tag(4, desired_tag)?;
+            }
+        } else {
+            let current_tag = self.header().type_tag();
+            if !(current_tag == ArrayTag::Heterogeneous
+                || self.can_push_directly(item, current_tag))
+            {
+                self.promote_to_type(current_tag.promote_with(ArrayTag::from_ivalue(item)))?;
+            }
+        }
+        self.reserve(1)
     }
 
     /// Check if an item can be pushed directly to a typed array without promotion
@@ -2158,6 +2145,7 @@ impl Default for IArray {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::IObject;
     use serde::Deserialize;
 
     #[test]
@@ -2521,6 +2509,83 @@ mod tests {
         } else {
             panic!("Expected U8 array slice");
         }
+    }
+
+    /// One single-element array per typed tag.
+    fn singleton_typed_arrays() -> Vec<IArray> {
+        vec![
+            IArray::try_from(vec![1i8]).unwrap(),
+            IArray::try_from(vec![1u8]).unwrap(),
+            IArray::try_from(vec![1i16]).unwrap(),
+            IArray::try_from(vec![1u16]).unwrap(),
+            IArray::try_from(vec![f16::from_f32(1.5)]).unwrap(),
+            IArray::try_from(vec![bf16::from_f32(1.5)]).unwrap(),
+            IArray::try_from(vec![1i32]).unwrap(),
+            IArray::try_from(vec![1u32]).unwrap(),
+            IArray::try_from(vec![1.5f32]).unwrap(),
+            IArray::try_from(vec![1i64]).unwrap(),
+            IArray::try_from(vec![1u64]).unwrap(),
+            IArray::try_from(vec![1.5f64]).unwrap(),
+        ]
+    }
+
+    #[test]
+    fn test_emptied_typed_array_accepts_non_numeric_items() {
+        let non_numeric = [
+            IValue::NULL,
+            IValue::TRUE,
+            IValue::from("s"),
+            IValue::from(IArray::new()),
+            IValue::from(IObject::new()),
+        ];
+        let empty_ways: [fn(&mut IArray); 3] =
+            [|a| drop(a.remove(0)), |a| drop(a.pop()), |a| a.clear()];
+        for empty in empty_ways {
+            for item in &non_numeric {
+                for mut array in singleton_typed_arrays() {
+                    let tag = array.header().type_tag();
+                    assert_ne!(tag, ArrayTag::Heterogeneous);
+                    empty(&mut array);
+                    array.insert(0, item.clone()).unwrap();
+                    assert_eq!(
+                        array.header().type_tag(),
+                        ArrayTag::Heterogeneous,
+                        "{tag:?}"
+                    );
+                    assert_eq!(array.len(), 1);
+                    assert_eq!(array[0], *item);
+                }
+                for mut array in singleton_typed_arrays() {
+                    empty(&mut array);
+                    array.push(item.clone()).unwrap();
+                    array.push(1).unwrap();
+                    assert_eq!(array.len(), 2);
+                    assert_eq!(array[0], *item);
+                    assert_eq!(array[1], IValue::from(1));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_emptied_typed_array_retags_to_numeric_item() {
+        for mut array in singleton_typed_arrays() {
+            array.remove(0).unwrap();
+            array.insert(0, 7).unwrap();
+            assert_eq!(array.header().type_tag(), ArrayTag::I8);
+            let items: Vec<IValue> = array.iter().map(|v| v.into_owned()).collect();
+            assert_eq!(items, vec![IValue::from(7)]);
+        }
+    }
+
+    #[test]
+    fn test_emptied_heterogeneous_array_retags_to_numeric_item() {
+        let mut array = IArray::new();
+        array.push(IValue::from("s")).unwrap();
+        array.pop().unwrap();
+        assert_eq!(array.header().type_tag(), ArrayTag::Heterogeneous);
+        array.push(7).unwrap();
+        assert_eq!(array.header().type_tag(), ArrayTag::I8);
     }
 
     #[test]
