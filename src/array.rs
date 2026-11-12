@@ -1186,8 +1186,8 @@ impl IArray {
     /// space for one more item.
     fn prepare_for_item(&mut self, item: &IValue) -> Result<(), IJsonError> {
         if self.len() == 0 {
-            // An emptied typed array keeps its tag, so retag it to fit the item,
-            // including to heterogeneous for non-numeric items.
+            // Empty: tag follows the item only (may narrow, drops any FPHA type);
+            // non-numeric item -> Heterogeneous.
             let desired_tag = ArrayTag::from_ivalue(item);
             if !self.is_static() {
                 self.promote_to_type(desired_tag)?;
@@ -2576,6 +2576,16 @@ mod tests {
             let items: Vec<IValue> = array.iter().map(|v| v.into_owned()).collect();
             assert_eq!(items, vec![IValue::from(7)]);
         }
+    }
+
+    #[test]
+    fn test_emptied_heterogeneous_array_retags_to_numeric_item() {
+        let mut array = IArray::new();
+        array.push(IValue::from("s")).unwrap();
+        array.pop().unwrap();
+        assert_eq!(array.header().type_tag(), ArrayTag::Heterogeneous);
+        array.push(7).unwrap();
+        assert_eq!(array.header().type_tag(), ArrayTag::I8);
     }
 
     #[test]
