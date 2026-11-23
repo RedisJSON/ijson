@@ -985,9 +985,36 @@ impl IObject {
     }
 
     pub(crate) fn clone_impl(&self) -> IValue {
+        let len = self.len();
         // Cloning an existing (valid) object never exceeds its capacity, so this
         // cannot fail short of the global allocator aborting.
-        let mut res = Self::with_capacity(self.len() as usize).unwrap();
+        let mut res = Self::with_capacity(len as usize).unwrap();
+        if !self.is_static() && self.capacity() == len {
+            // Exact-sized source (what compact parsing produces): the clone has the same
+            // capacity, hence the same `hash_capacity`, so the source's bucket table is a valid
+            // table for items cloned index-for-index. Copy it instead of re-hashing every key.
+            // Safety: `res` was allocated for `len` items; `src` reflects a live, valid object.
+            unsafe {
+                let src = self.header().split();
+                let mut dst = res.header_mut();
+                let items = dst.items_ptr_mut();
+                for (i, kvp) in src.items.iter().enumerate() {
+                    items.add(i).write(KeyValuePair {
+                        key: kvp.key.clone(),
+                        value: kvp.value.clone(),
+                    });
+                }
+                dst.set_len(len);
+                if has_table(len) {
+                    std::ptr::copy_nonoverlapping(
+                        src.table.as_ptr(),
+                        dst.hashes_ptr_mut(),
+                        hash_capacity(len),
+                    );
+                }
+            }
+            return res.0;
+        }
         for (k, v) in self.iter() {
             res.insert(k.clone(), v.clone()).unwrap();
         }
