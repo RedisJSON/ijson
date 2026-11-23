@@ -87,6 +87,42 @@ fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
     hash_fn(s) % hash_cap
 }
 
+fn hash_str(s: &str) -> usize {
+    // Same hasher and same `str::hash` as `hash_fn`, so a borrowed probe lands in the same bucket.
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish() as usize
+}
+
+/// A key the table can be probed with. `IString` probes compare by identity first; `str` probes
+/// hash and compare the borrowed bytes, so a read-only lookup never touches the intern cache.
+trait ProbeKey {
+    fn probe_bucket(&self, hash_cap: usize) -> usize;
+    fn matches(&self, resident: &IString) -> bool;
+}
+
+impl ProbeKey for IString {
+    #[inline]
+    fn probe_bucket(&self, hash_cap: usize) -> usize {
+        hash_bucket(self, hash_cap)
+    }
+    #[inline]
+    fn matches(&self, resident: &IString) -> bool {
+        resident == self
+    }
+}
+
+impl ProbeKey for str {
+    #[inline]
+    fn probe_bucket(&self, hash_cap: usize) -> usize {
+        hash_str(self) % hash_cap
+    }
+    #[inline]
+    fn matches(&self, resident: &IString) -> bool {
+        resident.as_str() == self
+    }
+}
+
 struct SplitHeader<'a> {
     cap: u32,
     items: &'a [KeyValuePair],
@@ -96,11 +132,19 @@ struct SplitHeader<'a> {
 impl<'a> SplitHeader<'a> {
     // Returns the *item index* (Ok) in no-table mode, or the *table bucket* (Ok) in table mode.
     fn find_bucket(&self, key: &IString) -> Result<u32, u32> {
-        self.find_bucket_impl::<true>(key)
+        self.find_bucket_impl::<true, IString>(key)
+    }
+
+    // Probe with a borrowed `&str`: no interning, no cache guard, no temporary `IString`.
+    fn find_bucket_str(&self, key: &str) -> Result<u32, u32> {
+        self.find_bucket_impl::<true, str>(key)
     }
 
     // Unique entries still need collision handling, but no equality checks.
-    fn find_bucket_impl<const CHECK_DUPLICATES: bool>(&self, key: &IString) -> Result<u32, u32> {
+    fn find_bucket_impl<const CHECK_DUPLICATES: bool, K: ProbeKey + ?Sized>(
+        &self,
+        key: &K,
+    ) -> Result<u32, u32> {
         if !has_table(self.cap) {
             if !CHECK_DUPLICATES {
                 return Err(u32::MAX);
@@ -110,12 +154,12 @@ impl<'a> SplitHeader<'a> {
             return self
                 .items
                 .iter()
-                .position(|kvp| &kvp.key == key)
+                .position(|kvp| key.matches(&kvp.key))
                 .map(|i| i as u32)
                 .ok_or(u32::MAX);
         }
         let hash_cap = hash_capacity(self.cap);
-        let initial_bucket = hash_bucket(key, hash_cap);
+        let initial_bucket = key.probe_bucket(hash_cap);
         unsafe {
             // Linear search from expected bucket
             for i in 0..hash_cap {
@@ -129,7 +173,7 @@ impl<'a> SplitHeader<'a> {
 
                 // If the bucket contains our key, we found the bucket
                 let k = &self.items.get_unchecked(index as usize).key;
-                if CHECK_DUPLICATES && k == key {
+                if CHECK_DUPLICATES && key.matches(k) {
                     return Ok(bucket as u32);
                 }
 
@@ -345,7 +389,7 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
     unsafe fn push_unique(&mut self, key: IString, value: IValue) {
         let bucket = self
             .split()
-            .find_bucket_impl::<false>(&key)
+            .find_bucket_impl::<false, IString>(&key)
             .expect_err("unique insertion only finds vacant buckets");
         let index = self.push(key, value);
         self.reborrow().split_mut().shift(bucket, index);
@@ -1138,21 +1182,73 @@ pub trait ObjectIndex: private::Sealed + Copy {
 
 impl ObjectIndex for &str {
     fn index_into(self, v: &IObject) -> Option<(&IString, &IValue)> {
-        IString::intern(self).index_into(v)
+        if v.is_empty() {
+            return None;
+        }
+        let hd = v.header().split();
+        if let Ok(bucket) = hd.find_bucket_str(self) {
+            // Safety: Bucket index is valid
+            unsafe {
+                let index = if has_table(hd.cap) {
+                    *hd.table.get_unchecked(bucket as usize) as usize
+                } else {
+                    bucket as usize
+                };
+                let item = hd.items.get_unchecked(index);
+                Some((&item.key, &item.value))
+            }
+        } else {
+            None
+        }
     }
 
     fn index_into_mut(self, v: &mut IObject) -> Option<(&IString, &mut IValue)> {
-        IString::intern(self).index_into_mut(v)
+        if v.is_empty() {
+            None
+        } else {
+            // Safety: not static
+            let hd = unsafe { v.header_mut().split_mut() };
+            if let Ok(bucket) = hd.as_ref().find_bucket_str(self) {
+                // Safety: Bucket index is valid
+                unsafe {
+                    let index = if has_table(hd.cap) {
+                        *hd.table.get_unchecked(bucket as usize) as usize
+                    } else {
+                        bucket as usize
+                    };
+                    let item = hd.items.get_unchecked_mut(index);
+                    Some((&item.key, &mut item.value))
+                }
+            } else {
+                None
+            }
+        }
     }
 
     fn index_or_insert(self, v: &mut IObject) -> &mut IValue {
+        // Insertion needs an owned key, so this path still interns.
         v.entry(IString::intern(self))
             .unwrap()
             .or_insert(IValue::NULL)
     }
 
     fn remove(self, v: &mut IObject) -> Option<(IString, IValue)> {
-        IString::intern(self).remove(v)
+        if v.is_empty() {
+            None
+        } else {
+            // Safety: not static
+            let mut hd = unsafe { v.header_mut() };
+            let mut split = hd.reborrow().split_mut();
+            if let Ok(bucket) = split.as_ref().find_bucket_str(self) {
+                // Safety: Bucket index is valid
+                unsafe {
+                    split.remove_bucket(bucket);
+                    Some(hd.pop())
+                }
+            } else {
+                None
+            }
+        }
     }
 }
 
