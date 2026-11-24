@@ -320,17 +320,146 @@ impl<'de> Visitor<'de> for ArrayVisitor<'_> {
     {
         let mut arr = IArray::with_capacity(visitor.size_hint().unwrap_or(0))
             .map_err(|_| SError::custom("Failed to allocate array"))?;
-        while let Some(v) = visitor.next_element_seed(ValueVisitor {
-            fpha_config: self.fpha_config,
-            buffers: self.buffers.as_deref_mut(),
-        })? {
-            match self.fpha_config {
-                Some(FPHAConfig { fpha_type }) => arr.push_with_fp_type(v, fpha_type),
-                None => arr.push(v).map_err(Into::into),
+        match self.fpha_config {
+            Some(FPHAConfig { fpha_type }) => {
+                while let Some(v) = visitor.next_element_seed(ValueVisitor {
+                    fpha_config: self.fpha_config,
+                    buffers: self.buffers.as_deref_mut(),
+                })? {
+                    arr.push_with_fp_type(v, fpha_type)
+                        .map_err(|e| SError::custom(e.to_string()))?;
+                }
             }
-            .map_err(|e| SError::custom(e.to_string()))?;
+            None => {
+                // `None` means the seed already appended the element (a float written straight into
+                // the array's `F64` storage); everything else is pushed here, as before.
+                while let Some(elem) = visitor.next_element_seed(ArrayElemSeed {
+                    arr: &mut arr,
+                    buffers: self.buffers.as_deref_mut(),
+                })? {
+                    if let Some(v) = elem {
+                        arr.push(v).map_err(|e| SError::custom(e.to_string()))?;
+                    }
+                }
+            }
         }
         Ok(arr)
+    }
+}
+
+/// Seed for one element of an array that has no forced float type. It is `ValueVisitor` with one
+/// difference: `visit_f64` first tries to write the float straight into the array's current `F64`
+/// storage (`IArray::push_f64_direct`) and yields `None` when that succeeded. Every other element
+/// is built exactly as `ValueVisitor` builds it and returned as `Some(value)` for the caller's
+/// `push`, so tag selection and promotion are unchanged and the integer arms carry no extra work.
+struct ArrayElemSeed<'a> {
+    arr: &'a mut IArray,
+    buffers: Option<&'a mut Vec<ObjectBuffer>>,
+}
+
+impl<'a> ArrayElemSeed<'a> {
+    #[inline(always)]
+    fn value_visitor(self) -> ValueVisitor<'a> {
+        ValueVisitor {
+            fpha_config: None,
+            buffers: self.buffers,
+        }
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for ArrayElemSeed<'_> {
+    type Value = Option<IValue>;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Option<IValue>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ArrayElemSeed<'_> {
+    type Value = Option<IValue>;
+
+    fn expecting(&self, formatter: &mut Formatter) -> fmt::Result {
+        formatter.write_str("any valid JSON value")
+    }
+
+    #[inline]
+    fn visit_bool<E: SError>(self, value: bool) -> Result<Option<IValue>, E> {
+        Ok(Some(value.into()))
+    }
+
+    #[inline]
+    fn visit_i64<E: SError>(self, value: i64) -> Result<Option<IValue>, E> {
+        Ok(Some(value.into()))
+    }
+
+    #[inline]
+    fn visit_u64<E: SError>(self, value: u64) -> Result<Option<IValue>, E> {
+        Ok(Some(value.into()))
+    }
+
+    #[inline]
+    fn visit_f64<E: SError>(self, value: f64) -> Result<Option<IValue>, E> {
+        if self.arr.push_f64_direct(value) {
+            Ok(None)
+        } else {
+            Ok(Some(value.into()))
+        }
+    }
+
+    #[inline]
+    fn visit_str<E: SError>(self, value: &str) -> Result<Option<IValue>, E> {
+        Ok(Some(value.into()))
+    }
+
+    #[inline]
+    fn visit_string<E: SError>(self, value: String) -> Result<Option<IValue>, E> {
+        Ok(Some(value.into()))
+    }
+
+    #[inline]
+    fn visit_bytes<E: SError>(self, value: &[u8]) -> Result<Option<IValue>, E> {
+        ValueVisitor::new(None).visit_bytes(value).map(Some)
+    }
+
+    #[inline]
+    fn visit_byte_buf<E: SError>(self, value: Vec<u8>) -> Result<Option<IValue>, E> {
+        ValueVisitor::new(None).visit_byte_buf(value).map(Some)
+    }
+
+    #[inline]
+    fn visit_none<E: SError>(self) -> Result<Option<IValue>, E> {
+        Ok(Some(IValue::NULL))
+    }
+
+    #[inline]
+    fn visit_some<D>(self, deserializer: D) -> Result<Option<IValue>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        self.value_visitor().deserialize(deserializer).map(Some)
+    }
+
+    #[inline]
+    fn visit_unit<E: SError>(self) -> Result<Option<IValue>, E> {
+        Ok(Some(IValue::NULL))
+    }
+
+    #[inline]
+    fn visit_seq<V>(self, visitor: V) -> Result<Option<IValue>, V::Error>
+    where
+        V: SeqAccess<'de>,
+    {
+        self.value_visitor().visit_seq(visitor).map(Some)
+    }
+
+    fn visit_map<V>(self, visitor: V) -> Result<Option<IValue>, V::Error>
+    where
+        V: MapAccess<'de>,
+    {
+        self.value_visitor().visit_map(visitor).map(Some)
     }
 }
 

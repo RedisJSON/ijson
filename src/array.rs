@@ -1132,6 +1132,7 @@ impl IArray {
 
     /// Pushes a new item onto the back of the array with a specific floating-point type, potentially losing precision.
     /// If the item is not a number, it is pushed as is.
+    #[inline]
     pub(crate) fn push_with_fp_type(
         &mut self,
         item: impl Into<IValue>,
@@ -1172,7 +1173,37 @@ impl IArray {
         Ok(())
     }
 
+    /// Appends a finite `f64` straight into an `F64`-tagged, non-empty array, without building an
+    /// `IValue`. Returns `false` and does nothing in every other state (empty or static array, other
+    /// tag, non-finite value, allocation failure), so the caller takes the general
+    /// [`push`](Self::push) path, which owns the tag-selection and promotion rules and reports
+    /// errors. In the fast-path state the two are equivalent: `prepare_for_item` would find
+    /// `can_push_directly(F64)` true and `push` would unbox the same `f64` into the same slot.
+    /// Kept out of line on purpose: the caller is serde_json's per-element number dispatch, and the
+    /// integer arms next to it must stay as small as they are without this method (EXP-001d).
+    #[inline(never)]
+    pub(crate) fn push_f64_direct(&mut self, value: f64) -> bool {
+        if self.is_static()
+            || self.len() == 0
+            || !value.is_finite()
+            || self.header().type_tag() != ArrayTag::F64
+            || self.reserve(1).is_err()
+        {
+            return false;
+        }
+        // Safety: the array is F64-tagged, not static, and `reserve(1)` guaranteed room for one
+        // more element; `set_len` publishes it after the write.
+        unsafe {
+            let len = self.header().len();
+            let ptr = self.header_mut().raw_array_ptr_mut().cast::<f64>();
+            ptr.add(len as usize).write(value);
+            self.header_mut().set_len(len + 1);
+        }
+        true
+    }
+
     /// Pushes a new item onto the back of the array.
+    #[inline]
     pub fn push(&mut self, item: impl Into<IValue>) -> Result<(), IJsonError> {
         let item = item.into();
         self.prepare_for_item(&item)?;
