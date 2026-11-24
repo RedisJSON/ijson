@@ -1651,6 +1651,33 @@ mod tests {
         assert!(matches!(e.entry("a").unwrap(), Entry::Vacant(_)));
         assert_eq!(e.entry("a").unwrap().or_insert(IValue::TRUE), &IValue::TRUE);
         assert_eq!(e.len(), 1);
+        // Every `EntryKey` type on the vacant path interns the inserted key.
+        let owned = String::from("b");
+        let mut owned_mut = String::from("c");
+        let mut mut_str = String::from("d");
+        let interned = IString::intern("e");
+        e.entry(&owned).unwrap().or_insert(IValue::NULL);
+        e.entry(&mut owned_mut).unwrap().or_insert(IValue::NULL);
+        e.entry(mut_str.as_mut_str())
+            .unwrap()
+            .or_insert(IValue::NULL);
+        e.entry(&interned).unwrap().or_insert(IValue::NULL);
+        e.insert(owned.clone(), IValue::NULL).unwrap();
+        e.insert(interned.clone(), IValue::NULL).unwrap();
+        assert_eq!(e.len(), 5);
+        for k in ["a", "b", "c", "d", "e"] {
+            let (stored, _) = e.get_key_value(k).unwrap();
+            assert!(stored.0.raw_eq(&IString::intern(k).0), "{k} is interned");
+        }
+        assert!(matches!(e.entry(&owned).unwrap(), Entry::Occupied(_)));
+        assert!(matches!(
+            e.entry(&mut owned_mut).unwrap(),
+            Entry::Occupied(_)
+        ));
+        assert!(matches!(
+            e.entry(mut_str.as_mut_str()).unwrap(),
+            Entry::Occupied(_)
+        ));
     }
 
     #[test]
