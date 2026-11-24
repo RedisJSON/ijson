@@ -87,6 +87,42 @@ fn hash_bucket(s: &IString, hash_cap: usize) -> usize {
     hash_fn(s) % hash_cap
 }
 
+fn hash_str(s: &str) -> usize {
+    // Same hasher and same `str::hash` as `hash_fn`, so a borrowed probe lands in the same bucket.
+    let mut hasher = DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish() as usize
+}
+
+/// A key the table can be probed with. `IString` probes compare by identity first; `str` probes
+/// hash and compare the borrowed bytes, so a read-only lookup never touches the intern cache.
+trait ProbeKey {
+    fn probe_bucket(&self, hash_cap: usize) -> usize;
+    fn matches(&self, resident: &IString) -> bool;
+}
+
+impl ProbeKey for IString {
+    #[inline]
+    fn probe_bucket(&self, hash_cap: usize) -> usize {
+        hash_bucket(self, hash_cap)
+    }
+    #[inline]
+    fn matches(&self, resident: &IString) -> bool {
+        resident == self
+    }
+}
+
+impl ProbeKey for str {
+    #[inline]
+    fn probe_bucket(&self, hash_cap: usize) -> usize {
+        hash_str(self) % hash_cap
+    }
+    #[inline]
+    fn matches(&self, resident: &IString) -> bool {
+        resident.as_str() == self
+    }
+}
+
 struct SplitHeader<'a> {
     cap: u32,
     items: &'a [KeyValuePair],
@@ -96,11 +132,19 @@ struct SplitHeader<'a> {
 impl<'a> SplitHeader<'a> {
     // Returns the *item index* (Ok) in no-table mode, or the *table bucket* (Ok) in table mode.
     fn find_bucket(&self, key: &IString) -> Result<u32, u32> {
-        self.find_bucket_impl::<true>(key)
+        self.find_bucket_impl::<true, IString>(key)
+    }
+
+    // Probe with a borrowed `&str`: no interning, no cache guard, no temporary `IString`.
+    fn find_bucket_str(&self, key: &str) -> Result<u32, u32> {
+        self.find_bucket_impl::<true, str>(key)
     }
 
     // Unique entries still need collision handling, but no equality checks.
-    fn find_bucket_impl<const CHECK_DUPLICATES: bool>(&self, key: &IString) -> Result<u32, u32> {
+    fn find_bucket_impl<const CHECK_DUPLICATES: bool, K: ProbeKey + ?Sized>(
+        &self,
+        key: &K,
+    ) -> Result<u32, u32> {
         if !has_table(self.cap) {
             if !CHECK_DUPLICATES {
                 return Err(u32::MAX);
@@ -110,12 +154,12 @@ impl<'a> SplitHeader<'a> {
             return self
                 .items
                 .iter()
-                .position(|kvp| &kvp.key == key)
+                .position(|kvp| key.matches(&kvp.key))
                 .map(|i| i as u32)
                 .ok_or(u32::MAX);
         }
         let hash_cap = hash_capacity(self.cap);
-        let initial_bucket = hash_bucket(key, hash_cap);
+        let initial_bucket = key.probe_bucket(hash_cap);
         unsafe {
             // Linear search from expected bucket
             for i in 0..hash_cap {
@@ -129,7 +173,7 @@ impl<'a> SplitHeader<'a> {
 
                 // If the bucket contains our key, we found the bucket
                 let k = &self.items.get_unchecked(index as usize).key;
-                if CHECK_DUPLICATES && k == key {
+                if CHECK_DUPLICATES && key.matches(k) {
                     return Ok(bucket as u32);
                 }
 
@@ -321,8 +365,6 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
     }
 
     // Safety: Must ensure there's capacity for an extra element
-    unsafe fn entry(self, key: IString) -> Entry<'a>;
-    // Safety: Must ensure there's capacity for an extra element
     unsafe fn entry_or_clone(self, key: &IString) -> Entry<'a>;
 
     // Safety: Object must not be empty
@@ -345,7 +387,7 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
     unsafe fn push_unique(&mut self, key: IString, value: IValue) {
         let bucket = self
             .split()
-            .find_bucket_impl::<false>(&key)
+            .find_bucket_impl::<false, IString>(&key)
             .expect_err("unique insertion only finds vacant buckets");
         let index = self.push(key, value);
         self.reborrow().split_mut().shift(bucket, index);
@@ -367,20 +409,6 @@ trait HeaderMut<'a>: ThinMutExt<'a, Header> {
 
 impl<'a, T: ThinRefExt<'a, Header>> HeaderRef<'a> for T {}
 impl<'a> HeaderMut<'a> for ThinMut<'a, Header> {
-    // Safety: Must ensure there's capacity for an extra element
-    unsafe fn entry(self, key: IString) -> Entry<'a> {
-        match self.split().find_bucket(&key) {
-            Err(bucket) => Entry::Vacant(VacantEntry {
-                header: self,
-                bucket,
-                key,
-            }),
-            Ok(bucket) => Entry::Occupied(OccupiedEntry {
-                header: self,
-                bucket,
-            }),
-        }
-    }
     // Safety: Must ensure there's capacity for an extra element
     unsafe fn entry_or_clone(self, key: &IString) -> Entry<'a> {
         match self.split().find_bucket(key) {
@@ -815,21 +843,39 @@ impl IObject {
     ///
     /// # Errors
     /// Returns an `AllocError` if reserving space for the entry fails.
-    pub fn entry(&mut self, key: impl Into<IString>) -> Result<Entry<'_>, IJsonError> {
-        let key = key.into();
-        // A full object only needs to grow if the key is absent.
-        if self.len() == self.capacity() {
-            if let Ok(bucket) = self.header().split().find_bucket(&key) {
-                return Ok(Entry::Occupied(OccupiedEntry {
-                    // SAFETY: finding an occupied entry proves the object is non-static.
-                    header: unsafe { self.header_mut() },
+    pub fn entry(&mut self, key: impl EntryKey) -> Result<Entry<'_>, IJsonError> {
+        // Probe with the key as given (a `&str` is hashed and compared by bytes, never interned):
+        // an occupied entry needs neither an interned key nor space.
+        match key.find_bucket(self) {
+            Ok(bucket) => Ok(Entry::Occupied(OccupiedEntry {
+                // SAFETY: finding an occupied entry proves the object is non-static.
+                header: unsafe { self.header_mut() },
+                bucket,
+            })),
+            Err(bucket) => {
+                // `reserve(1)` reallocates and rehashes only when the object is full; otherwise the
+                // vacant bucket found above is still the right one.
+                let full = self.len() == self.capacity();
+                self.reserve(1)?;
+                // Only an inserted key is interned, exactly as before.
+                let key = key.into_key();
+                // Safety: cannot be static after reserving space
+                let header = unsafe { self.header_mut() };
+                let bucket = if full {
+                    match header.split().find_bucket(&key) {
+                        Err(bucket) => bucket,
+                        Ok(bucket) => return Ok(Entry::Occupied(OccupiedEntry { header, bucket })),
+                    }
+                } else {
+                    bucket
+                };
+                Ok(Entry::Vacant(VacantEntry {
+                    header,
                     bucket,
-                }));
+                    key,
+                }))
             }
         }
-        self.reserve(1)?;
-        // Safety: cannot be static after reserving space
-        Ok(unsafe { self.header_mut().entry(key) })
     }
     /// Returns a view of an entry within this object, whilst avoiding
     /// cloning the key if the entry is already occupied.
@@ -927,7 +973,7 @@ impl IObject {
     /// Returns an `AllocError` if memory allocation fails.
     pub fn insert(
         &mut self,
-        k: impl Into<IString>,
+        k: impl EntryKey,
         v: impl Into<IValue>,
     ) -> Result<Option<IValue>, IJsonError> {
         match self.entry(k)? {
@@ -1081,7 +1127,8 @@ impl<K: Into<IString>, V: Into<IValue>> TryExtend<(K, V)> for IObject {
         let iter = iter.into_iter();
         self.reserve(iter.size_hint().0)?;
         for (k, v) in iter {
-            self.insert(k, v)?;
+            // Generic keys are converted (interned) up front; `IString` is an `EntryKey`.
+            self.insert(k.into(), v)?;
         }
         Ok(())
     }
@@ -1116,8 +1163,101 @@ mod private {
     pub trait Sealed {}
     impl Sealed for usize {}
     impl Sealed for &str {}
-    impl Sealed for &super::IString {}
+    impl Sealed for &mut str {}
+    impl Sealed for String {}
+    impl Sealed for &mut String {}
+    impl Sealed for super::IString {}
     impl<T: Sealed> Sealed for &T {}
+}
+
+/// Trait which abstracts over the string types that can name an entry of an [`IObject`]
+/// ([`IObject::entry`], [`IObject::insert`]). Every type that converts into an [`IString`]
+/// implements it. The table is probed with the key as given; a borrowed `&str` is hashed and
+/// compared by bytes and is only interned when the entry turns out to be vacant and the key has
+/// to be stored.
+pub trait EntryKey: private::Sealed {
+    #[doc(hidden)]
+    fn find_bucket(&self, v: &IObject) -> Result<u32, u32>;
+
+    #[doc(hidden)]
+    fn into_key(self) -> IString;
+}
+
+impl EntryKey for &str {
+    #[inline]
+    fn find_bucket(&self, v: &IObject) -> Result<u32, u32> {
+        v.header().split().find_bucket_str(self)
+    }
+    #[inline]
+    fn into_key(self) -> IString {
+        IString::intern(self)
+    }
+}
+
+impl EntryKey for &mut str {
+    #[inline]
+    fn find_bucket(&self, v: &IObject) -> Result<u32, u32> {
+        v.header().split().find_bucket_str(self)
+    }
+    #[inline]
+    fn into_key(self) -> IString {
+        IString::intern(self)
+    }
+}
+
+impl EntryKey for String {
+    #[inline]
+    fn find_bucket(&self, v: &IObject) -> Result<u32, u32> {
+        v.header().split().find_bucket_str(self)
+    }
+    #[inline]
+    fn into_key(self) -> IString {
+        IString::intern(&self)
+    }
+}
+
+impl EntryKey for &String {
+    #[inline]
+    fn find_bucket(&self, v: &IObject) -> Result<u32, u32> {
+        v.header().split().find_bucket_str(self)
+    }
+    #[inline]
+    fn into_key(self) -> IString {
+        IString::intern(self)
+    }
+}
+
+impl EntryKey for &mut String {
+    #[inline]
+    fn find_bucket(&self, v: &IObject) -> Result<u32, u32> {
+        v.header().split().find_bucket_str(self)
+    }
+    #[inline]
+    fn into_key(self) -> IString {
+        IString::intern(self)
+    }
+}
+
+impl EntryKey for IString {
+    #[inline]
+    fn find_bucket(&self, v: &IObject) -> Result<u32, u32> {
+        v.header().split().find_bucket(self)
+    }
+    #[inline]
+    fn into_key(self) -> IString {
+        self
+    }
+}
+
+impl EntryKey for &IString {
+    #[inline]
+    fn find_bucket(&self, v: &IObject) -> Result<u32, u32> {
+        v.header().split().find_bucket(self)
+    }
+    #[inline]
+    fn into_key(self) -> IString {
+        self.clone()
+    }
 }
 
 /// Trait which abstracts over the various string types which can be used
@@ -1146,9 +1286,7 @@ impl ObjectIndex for &str {
     }
 
     fn index_or_insert(self, v: &mut IObject) -> &mut IValue {
-        v.entry(IString::intern(self))
-            .unwrap()
-            .or_insert(IValue::NULL)
+        v.entry(self).unwrap().or_insert(IValue::NULL)
     }
 
     fn remove(self, v: &mut IObject) -> Option<(IString, IValue)> {
@@ -1442,6 +1580,77 @@ mod tests {
     fn small_object_has_no_table() {
         assert!(!has_table(4));
         assert_eq!(IObject::layout(4).unwrap().size(), 72);
+    }
+
+    #[test]
+    fn entry_probes_borrowed_key_before_interning() {
+        // Occupied entries are found by `&str`, `String` and `IString` without changing the stored key,
+        // in both the no-table (<= 8 keys) and table (> 8 keys) layouts, and vacant entries still
+        // intern the inserted key, including when the object is full and has to grow.
+        for n in [3usize, 12, 54] {
+            let mut x = IObject::new();
+            for i in 0..n {
+                x.insert(format!("k{i}"), IValue::from(i as i64)).unwrap();
+            }
+            let stored: Vec<IString> = x.keys().cloned().collect();
+            for (i, k) in stored.iter().enumerate() {
+                let s = k.as_str().to_string();
+                match x.entry(s.as_str()).unwrap() {
+                    Entry::Occupied(occ) => {
+                        assert!(
+                            occ.key().0.raw_eq(&k.0),
+                            "occupied by &str keeps the resident key"
+                        );
+                        assert_eq!(occ.get(), &IValue::from(i as i64));
+                    }
+                    Entry::Vacant(_) => panic!("{s} must be occupied"),
+                }
+                assert!(matches!(x.entry(s.clone()).unwrap(), Entry::Occupied(_)));
+                assert!(matches!(x.entry(&s).unwrap(), Entry::Occupied(_)));
+                assert!(matches!(x.entry(k.clone()).unwrap(), Entry::Occupied(_)));
+                assert!(matches!(x.entry(k).unwrap(), Entry::Occupied(_)));
+            }
+            // Vacant on a full object: the table is rebuilt, and the key is interned.
+            let mut pad = 0;
+            while x.len() < x.capacity() {
+                x.insert(format!("pad{pad}"), IValue::NULL).unwrap();
+                pad += 1;
+            }
+            let before = x.capacity();
+            let len0 = x.len() as usize;
+            match x.entry("fresh").unwrap() {
+                Entry::Vacant(vac) => {
+                    assert_eq!(vac.key().as_str(), "fresh");
+                    assert!(vac.key().0.raw_eq(&IString::intern("fresh").0));
+                    vac.insert(IValue::TRUE);
+                }
+                Entry::Occupied(_) => panic!("fresh must be vacant"),
+            }
+            assert!(x.capacity() > before);
+            assert_eq!(x.len() as usize, len0 + 1);
+            assert_eq!(x.get("fresh"), Some(&IValue::TRUE));
+            // Vacant with spare capacity: the probed bucket is reused.
+            x.entry("fresh2").unwrap().or_insert(IValue::FALSE);
+            assert_eq!(x.get("fresh2"), Some(&IValue::FALSE));
+            for (i, k) in stored.iter().enumerate() {
+                assert_eq!(x.get(k), Some(&IValue::from(i as i64)));
+                assert_eq!(x.get(k.as_str()), Some(&IValue::from(i as i64)));
+            }
+            *x.entry("k0").unwrap().or_insert(IValue::NULL) = IValue::from(99i64);
+            assert_eq!(x.get("k0"), Some(&IValue::from(99i64)));
+            assert_eq!(x.len() as usize, len0 + 2);
+            // IndexMut by &str goes through the same path.
+            x["k1"] = IValue::from(7i64);
+            x["k_new"] = IValue::from(8i64);
+            assert_eq!(x.len() as usize, len0 + 3);
+            assert_eq!(x.get("k1"), Some(&IValue::from(7i64)));
+            assert_eq!(x.get("k_new"), Some(&IValue::from(8i64)));
+        }
+        // An empty object: vacant without a table.
+        let mut e = IObject::new();
+        assert!(matches!(e.entry("a").unwrap(), Entry::Vacant(_)));
+        assert_eq!(e.entry("a").unwrap().or_insert(IValue::TRUE), &IValue::TRUE);
+        assert_eq!(e.len(), 1);
     }
 
     #[test]

@@ -44,7 +44,7 @@ mod value;
 pub use array::{FloatType, IArray};
 pub use convert::{TryCollect, TryExtend, TryFromIterator};
 pub use number::INumber;
-pub use object::IObject;
+pub use object::{EntryKey, IObject};
 use std::alloc::Layout;
 
 pub use value::{
