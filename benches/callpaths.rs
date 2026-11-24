@@ -160,8 +160,10 @@ fn bench_parse(c: &mut Criterion) {
     let mut g = c.benchmark_group("parse");
     for (name, text) in fixtures() {
         g.throughput(Throughput::Bytes(text.len() as u64));
+        // The parsed value is handed back to criterion and dropped outside the timed section: JSON.SET keeps
+        // it, and destruction is the `clone-drop/drop` benchmark's job.
         g.bench_with_input(BenchmarkId::new("compact-objects", name), &text, |b, t| {
-            b.iter(|| black_box(parse(t, None)))
+            b.iter_with_large_drop(|| parse(t, None))
         });
     }
     // JSON.SET with a float type hint (FPHA): the typed-array detection path with a forced type.
@@ -170,7 +172,7 @@ fn bench_parse(c: &mut Criterion) {
     g.bench_with_input(
         BenchmarkId::new("fpha-f32", "floats-1024"),
         &floats,
-        |b, t| b.iter(|| black_box(parse(t, Some(FloatType::F32)))),
+        |b, t| b.iter_with_large_drop(|| parse(t, Some(FloatType::F32))),
     );
     g.finish();
 }
@@ -232,8 +234,9 @@ fn bench_lookup(c: &mut Criterion) {
     g.bench_function("wide-128-miss-long-key", |b| {
         b.iter(|| black_box(wide.get("long_key_name_999")))
     });
-    // Small object (< table threshold): the common RedisJSON shape (yelp business has ~22 keys,
-    // yahoo2 result ~10). Use the first yelp business.
+    // A yelp business (28 keys) is above `SMALL_OBJECT_THRESHOLD` (8), so it is stored with a bucket
+    // table like `wide-128`; it is the common RedisJSON object shape. The small-object linear-scan path
+    // is measured separately below on an 8-key object.
     let biz = yelp
         .as_object()
         .unwrap()
@@ -250,6 +253,19 @@ fn bench_lookup(c: &mut Criterion) {
     });
     g.bench_function("business-22-miss", |b| {
         b.iter(|| black_box(biz.get("not_there")))
+    });
+    // Small object at the threshold (8 keys, no table): the first eight members of the business.
+    let mut small = IObject::with_capacity(8).unwrap();
+    for (k, v) in biz.iter().take(8) {
+        small.insert(k.clone(), v.clone()).unwrap();
+    }
+    assert_eq!(small.len(), 8);
+    let last_key = small.keys().last().unwrap().clone();
+    g.bench_function("small-8-hit-last", |b| {
+        b.iter(|| black_box(small.get(last_key.as_str())))
+    });
+    g.bench_function("small-8-miss", |b| {
+        b.iter(|| black_box(small.get("not_there")))
     });
     // Array index on a 1024-element typed array. `IArray::get` returns `None` for typed arrays;
     // RedisJSON reads elements through `ArraySliceRef` (`as_slice`), so that is what is timed. The
@@ -305,6 +321,25 @@ fn bench_mutation(c: &mut Criterion) {
             black_box(biz_mut.remove("new_field"))
         })
     });
+    // JSON.MERGE of a 26-key patch into an object that already has every key (ivalue_manager.rs
+    // `merge()`: `map.entry(key.as_str())` then overwrite). After the first command every entry is
+    // occupied, so this times 26 occupied-entry lookups plus 26 scalar replacements; the object is
+    // mutated in place and keeps its shape (54 keys).
+    let patch_keys: Vec<String> = (b'a'..=b'z').map(|c| (c as char).to_string()).collect();
+    let mut merged = biz.clone();
+    for k in &patch_keys {
+        merged.insert(k.as_str(), IValue::from(0i64)).unwrap();
+    }
+    let mut tick = 0i64;
+    g.bench_function("merge-26-into-54-occupied", |b| {
+        b.iter(|| {
+            tick += 1;
+            for k in &patch_keys {
+                *merged.entry(k.as_str()).unwrap().or_insert(IValue::NULL) = IValue::from(tick);
+            }
+            black_box(merged.len())
+        })
+    });
     // JSON.ARRAPPEND / JSON.ARRPOP on the heterogeneous businesses array (10 objects)
     // Both pairs restore the array, so they mutate one array in place (same reasoning as above: a
     // setup clone of 10 objects costs ~10 µs against a ~60 ns routine).
@@ -331,8 +366,7 @@ fn bench_mutation(c: &mut Criterion) {
             black_box(arr_front.remove(0))
         })
     });
-    // JSON.ARRTRIM: truncate a 1024-element typed array to half. The setup clone and the drop of the
-    // returned array are outside the timed section (`iter_batched` drops its outputs after timing).
+    // JSON.ARRTRIM: truncate a 1024-element typed array to half
     let ints = parse(&int_array_json(1024), None).into_array().unwrap();
     g.bench_function("array-trim-typed-1024-to-512", |b| {
         b.iter_batched(
@@ -455,10 +489,8 @@ fn bench_clone_drop(c: &mut Criterion) {
         .filter(|(n, _)| matches!(*n, "yelp" | "gmaps-place" | "floats-1024"))
     {
         let doc = parse(&text, None);
-        // The clone is handed back to criterion and dropped outside the timed section: RedisJSON stores the
-        // clone on its target, and the destructor is the `drop` benchmark's job.
         g.bench_with_input(BenchmarkId::new("clone", name), &doc, |b, d| {
-            b.iter_with_large_drop(|| d.clone())
+            b.iter(|| black_box(d.clone()))
         });
         // Drop a freshly parsed value, not a clone: the clone implementation must not decide the
         // cache state the drop runs in (harness r4). Parsing in setup is slower but untimed.
@@ -482,14 +514,15 @@ fn bench_cbor(c: &mut Criterion) {
     let plain = encode(&doc);
     let compressed = encode_compressed(&doc);
     g.bench_function("encode-yelp", |b| b.iter(|| black_box(encode(&doc))));
+    // Decoded values are dropped outside the timed section (RDB load keeps them).
     g.bench_function("decode-yelp", |b| {
-        b.iter(|| black_box(decode(&plain).unwrap()))
+        b.iter_with_large_drop(|| decode(&plain).unwrap())
     });
     g.bench_function("encode-compressed-yelp", |b| {
         b.iter(|| black_box(encode_compressed(&doc)))
     });
     g.bench_function("decode-compressed-yelp", |b| {
-        b.iter(|| black_box(decode_compressed(&compressed).unwrap()))
+        b.iter_with_large_drop(|| decode_compressed(&compressed).unwrap())
     });
     // RDB stream: one encoder per save, defining strings once (`local_config` with budget on).
     let cfg = StreamEncoderConfig {
