@@ -364,3 +364,10 @@ still constant time.
 The hash values are not stored, since the keys (`IString`s) are interned
 and so the hash function can be a very fast operation that only looks
 at the pointer value.
+
+## Benchmarks
+
+`benches/` holds criterion microbenchmarks for the operations RedisJSON performs on `ijson` (parse, serialise,
+lookup, mutation, typed arrays, clone/drop, CBOR, memory accounting) and a deterministic memory referee. See
+[benches/README.md](benches/README.md) for what each group measures, how to compare two builds, and the
+conventions automated agents are expected to follow when proposing changes.
