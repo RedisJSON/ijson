@@ -40,7 +40,17 @@ thiserror = "2.0.18"
 zstd = "0.13"
 
 [dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 mockalloc = "0.1.2"
 ctor = "0.1.16"
 rand = "0.8.4"
 zstd = "0.13"
+
+# Benchmark referee for the RedisJSON call paths (json-agent-workspace docs/USAGE-PATTERN.md).
+[[bench]]
+name = "callpaths"
+harness = false
+
+[[bench]]
+name = "memory"
+harness = false
