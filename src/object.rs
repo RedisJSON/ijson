@@ -1003,8 +1003,10 @@ impl IObject {
                         key: kvp.key.clone(),
                         value: kvp.value.clone(),
                     });
+                    // Publish each item as it lands: if a nested clone panics, `res` drops the
+                    // items written so far instead of leaking them (and their string refcounts).
+                    dst.set_len(i as u32 + 1);
                 }
-                dst.set_len(len);
                 if has_table(len) {
                     std::ptr::copy_nonoverlapping(
                         src.table.as_ptr(),
