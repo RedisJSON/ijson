@@ -1385,6 +1385,215 @@ mod tests {
         parsed
     }
 
+    /// A deserializer that drives one chosen `Visitor` method. serde_json only ever calls
+    /// `visit_{bool,i64,u64,f64,str,unit,seq,map}`; this reaches the element seed's other arms
+    /// (owned strings, bytes, options, unsupported types) the way another serde front end would.
+    #[derive(Clone, Debug)]
+    enum Probe {
+        Str(&'static str),
+        String(String),
+        Bytes(Vec<u8>),
+        ByteBuf(Vec<u8>),
+        None,
+        Some(Box<Probe>),
+        Unit,
+        I128(i128),
+        Bool(bool),
+        I64(i64),
+        U64(u64),
+        F64(f64),
+        Seq(Vec<Probe>),
+        Map(Vec<(&'static str, Probe)>),
+    }
+
+    impl<'de> Deserializer<'de> for Probe {
+        type Error = serde::de::value::Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Self::Error> {
+            use serde::de::value::{MapDeserializer, SeqDeserializer};
+            match self {
+                Probe::Str(s) => visitor.visit_str(s),
+                Probe::String(s) => visitor.visit_string(s),
+                Probe::Bytes(b) => visitor.visit_bytes(&b),
+                Probe::ByteBuf(b) => visitor.visit_byte_buf(b),
+                Probe::None => visitor.visit_none(),
+                Probe::Some(inner) => visitor.visit_some(*inner),
+                Probe::Unit => visitor.visit_unit(),
+                Probe::I128(v) => visitor.visit_i128(v),
+                Probe::Bool(v) => visitor.visit_bool(v),
+                Probe::I64(v) => visitor.visit_i64(v),
+                Probe::U64(v) => visitor.visit_u64(v),
+                Probe::F64(v) => visitor.visit_f64(v),
+                Probe::Seq(items) => visitor.visit_seq(SeqDeserializer::new(items.into_iter())),
+                Probe::Map(items) => visitor.visit_map(MapDeserializer::new(items.into_iter())),
+            }
+        }
+
+        forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+            option unit unit_struct newtype_struct seq tuple tuple_struct map struct enum
+            identifier ignored_any
+        }
+    }
+
+    impl<'de> IntoDeserializer<'de, serde::de::value::Error> for Probe {
+        type Deserializer = Self;
+        fn into_deserializer(self) -> Self {
+            self
+        }
+    }
+
+    fn parse_probe(probe: Probe) -> Result<IValue, serde::de::value::Error> {
+        IValueDeserSeed::new(None).deserialize(probe)
+    }
+
+    /// Every element arm of the array element seed agrees with `ValueVisitor` (the path a
+    /// top-level value or an object member takes): the same value, or the same rejection.
+    #[test]
+    fn array_elem_seed_arms_agree_with_value_visitor() {
+        let cases: Vec<(Probe, Option<IValue>)> = vec![
+            (Probe::Str("borrowed"), Some("borrowed".into())),
+            (
+                Probe::String("owned string".to_owned()),
+                Some("owned string".into()),
+            ),
+            (Probe::String(String::new()), Some("".into())),
+            // `ValueVisitor` accepts no byte strings (serde's default rejects them), and the
+            // element seed defers to it, so both reject even valid UTF-8 bytes.
+            (Probe::Bytes(b"bytes as text".to_vec()), None),
+            (Probe::Bytes(vec![0xff, 0xfe]), None),
+            (Probe::ByteBuf(b"buffer as text".to_vec()), None),
+            (Probe::ByteBuf(vec![0xc0]), None),
+            (Probe::None, Some(IValue::NULL)),
+            (Probe::Unit, Some(IValue::NULL)),
+            (Probe::Some(Box::new(Probe::F64(0.1))), Some(0.1.into())),
+            (
+                Probe::Some(Box::new(Probe::Str("inner"))),
+                Some("inner".into()),
+            ),
+            (Probe::Some(Box::new(Probe::None)), Some(IValue::NULL)),
+            (Probe::Some(Box::new(Probe::I128(1))), None),
+            (Probe::I128(i128::MAX), None),
+            (Probe::I128(-1), None),
+            (Probe::Bool(true), Some(IValue::TRUE)),
+            (Probe::I64(i64::MIN), Some(i64::MIN.into())),
+            (Probe::U64(u64::MAX), Some(u64::MAX.into())),
+            (Probe::F64(2.5), Some(2.5.into())),
+            // Non-finite floats are not numbers in ijson: `IValue::from(f64)` gives null, so
+            // the direct write refuses them and the boxed path stores null.
+            (Probe::F64(f64::NAN), Some(IValue::NULL)),
+            (Probe::F64(f64::INFINITY), Some(IValue::NULL)),
+            (Probe::F64(f64::NEG_INFINITY), Some(IValue::NULL)),
+            (
+                Probe::Seq(vec![Probe::F64(0.1), Probe::F64(0.2)]),
+                Some(crate::ijson!([0.1, 0.2])),
+            ),
+            (
+                Probe::Map(vec![("k", Probe::F64(0.1)), ("k", Probe::Unit)]),
+                Some(crate::ijson!({ "k": null })),
+            ),
+        ];
+        assert_eq!(IValue::from(f64::NAN), IValue::NULL);
+        assert_eq!(IValue::from(f64::INFINITY), IValue::NULL);
+        for (probe, expected) in cases {
+            let top = parse_probe(probe.clone());
+            // Wrapped in an array (so the element seed is used), after two floats that put the
+            // array into `F64` storage: the first boxed, the second written directly.
+            let array = parse_probe(Probe::Seq(vec![
+                Probe::F64(0.1),
+                Probe::F64(0.2),
+                probe.clone(),
+            ]));
+            match expected {
+                Some(value) => {
+                    assert_eq!(top.as_ref().unwrap(), &value, "{probe:?}");
+                    let array = array.unwrap_or_else(|e| panic!("{probe:?}: {e}"));
+                    let arr = array.as_array().unwrap();
+                    assert_eq!(arr.len(), 3);
+                    // Element for element (typed storage has no `get`, so compare the text).
+                    assert_eq!(
+                        serde_json::to_string(&array).unwrap(),
+                        format!("[0.1,0.2,{}]", serde_json::to_string(&value).unwrap()),
+                        "{probe:?}"
+                    );
+                    let mut pushed = IArray::new();
+                    pushed.push(IValue::from(0.1)).unwrap();
+                    pushed.push(IValue::from(0.2)).unwrap();
+                    pushed.push(value.clone()).unwrap();
+                    assert_eq!(*arr, pushed, "{probe:?}");
+                    // Only another float keeps the `F64` storage (written directly, or boxed
+                    // through `visit_some`); everything else promotes to heterogeneous.
+                    let float = match &probe {
+                        Probe::F64(f) => f.is_finite(),
+                        Probe::Some(inner) => matches!(**inner, Probe::F64(f) if f.is_finite()),
+                        _ => false,
+                    };
+                    assert_eq!(
+                        arr.as_slice().type_tag() == crate::array::ArrayTag::F64,
+                        float,
+                        "{probe:?}: {:?}",
+                        arr.as_slice().type_tag()
+                    );
+                }
+                None => {
+                    let top_err = top.unwrap_err().to_string();
+                    let array_err = array.unwrap_err().to_string();
+                    assert_eq!(top_err, array_err, "{probe:?}");
+                    if matches!(
+                        probe,
+                        Probe::I128(_) | Probe::Some(_) | Probe::Bytes(_) | Probe::ByteBuf(_)
+                    ) {
+                        // serde's default `visit_i128`/`visit_bytes`/`visit_byte_buf` reject
+                        // through `expecting`.
+                        assert!(
+                            array_err.contains("expected any valid JSON value"),
+                            "{probe:?}: {array_err}"
+                        );
+                    }
+                }
+            }
+        }
+        // A float that the element seed writes directly is followed by every other arm in one
+        // array, and the result is the same heterogeneous array the push path builds.
+        let mixed = parse_probe(Probe::Seq(vec![
+            Probe::F64(0.1),
+            Probe::F64(0.2),
+            Probe::String("owned".to_owned()),
+            Probe::None,
+            Probe::Some(Box::new(Probe::F64(0.3))),
+            Probe::Unit,
+            Probe::Bool(false),
+            Probe::I64(-7),
+            Probe::U64(u64::MAX),
+            Probe::Seq(vec![Probe::F64(0.4), Probe::F64(0.5)]),
+            Probe::Map(vec![("a", Probe::Some(Box::new(Probe::Str("b"))))]),
+            Probe::F64(0.6),
+        ]))
+        .unwrap();
+        assert_eq!(
+            mixed,
+            crate::ijson!([
+                0.1, 0.2, "owned", null, 0.3, null, false, -7, u64::MAX,
+                [0.4, 0.5], { "a": "b" }, 0.6
+            ])
+        );
+        assert_eq!(
+            serde_json::to_string(&mixed).unwrap(),
+            r#"[0.1,0.2,"owned",null,0.3,null,false,-7,18446744073709551615,[0.4,0.5],{"a":"b"},0.6]"#
+        );
+        // Byte strings in the middle of an `F64` array are rejected with the type error of the
+        // top-level visitor, whatever their content.
+        for bad in [Probe::Bytes(vec![0x80]), Probe::ByteBuf(b"text".to_vec())] {
+            let err = parse_probe(Probe::Seq(vec![Probe::F64(0.1), Probe::F64(0.2), bad]))
+                .unwrap_err()
+                .to_string();
+            assert_eq!(
+                err,
+                "invalid type: byte array, expected any valid JSON value"
+            );
+        }
+    }
+
     #[test]
     fn test_array_elem_seed_matches_push_path() {
         let all_floats = parsed_equals_pushed("[1.5,-2.25,1e300,0.000001,3.0,-0.0,1e-300]");
