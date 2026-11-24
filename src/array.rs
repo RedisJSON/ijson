@@ -2216,6 +2216,55 @@ mod tests {
     }
 
     #[test]
+    fn test_push_f64_direct_states() {
+        // Static / empty: refused, nothing changes.
+        let mut arr = IArray::new();
+        assert!(!arr.push_f64_direct(1.5));
+        assert_eq!(arr.len(), 0);
+        let mut arr = IArray::with_capacity(4).unwrap();
+        assert!(!arr.push_f64_direct(1.5));
+        assert_eq!(arr.len(), 0);
+        // Other tag: refused.
+        let mut arr = IArray::new();
+        arr.push(IValue::from(1i64)).unwrap();
+        assert!(!arr.push_f64_direct(1.5));
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr.header().type_tag(), ArrayTag::I8);
+        // A float that f16 represents exactly tags the array F16: refused, as the boxed path would
+        // also have kept the narrow tag until a wider value arrives.
+        let mut arr = IArray::new();
+        arr.push(IValue::from(0.5f64)).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F16);
+        assert!(!arr.push_f64_direct(1.5));
+        assert_eq!(arr.len(), 1);
+        // F64-tagged and non-empty: appended, including across reallocations.
+        let mut arr = IArray::new();
+        arr.push(IValue::from(0.1f64)).unwrap();
+        assert_eq!(arr.header().type_tag(), ArrayTag::F64);
+        for i in 1..40 {
+            assert!(arr.push_f64_direct(i as f64 + 0.1));
+        }
+        assert_eq!(arr.len(), 40);
+        assert_eq!(arr.header().type_tag(), ArrayTag::F64);
+        match arr.as_slice() {
+            ArraySliceRef::F64(s) => {
+                assert!(s.iter().enumerate().all(|(i, v)| *v == i as f64 + 0.1))
+            }
+            other => panic!("expected F64 storage, got {other:?}"),
+        }
+        // Non-finite: refused, array untouched.
+        assert!(!arr.push_f64_direct(f64::NAN));
+        assert!(!arr.push_f64_direct(f64::INFINITY));
+        assert_eq!(arr.len(), 40);
+        // Heterogeneous array: refused (the boxed path keeps it heterogeneous).
+        let mut arr = IArray::new();
+        arr.push(IValue::from("x")).unwrap();
+        arr.push(IValue::from(1.5f64)).unwrap();
+        assert!(!arr.push_f64_direct(2.5));
+        assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
     fn test_typed_slice() {
         let hetero_array =
             IArray::try_from(vec![IValue::NULL, IValue::TRUE, IValue::FALSE]).unwrap_or_default();

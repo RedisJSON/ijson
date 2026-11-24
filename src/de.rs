@@ -1352,6 +1352,120 @@ mod tests {
         }
     }
 
+    /// Parse each array through the element seed and compare with the same array built by boxing
+    /// every element and calling `IArray::push`, the path the referee's loop took for every element:
+    /// identical values, tags, serialisation and equality.
+    fn parsed_equals_pushed(json: &str) -> IValue {
+        let parsed = IValueDeserSeed::new(None)
+            .deserialize(&mut serde_json::Deserializer::from_str(json))
+            .unwrap();
+        let compact = IValueDeserSeed::new(None)
+            .deserialize_compact_objects(&mut serde_json::Deserializer::from_str(json))
+            .unwrap();
+        let elements: Vec<serde_json::Value> = serde_json::from_str(json).unwrap();
+        let mut pushed = IArray::new();
+        for e in elements {
+            let v: IValue = serde_json::from_value(e).unwrap();
+            pushed.push(v).unwrap();
+        }
+        let parsed_arr = parsed.as_array().unwrap();
+        assert_eq!(
+            parsed_arr.as_slice().type_tag(),
+            pushed.as_slice().type_tag(),
+            "{json}"
+        );
+        assert_eq!(parsed_arr.len(), pushed.len(), "{json}");
+        assert_eq!(*parsed_arr, pushed, "{json}");
+        assert_eq!(parsed, compact, "{json}");
+        assert_eq!(
+            serde_json::to_string(&parsed).unwrap(),
+            serde_json::to_string(&pushed).unwrap(),
+            "{json}"
+        );
+        parsed
+    }
+
+    #[test]
+    fn test_array_elem_seed_matches_push_path() {
+        let all_floats = parsed_equals_pushed("[1.5,-2.25,1e300,0.000001,3.0,-0.0,1e-300]");
+        let arr = all_floats.as_array().unwrap();
+        match arr.as_slice() {
+            ArraySliceRef::F64(s) => {
+                assert_eq!(s, &[1.5, -2.25, 1e300, 0.000001, 3.0, -0.0, 1e-300]);
+                assert!(s[5].is_sign_negative());
+            }
+            other => panic!("expected F64 storage, got {other:?}"),
+        }
+        // Retag / promotion after direct pushes: the fallback path still owns the rules.
+        parsed_equals_pushed("[1.5,2.5,3]");
+        parsed_equals_pushed("[1.5,2.5,\"x\"]");
+        parsed_equals_pushed("[1.5,2.5,null]");
+        parsed_equals_pushed("[1.5,2.5,true,false]");
+        parsed_equals_pushed("[1.5,[2.5,3.5],{\"a\":1.5}]");
+        parsed_equals_pushed("[[1.5,2.5],[3.5]]");
+        parsed_equals_pushed("[1.5,2.5,[],{}]");
+        // Non-float arrays go through the unchanged push path.
+        parsed_equals_pushed("[-1,-2,300,-70000]");
+        parsed_equals_pushed("[1,2,3]");
+        parsed_equals_pushed("[18446744073709551615,1]");
+        parsed_equals_pushed("[\"a\",\"bb\",\"a long string that is interned\"]");
+        parsed_equals_pushed("[null,null]");
+        parsed_equals_pushed("[]");
+        parsed_equals_pushed("[3,1.5]");
+        parsed_equals_pushed("[1.5,2,2.5]");
+        // Exactly-representable floats keep the narrow F16/F32 tags (no direct push); a value that
+        // needs f64 promotes the array and every later float takes the direct path.
+        parsed_equals_pushed("[1.5,2.5,0.1,2.5,1e300]");
+        parsed_equals_pushed("[0.1,0.2,0.3,1.5]");
+        parsed_equals_pushed("[1.5,0.1,\"x\",0.2]");
+    }
+
+    #[test]
+    fn test_float_array_parse_boxes_only_the_first_element() {
+        let json = format!(
+            "[{}]",
+            (0..256)
+                .map(|i| format!("{}.1", i))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let expected: Vec<f64> = (0..256)
+            .map(|i| format!("{}.1", i).parse().unwrap())
+            .collect();
+        let allocations = mockalloc::record_allocs(|| {
+            let value = IValueDeserSeed::new(None)
+                .deserialize_compact_objects(&mut serde_json::Deserializer::from_str(&json))
+                .unwrap();
+            let arr = value.as_array().unwrap();
+            assert_eq!(arr.as_slice().type_tag(), crate::array::ArrayTag::F64);
+            assert_eq!(arr.len(), 256);
+            match arr.as_slice() {
+                ArraySliceRef::F64(s) => assert_eq!(s, &expected[..]),
+                other => panic!("expected F64 storage, got {other:?}"),
+            }
+        });
+        // One box for the first element (the array is still empty and untagged), the array's
+        // own allocation and its growth steps; the referee boxed all 256 elements.
+        assert!(
+            allocations.num_allocs() < 16,
+            "{} allocations",
+            allocations.num_allocs()
+        );
+        allocations.result().unwrap();
+    }
+
+    #[test]
+    fn test_fpha_array_keeps_forced_type_with_element_seed_absent() {
+        // FPHA arrays do not use the element seed: an f64 literal that fits f32 is stored as f32.
+        let json = r#"[1.5, 2.5, 3.5, 4.5, 5.5]"#;
+        let seed = IValueDeserSeed::new(Some(FPHAConfig::new_with_type(FloatType::F32)));
+        let value = seed
+            .deserialize(&mut serde_json::Deserializer::from_str(json))
+            .unwrap();
+        let arr = value.as_array().unwrap();
+        assert!(matches!(arr.as_slice(), ArraySliceRef::F32(s) if s == [1.5, 2.5, 3.5, 4.5, 5.5]));
+    }
+
     #[test]
     fn test_deserialize_with_f64_fp() {
         let json = r#"[1.5, 2.5, 3.5]"#;
