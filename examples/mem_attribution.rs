@@ -92,7 +92,9 @@ fn main() {
         let mut slot: Option<IValue> = None;
         let info = record_allocs(|| {
             let mut de = serde_json::Deserializer::from_str(&text);
-            let v = IValueDeserSeed::new(None).deserialize_compact_objects(&mut de).unwrap();
+            let v = IValueDeserSeed::new(None)
+                .deserialize_compact_objects(&mut de)
+                .unwrap();
             de.end().unwrap();
             slot = Some(v);
         });
@@ -101,7 +103,11 @@ fn main() {
         walk(&doc, &mut s);
         let retained = info.mem_leaked();
         let acc = doc.mem_allocated();
-        let name = std::path::Path::new(&path).file_name().unwrap().to_string_lossy().into_owned();
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         println!(
             "| {} | {} | {} | {:.0} | {:.0} | {} ({}/{}) | {} ({}/{}, {} typed) | {} | {} ({}) | {} ({}) |",
             name,

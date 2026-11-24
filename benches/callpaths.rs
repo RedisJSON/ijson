@@ -30,12 +30,30 @@ use serde::Serialize;
 /// deterministic synthetic shapes that RedisJSON's typed-array code paths depend on.
 fn fixtures() -> Vec<(&'static str, String)> {
     vec![
-        ("yelp", include_str!("fixtures/pass-jsonsl-yelp.json").to_string()),
-        ("yahoo2", include_str!("fixtures/pass-jsonsl-yahoo2.json").to_string()),
-        ("gmaps-place", include_str!("fixtures/api_replies_q5_gmaps_place.json").to_string()),
-        ("int-arrays", include_str!("fixtures/homogeneous_integer_arrays.json").to_string()),
-        ("parser-0000", include_str!("fixtures/parser-0000.json").to_string()),
-        ("pass-100", include_str!("fixtures/pass-100.json").to_string()),
+        (
+            "yelp",
+            include_str!("fixtures/pass-jsonsl-yelp.json").to_string(),
+        ),
+        (
+            "yahoo2",
+            include_str!("fixtures/pass-jsonsl-yahoo2.json").to_string(),
+        ),
+        (
+            "gmaps-place",
+            include_str!("fixtures/api_replies_q5_gmaps_place.json").to_string(),
+        ),
+        (
+            "int-arrays",
+            include_str!("fixtures/homogeneous_integer_arrays.json").to_string(),
+        ),
+        (
+            "parser-0000",
+            include_str!("fixtures/parser-0000.json").to_string(),
+        ),
+        (
+            "pass-100",
+            include_str!("fixtures/pass-100.json").to_string(),
+        ),
         ("floats-1024", float_array_json(1024)),
         ("ints-1024", int_array_json(1024)),
     ]
@@ -45,7 +63,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 11
     }
 }
@@ -60,7 +81,9 @@ fn float_array_json(n: usize) -> String {
 
 fn int_array_json(n: usize) -> String {
     let mut g = Lcg(0x1d);
-    let items: Vec<String> = (0..n).map(|_| ((g.next() % 200_000) as i64 - 100_000).to_string()).collect();
+    let items: Vec<String> = (0..n)
+        .map(|_| ((g.next() % 200_000) as i64 - 100_000).to_string())
+        .collect();
     format!("[{}]", items.join(","))
 }
 
@@ -68,8 +91,10 @@ fn int_array_json(n: usize) -> String {
 fn wide_object() -> IObject {
     let mut o = IObject::new();
     for i in 0..64 {
-        o.insert(format!("k{i:02}"), IValue::from(i as i64)).unwrap();
-        o.insert(format!("long_key_name_{i:03}"), IValue::from(i as i64)).unwrap();
+        o.insert(format!("k{i:02}"), IValue::from(i as i64))
+            .unwrap();
+        o.insert(format!("long_key_name_{i:03}"), IValue::from(i as i64))
+            .unwrap();
     }
     o
 }
@@ -142,9 +167,11 @@ fn bench_parse(c: &mut Criterion) {
     // JSON.SET with a float type hint (FPHA): the typed-array detection path with a forced type.
     let floats = float_array_json(1024);
     g.throughput(Throughput::Bytes(floats.len() as u64));
-    g.bench_with_input(BenchmarkId::new("fpha-f32", "floats-1024"), &floats, |b, t| {
-        b.iter(|| black_box(parse(t, Some(FloatType::F32))))
-    });
+    g.bench_with_input(
+        BenchmarkId::new("fpha-f32", "floats-1024"),
+        &floats,
+        |b, t| b.iter(|| black_box(parse(t, Some(FloatType::F32)))),
+    );
     g.finish();
 }
 
@@ -196,7 +223,9 @@ fn bench_lookup(c: &mut Criterion) {
         })
     });
     let wide = wide_object();
-    g.bench_function("wide-128-hit-short-key", |b| b.iter(|| black_box(wide.get("k37"))));
+    g.bench_function("wide-128-hit-short-key", |b| {
+        b.iter(|| black_box(wide.get("k37")))
+    });
     g.bench_function("wide-128-hit-long-key", |b| {
         b.iter(|| black_box(wide.get("long_key_name_037")))
     });
@@ -216,8 +245,12 @@ fn bench_lookup(c: &mut Criterion) {
         .unwrap()
         .clone();
     let biz = biz.into_object().unwrap();
-    g.bench_function("business-22-hit", |b| b.iter(|| black_box(biz.get("review_count"))));
-    g.bench_function("business-22-miss", |b| b.iter(|| black_box(biz.get("not_there"))));
+    g.bench_function("business-22-hit", |b| {
+        b.iter(|| black_box(biz.get("review_count")))
+    });
+    g.bench_function("business-22-miss", |b| {
+        b.iter(|| black_box(biz.get("not_there")))
+    });
     // Array index on a 1024-element typed array. `IArray::get` returns `None` for typed arrays;
     // RedisJSON reads elements through `ArraySliceRef` (`as_slice`), so that is what is timed. The
     // indices go through `black_box` so the reads cannot be hoisted out of the loop. One read is
@@ -275,7 +308,14 @@ fn bench_mutation(c: &mut Criterion) {
     // JSON.ARRAPPEND / JSON.ARRPOP on the heterogeneous businesses array (10 objects)
     // Both pairs restore the array, so they mutate one array in place (same reasoning as above: a
     // setup clone of 10 objects costs ~10 µs against a ~60 ns routine).
-    let businesses = yelp.as_object().unwrap().get("businesses").unwrap().clone().into_array().unwrap();
+    let businesses = yelp
+        .as_object()
+        .unwrap()
+        .get("businesses")
+        .unwrap()
+        .clone()
+        .into_array()
+        .unwrap();
     let mut arr_push = businesses.clone();
     g.bench_function("array-push-pop-hetero", |b| {
         b.iter(|| {
@@ -291,7 +331,8 @@ fn bench_mutation(c: &mut Criterion) {
             black_box(arr_front.remove(0))
         })
     });
-    // JSON.ARRTRIM: truncate a 1024-element typed array to half
+    // JSON.ARRTRIM: truncate a 1024-element typed array to half. The setup clone and the drop of the
+    // returned array are outside the timed section (`iter_batched` drops its outputs after timing).
     let ints = parse(&int_array_json(1024), None).into_array().unwrap();
     g.bench_function("array-trim-typed-1024-to-512", |b| {
         b.iter_batched(
@@ -327,7 +368,13 @@ fn bench_mutation(c: &mut Criterion) {
     // JSON.STRAPPEND: build the appended string from the field's current value and re-intern it; the
     // field is rewritten from a fixed base each time so the string does not grow across iterations.
     let mut biz_str = biz.clone();
-    let city_base = biz_str.get("city").unwrap().as_string().unwrap().as_str().to_owned();
+    let city_base = biz_str
+        .get("city")
+        .unwrap()
+        .as_string()
+        .unwrap()
+        .as_str()
+        .to_owned();
     g.bench_function("str-append", |b| {
         b.iter(|| {
             let v = biz_str.get_mut("city").unwrap();
@@ -348,9 +395,13 @@ fn bench_typed_arrays(c: &mut Criterion) {
     init();
     let mut g = c.benchmark_group("typed");
     let mut lcg = Lcg(7);
-    let floats: Vec<f64> = (0..1024).map(|_| (lcg.next() % 1_000_000) as f64 / 7.0).collect();
+    let floats: Vec<f64> = (0..1024)
+        .map(|_| (lcg.next() % 1_000_000) as f64 / 7.0)
+        .collect();
     // 16 K elements: at 1 K the bulk copy takes ~100 ns and allocator jitter dominates the spread.
-    let ints: Vec<i64> = (0..16384).map(|_| (lcg.next() % 1_000_000) as i64 - 500_000).collect();
+    let ints: Vec<i64> = (0..16384)
+        .map(|_| (lcg.next() % 1_000_000) as i64 - 500_000)
+        .collect();
 
     g.bench_function("build-f64-push-1024", |b| {
         b.iter(|| {
@@ -369,7 +420,10 @@ fn bench_typed_arrays(c: &mut Criterion) {
         })
     });
     let typed = parse(&float_array_json(1024), None).into_array().unwrap();
-    assert!(typed.as_slice().is_typed(), "fixture must parse as a typed array");
+    assert!(
+        typed.as_slice().is_typed(),
+        "fixture must parse as a typed array"
+    );
     g.bench_function("retag-on-string-push-1024", |b| {
         b.iter_batched(
             || typed.clone(),
@@ -396,9 +450,16 @@ fn bench_typed_arrays(c: &mut Criterion) {
 fn bench_clone_drop(c: &mut Criterion) {
     init();
     let mut g = c.benchmark_group("clone-drop");
-    for (name, text) in fixtures().into_iter().filter(|(n, _)| matches!(*n, "yelp" | "gmaps-place" | "floats-1024")) {
+    for (name, text) in fixtures()
+        .into_iter()
+        .filter(|(n, _)| matches!(*n, "yelp" | "gmaps-place" | "floats-1024"))
+    {
         let doc = parse(&text, None);
-        g.bench_with_input(BenchmarkId::new("clone", name), &doc, |b, d| b.iter(|| black_box(d.clone())));
+        // The clone is handed back to criterion and dropped outside the timed section: RedisJSON stores the
+        // clone on its target, and the destructor is the `drop` benchmark's job.
+        g.bench_with_input(BenchmarkId::new("clone", name), &doc, |b, d| {
+            b.iter_with_large_drop(|| d.clone())
+        });
         // Drop a freshly parsed value, not a clone: the clone implementation must not decide the
         // cache state the drop runs in (harness r4). Parsing in setup is slower but untimed.
         g.bench_with_input(BenchmarkId::new("drop", name), &text, |b, t| {
@@ -421,13 +482,19 @@ fn bench_cbor(c: &mut Criterion) {
     let plain = encode(&doc);
     let compressed = encode_compressed(&doc);
     g.bench_function("encode-yelp", |b| b.iter(|| black_box(encode(&doc))));
-    g.bench_function("decode-yelp", |b| b.iter(|| black_box(decode(&plain).unwrap())));
-    g.bench_function("encode-compressed-yelp", |b| b.iter(|| black_box(encode_compressed(&doc))));
+    g.bench_function("decode-yelp", |b| {
+        b.iter(|| black_box(decode(&plain).unwrap()))
+    });
+    g.bench_function("encode-compressed-yelp", |b| {
+        b.iter(|| black_box(encode_compressed(&doc)))
+    });
     g.bench_function("decode-compressed-yelp", |b| {
         b.iter(|| black_box(decode_compressed(&compressed).unwrap()))
     });
     // RDB stream: one encoder per save, defining strings once (`local_config` with budget on).
-    let cfg = StreamEncoderConfig { table_budget_bytes: usize::MAX };
+    let cfg = StreamEncoderConfig {
+        table_budget_bytes: usize::MAX,
+    };
     g.bench_function("stream-encode-yelp-fresh-encoder", |b| {
         b.iter_batched(
             || (StreamEncoder::new(cfg), Vec::with_capacity(64 * 1024)),
@@ -459,7 +526,9 @@ fn bench_memory_defrag(c: &mut Criterion) {
     init();
     let mut g = c.benchmark_group("mem-defrag");
     let doc = parse(include_str!("fixtures/pass-jsonsl-yelp.json"), None);
-    g.bench_function("mem_allocated-yelp", |b| b.iter(|| black_box(doc.mem_allocated())));
+    g.bench_function("mem_allocated-yelp", |b| {
+        b.iter(|| black_box(doc.mem_allocated()))
+    });
     g.bench_function("defrag-copy-yelp", |b| {
         b.iter_batched(
             || doc.clone(),

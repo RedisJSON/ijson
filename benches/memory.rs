@@ -21,12 +21,30 @@ static ALLOCATOR: Mockalloc<System> = Mockalloc(System);
 
 fn fixtures() -> Vec<(&'static str, String)> {
     vec![
-        ("yelp", include_str!("fixtures/pass-jsonsl-yelp.json").to_string()),
-        ("yahoo2", include_str!("fixtures/pass-jsonsl-yahoo2.json").to_string()),
-        ("gmaps-place", include_str!("fixtures/api_replies_q5_gmaps_place.json").to_string()),
-        ("int-arrays", include_str!("fixtures/homogeneous_integer_arrays.json").to_string()),
-        ("parser-0000", include_str!("fixtures/parser-0000.json").to_string()),
-        ("pass-100", include_str!("fixtures/pass-100.json").to_string()),
+        (
+            "yelp",
+            include_str!("fixtures/pass-jsonsl-yelp.json").to_string(),
+        ),
+        (
+            "yahoo2",
+            include_str!("fixtures/pass-jsonsl-yahoo2.json").to_string(),
+        ),
+        (
+            "gmaps-place",
+            include_str!("fixtures/api_replies_q5_gmaps_place.json").to_string(),
+        ),
+        (
+            "int-arrays",
+            include_str!("fixtures/homogeneous_integer_arrays.json").to_string(),
+        ),
+        (
+            "parser-0000",
+            include_str!("fixtures/parser-0000.json").to_string(),
+        ),
+        (
+            "pass-100",
+            include_str!("fixtures/pass-100.json").to_string(),
+        ),
         ("floats-1024", float_array_json(1024)),
         ("ints-1024", int_array_json(1024)),
     ]
@@ -35,7 +53,10 @@ fn fixtures() -> Vec<(&'static str, String)> {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 11
     }
 }
@@ -48,7 +69,9 @@ fn float_array_json(n: usize) -> String {
 }
 fn int_array_json(n: usize) -> String {
     let mut g = Lcg(0x1d);
-    let items: Vec<String> = (0..n).map(|_| ((g.next() % 200_000) as i64 - 100_000).to_string()).collect();
+    let items: Vec<String> = (0..n)
+        .map(|_| ((g.next() % 200_000) as i64 - 100_000).to_string())
+        .collect();
     format!("[{}]", items.join(","))
 }
 
@@ -101,7 +124,9 @@ fn main() {
         let (_out, s) = measure(|| serde_json::to_vec(&doc).unwrap());
         let cbor = encode(&doc);
         let cborz = encode_compressed(&doc);
-        let mut enc = StreamEncoder::new(StreamEncoderConfig { table_budget_bytes: usize::MAX });
+        let mut enc = StreamEncoder::new(StreamEncoderConfig {
+            table_budget_bytes: usize::MAX,
+        });
         let mut stream = Vec::new();
         enc.encode_into(&mut stream, &doc);
         let (_decoded, d) = measure(|| decode(&cbor).unwrap());
@@ -137,7 +162,14 @@ fn main() {
             size_of: Vec<(&'a str, usize)>,
             rows: &'a [Row],
         }
-        println!("{}", serde_json::to_string_pretty(&Out { size_of: sizes.to_vec(), rows: &rows }).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&Out {
+                size_of: sizes.to_vec(),
+                rows: &rows
+            })
+            .unwrap()
+        );
         return;
     }
     println!("## size_of (bytes)\n");
