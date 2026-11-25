@@ -12,7 +12,7 @@
 
 use std::alloc::{alloc, dealloc, Layout};
 use std::hint::black_box;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use ijson::{
@@ -488,6 +488,23 @@ fn bench_clone_drop(c: &mut Criterion) {
         .into_iter()
         .filter(|(n, _)| matches!(*n, "yelp" | "gmaps-place" | "floats-1024"))
     {
+        // RedisJSON frees documents it owns (an overwriting JSON.SET, JSON.DEL, expiry): the
+        // last reference to every heap string goes, so each one is unregistered from the string
+        // cache. `drop` below cannot see that cost: its batch of identical parses, and `doc`,
+        // share every interned string. Measured first, while no other copy of the fixture is
+        // alive; only the drop is timed (harness r6).
+        g.bench_with_input(BenchmarkId::new("drop-last-ref", name), &text, |b, t| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let v = parse(t, None);
+                    let t0 = Instant::now();
+                    drop(black_box(v));
+                    total += t0.elapsed();
+                }
+                total
+            })
+        });
         let doc = parse(&text, None);
         g.bench_with_input(BenchmarkId::new("clone", name), &doc, |b, d| {
             b.iter(|| black_box(d.clone()))
