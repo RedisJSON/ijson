@@ -36,6 +36,8 @@ pub mod unsafe_string;
 #[cfg(not(feature = "thread_safe"))]
 pub use unsafe_string::IString;
 
+#[cfg(test)]
+mod adversarial_tests;
 pub mod convert;
 pub mod error;
 mod thin;
