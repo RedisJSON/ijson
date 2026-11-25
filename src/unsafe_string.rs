@@ -128,19 +128,11 @@ impl CacheGuard {
         }
     }
 
-    /// Removes and returns the entry for `val` with one hash and one probe.
-    fn take_val(&mut self, val: &str) -> Option<WeakIString> {
+    /// Removes the entry for this heap copy, if the cache holds it, with one hash and one probe.
+    fn remove_copy(&mut self, copy: &ThisCopy<'_>) {
         match self {
-            CacheGuard::ThreadSafe(c_g) => c_g.take(val),
-            CacheGuard::ThreadUnsafe(c_g) => c_g.take(val),
-        }
-    }
-
-    /// Puts back an entry that `take_val` removed but that belongs to another live copy.
-    fn put_back(&mut self, entry: WeakIString) {
-        match self {
-            CacheGuard::ThreadSafe(c_g) => c_g.insert(entry),
-            CacheGuard::ThreadUnsafe(c_g) => c_g.insert(entry),
+            CacheGuard::ThreadSafe(c_g) => c_g.remove(copy),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.remove(copy),
         };
     }
 
@@ -184,6 +176,23 @@ impl Eq for WeakIString {}
 impl Hash for WeakIString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         (**self).hash(state);
+    }
+}
+
+/// Cache key for one particular heap copy: hashed like its text, so it probes the same slots
+/// as the `WeakIString` entries, but equivalent only to the entry that points at this copy.
+struct ThisCopy<'a> {
+    text: &'a str,
+    ptr: *const Header,
+}
+impl Hash for ThisCopy<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.text.hash(state);
+    }
+}
+impl hashbrown::Equivalent<WeakIString> for ThisCopy<'_> {
+    fn equivalent(&self, key: &WeakIString) -> bool {
+        std::ptr::eq(key.ptr.as_ptr(), self.ptr)
     }
 }
 
@@ -411,14 +420,12 @@ impl IString {
             let mut cache = get_cache_guard();
             if hd.rc.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) == 1 {
                 // Reference count reached zero, free the string
-                // One hash and one probe: take the entry out, and put it back in the rare case
-                // where it is not ours. While active defrag runs, the cache may already point at
-                // the newer copy of this string; that entry must stay (EXP-021).
-                if let Some(element) = cache.take_val(hd.str()) {
-                    if element.ptr.as_ptr().cast() != unsafe { self.0.ptr() } {
-                        cache.put_back(element);
-                    }
-                }
+                // One hash and one probe, matching by address: after a cache reinit (active
+                // defrag) the entry for this text may belong to a newer copy and must stay.
+                cache.remove_copy(&ThisCopy {
+                    text: hd.str(),
+                    ptr: unsafe { self.0.ptr() }.cast(),
+                });
 
                 // Shrink the cache if it is empty in tests to verify no memory leaks
                 #[cfg(test)]
