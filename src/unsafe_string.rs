@@ -851,7 +851,11 @@ mod tests {
     fn check_against_str(a_str: &str, a: &IString, b_str: &str, b: &IString) {
         assert_eq!(a == b, a_str == b_str, "{a_str:?} vs {b_str:?}");
         assert_eq!(a.cmp(b), a_str.cmp(b_str), "{a_str:?} vs {b_str:?}");
-        assert_eq!(a.partial_cmp(b), a_str.partial_cmp(b_str), "{a_str:?} vs {b_str:?}");
+        assert_eq!(
+            a.partial_cmp(b),
+            a_str.partial_cmp(b_str),
+            "{a_str:?} vs {b_str:?}"
+        );
         if a_str == b_str {
             assert_eq!(hash_of(a), hash_of(b), "{a_str:?}");
         }
@@ -860,9 +864,24 @@ mod tests {
     #[test]
     fn inline_handle_matches_reference_construction_for_every_length() {
         let samples = [
-            "a", "ab", "abc", "abcd", "abcde", "abcdef", "abcdefg", "k37", "id", "\u{e9}",
-            "\u{e9}t\u{e9}", "\u{1F980}", "\u{1F980}abc", "\u{1F525}\u{e9}", "\0\0\0",
-            "\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}", "\u{ff}\u{ff}\u{ff}", "\0a\0b\0c\0",
+            "a",
+            "ab",
+            "abc",
+            "abcd",
+            "abcde",
+            "abcdef",
+            "abcdefg",
+            "k37",
+            "id",
+            "\u{e9}",
+            "\u{e9}t\u{e9}",
+            "\u{1F980}",
+            "\u{1F980}abc",
+            "\u{1F525}\u{e9}",
+            "\0\0\0",
+            "\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}",
+            "\u{ff}\u{ff}\u{ff}",
+            "\0a\0b\0c\0",
         ];
         let heap_str = "abcdefgh";
         let heap = IString::intern(heap_str);
@@ -893,11 +912,15 @@ mod tests {
         let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut prev: Option<(String, IString)> = None;
         for _ in 0..4000 {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let len = (x >> 60) as usize % INLINE_STRING_MAX_LEN + 1;
             let mut s = String::new();
             while s.len() < len {
-                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let c = char::from_u32((x >> 40) as u32 % 0xD800).unwrap();
                 if s.len() + c.len_utf8() > len {
                     s.push((b'a' + (x >> 32) as u8 % 26) as char);
