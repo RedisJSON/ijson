@@ -1132,7 +1132,6 @@ impl IArray {
 
     /// Pushes a new item onto the back of the array with a specific floating-point type, potentially losing precision.
     /// If the item is not a number, it is pushed as is.
-    #[inline]
     pub(crate) fn push_with_fp_type(
         &mut self,
         item: impl Into<IValue>,
@@ -1203,7 +1202,6 @@ impl IArray {
     }
 
     /// Pushes a new item onto the back of the array.
-    #[inline]
     pub fn push(&mut self, item: impl Into<IValue>) -> Result<(), IJsonError> {
         let item = item.into();
         self.prepare_for_item(&item)?;
