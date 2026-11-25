@@ -586,6 +586,28 @@ fn bench_memory_defrag(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+    // RedisJSON's `defrag_start` calls `reinit_shared_string_cache()` before the cycle, so every
+    // string is re-interned into an empty cache (a fresh allocation and the cache's growth) and
+    // each old copy, at its last reference, finds the cache pointing at its replacement.
+    // `defrag-copy-yelp` above keeps the cache, so its re-intern is a hit and its old copies are
+    // still referenced by `doc`: neither cost is timed there. Here the document is unique, the
+    // cache is emptied before each defrag, and only the defrag is timed (harness r7). It runs
+    // last: once the cache is replaced, `doc`'s strings no longer have entries.
+    let text = include_str!("fixtures/pass-jsonsl-yelp.json");
+    g.bench_function("defrag-reinit-yelp", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let v = parse(text, None);
+                ijson::reinit_shared_string_cache();
+                let t0 = Instant::now();
+                let d = black_box(v.defrag(&mut CopyDefrag));
+                total += t0.elapsed();
+                drop(d);
+            }
+            total
+        })
+    });
     g.finish();
 }
 
