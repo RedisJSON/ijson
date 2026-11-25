@@ -608,6 +608,23 @@ fn bench_memory_defrag(c: &mut Criterion) {
             total
         })
     });
+    // The same cycle with the reinit inside the timed section: `defrag_start` runs once per cycle,
+    // so a change that moves work into the reinit (presizing the new cache, for example) is
+    // charged for it here and not in `defrag-reinit-yelp` (harness r8).
+    g.bench_function("defrag-cycle-yelp", |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let v = parse(text, None);
+                let t0 = Instant::now();
+                ijson::reinit_shared_string_cache();
+                let d = black_box(v.defrag(&mut CopyDefrag));
+                total += t0.elapsed();
+                drop(d);
+            }
+            total
+        })
+    });
     g.finish();
 }
 
