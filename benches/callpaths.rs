@@ -565,8 +565,12 @@ fn bench_clone_drop(c: &mut Criterion) {
             })
         });
         let doc = parse(&text, None);
+        // Only the clone is timed: `iter` would drop each clone inside the timed loop, adding the
+        // `drop` benchmark's cost to this one. Batched, the clones are dropped after each batch;
+        // `LargeInput` keeps a thousandth of a sample alive at once (`SmallInput`, which
+        // `iter_with_large_drop` uses, keeps a tenth: gigabytes of 8 KB typed-array clones).
         g.bench_with_input(BenchmarkId::new("clone", name), &doc, |b, d| {
-            b.iter(|| black_box(d.clone()))
+            b.iter_batched(|| (), |()| d.clone(), BatchSize::LargeInput)
         });
         // Drop a freshly parsed value, not a clone: the clone implementation must not decide the
         // cache state the drop runs in (harness r4). Parsing in setup is slower but untimed.
@@ -592,12 +596,17 @@ fn bench_clone_drop(c: &mut Criterion) {
             })
         });
         let docs = parse_lines(&lines);
+        // The clones are collected into a vector allocated in setup and dropped after each batch,
+        // outside the timed section.
         g.bench_with_input(BenchmarkId::new("clone", name), &docs, |b, ds| {
-            b.iter(|| {
-                for d in ds {
-                    black_box(d.clone());
-                }
-            })
+            b.iter_batched(
+                || Vec::with_capacity(ds.len()),
+                |mut out| {
+                    out.extend(ds.iter().cloned());
+                    out
+                },
+                BatchSize::SmallInput,
+            )
         });
         g.bench_with_input(BenchmarkId::new("drop", name), &lines, |b, ls| {
             b.iter_batched(
