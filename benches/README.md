@@ -89,13 +89,13 @@ of the same assets (the pinned hashes still apply).
 
 | Family | Preset | Source | Download → unpacked | Licence / privacy |
 |---|---|---|---|---|
-| `simdjson` | quick | `simdjson/simdjson-data` @ `4197c42`: jsonexamples, small, jsonchecker, minefield | 5 MB → 29 MB | no data licence stated: local measurement only |
+| `simdjson` | quick | `simdjson/simdjson-data` @ `4197c42`: jsonexamples, small, jsonchecker, minefield | 5 MB → 29 MB | no data licence stated; unmodified copy for benchmarking |
 | `extras` | quick | data files of other simdjson / Lemire repositories, pinned | 8 MB → 112 MB | as the source repositories |
-| `floatdata` | quick | `fastfloat/float-data` @ `4e8922d`, plus 768-float embedding NDJSON | 152 MB → 425 MB | no data licence stated: local measurement only |
+| `floatdata` | quick | `fastfloat/float-data` @ `4e8922d`, plus 768-float embedding NDJSON | 152 MB → 425 MB | no data licence stated; unmodified copy for benchmarking |
 | `generated` | standard | simdjson's generators (kostya, large_random, amazon, tweets, timeline, growing), fixed seed | 33 MB → 2.1 GB | derived from simdjson-data |
 | `ncbi` | standard | NCBI dbSNP RefSNP JSON, build 157 | 54 MB → 1.2 GB | public domain |
-| `gharchive` | all | GH Archive hours 2024-11-01-15 and 2024-03-13 12–19 | 549 MB → 8.3 GB | public GitHub user data (logins, commit e-mails): `all` or by name only; never commit or publish it |
-| `pison` | all | Pison (PVLDB 2021) evaluation data | 907 MB → 13 GB | no data licence stated: local measurement only |
+| `gharchive` | all | GH Archive hours 2024-11-01-15 and 2024-03-13 12–19 | 549 MB → 8.3 GB | public GitHub user data (logins, commit e-mails) as published by GH Archive: `all` or by name only; do not commit it to a repository |
+| `pison` | all | Pison (PVLDB 2021) evaluation data | 907 MB → 13 GB | no data licence stated; unmodified copy for benchmarking |
 
 Presets: `quick` 165 MB → 0.57 GB (default), `standard` 252 MB → 3.9 GB, `all` 1.7 GB → 25 GB.
 

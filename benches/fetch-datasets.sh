@@ -34,9 +34,9 @@ Families (download -> unpacked):
   pison      Pison (PVLDB 2021) evaluation data                      907 MB -> 13 GB
 
 gharchive contains public GitHub user data (logins, commit author e-mails) and is
-fetched only with 'all' or by naming it. Do not copy it into a repository or a
-published report. simdjson-data, float-data and Pison state no redistribution
-licence; use them for local measurement only.
+fetched only with 'all' or by naming it; do not commit it into a repository.
+simdjson-data, float-data and Pison state no data licence; the mirror holds
+unmodified copies for benchmarking, see each project for terms.
 
 Environment:
   IJSON_DATASETS_MIRROR  base URL of another copy of the same assets (e.g. file:///srv/mirror);
