@@ -426,7 +426,9 @@ fn bench_mutation(c: &mut Criterion) {
             black_box(arr_front.remove(0))
         })
     });
-    // JSON.ARRTRIM: truncate a 1024-element typed array to half
+    // JSON.ARRTRIM: truncate a 1024-element typed array to half. `LargeInput` keeps a thousandth
+    // of each sample's 8 KB clones alive at once (`SmallInput` keeps a tenth: gigabytes of resident
+    // memory at this routine's speed).
     let ints = parse(&int_array_json(1024), None).into_array().unwrap();
     g.bench_function("array-trim-typed-1024-to-512", |b| {
         b.iter_batched(
@@ -435,7 +437,7 @@ fn bench_mutation(c: &mut Criterion) {
                 a.truncate(512);
                 a
             },
-            BatchSize::SmallInput,
+            BatchSize::LargeInput,
         )
     });
     // JSON.NUMINCRBY on an integer field: read, add, replace (number.rs / ivalue_manager.rs)
@@ -525,6 +527,8 @@ fn bench_typed_arrays(c: &mut Criterion) {
         typed.as_slice().is_typed(),
         "fixture must parse as a typed array"
     );
+    // `LargeInput`: each output is a 1025-element heterogeneous array; `SmallInput` would keep a
+    // tenth of a sample's outputs alive at once (hundreds of MB).
     g.bench_function("retag-on-string-push-1024", |b| {
         b.iter_batched(
             || typed.clone(),
@@ -532,7 +536,7 @@ fn bench_typed_arrays(c: &mut Criterion) {
                 a.push(IValue::from("not a number")).unwrap();
                 a
             },
-            BatchSize::SmallInput,
+            BatchSize::LargeInput,
         )
     });
     g.bench_function("slice-sum-f64-1024", |b| {
