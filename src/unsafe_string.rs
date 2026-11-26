@@ -120,6 +120,7 @@ impl CacheGuard {
         }
     }
 
+    #[cfg(test)]
     fn get_val(&self, val: &str) -> Option<&WeakIString> {
         match self {
             CacheGuard::ThreadSafe(c_g) => c_g.get(val),
@@ -127,11 +128,12 @@ impl CacheGuard {
         }
     }
 
-    fn remove_val(&mut self, val: &str) -> bool {
+    /// Removes the entry for this heap copy, if the cache holds it, with one hash and one probe.
+    fn remove_copy(&mut self, copy: &ThisCopy<'_>) {
         match self {
-            CacheGuard::ThreadSafe(c_g) => c_g.remove(val),
-            CacheGuard::ThreadUnsafe(c_g) => c_g.remove(val),
-        }
+            CacheGuard::ThreadSafe(c_g) => c_g.remove(copy),
+            CacheGuard::ThreadUnsafe(c_g) => c_g.remove(copy),
+        };
     }
 
     #[cfg(test)]
@@ -174,6 +176,23 @@ impl Eq for WeakIString {}
 impl Hash for WeakIString {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         (**self).hash(state);
+    }
+}
+
+/// Cache key for one particular heap copy: hashed like its text, so it probes the same slots
+/// as the `WeakIString` entries, but equivalent only to the entry that points at this copy.
+struct ThisCopy<'a> {
+    text: &'a str,
+    ptr: *const Header,
+}
+impl Hash for ThisCopy<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.text.hash(state);
+    }
+}
+impl hashbrown::Equivalent<WeakIString> for ThisCopy<'_> {
+    fn equivalent(&self, key: &WeakIString) -> bool {
+        std::ptr::eq(key.ptr.as_ptr(), self.ptr)
     }
 }
 
@@ -401,14 +420,12 @@ impl IString {
             let mut cache = get_cache_guard();
             if hd.rc.fetch_sub(1, std::sync::atomic::Ordering::Relaxed) == 1 {
                 // Reference count reached zero, free the string
-                if let Some(element) = cache.get_val(hd.str()) {
-                    // we can not simply remove the element from the cache, while we
-                    // perform active defrag, the element might be in the cache but will
-                    // point to another (newer) value. In this case we do not want to remove it.
-                    if element.ptr.as_ptr().cast() == unsafe { self.0.ptr() } {
-                        cache.remove_val(hd.str());
-                    }
-                }
+                // One hash and one probe, matching by address: after a cache reinit (active
+                // defrag) the entry for this text may belong to a newer copy and must stay.
+                cache.remove_copy(&ThisCopy {
+                    text: hd.str(),
+                    ptr: unsafe { self.0.ptr() }.cast(),
+                });
 
                 // Shrink the cache if it is empty in tests to verify no memory leaks
                 #[cfg(test)]
@@ -597,6 +614,60 @@ impl<A: DefragAllocator> Defrag<A> for IString {
 mod tests {
     use super::*;
     use mockalloc::record_allocs;
+
+    // EXP-021: `drop` unregisters a heap string with one `take`; these pin the cases.
+    #[test]
+    fn drop_of_the_last_reference_removes_the_cache_entry() {
+        let s = "EXP-021: a heap string, longer than seven bytes";
+        let a = IString::intern(s);
+        let b = IString::intern(s);
+        assert_eq!(a.0.ptr_usize(), b.0.ptr_usize());
+        drop(a);
+        assert!(
+            get_cache_guard().get_val(s).is_some(),
+            "one reference is still alive"
+        );
+        drop(b);
+        assert!(
+            get_cache_guard().get_val(s).is_none(),
+            "last reference must unregister"
+        );
+    }
+
+    #[test]
+    fn drop_of_a_stale_copy_keeps_the_live_copys_cache_entry() {
+        // Active defrag: the cache is rebuilt and the string re-interned into a new copy
+        // while the old copy is still alive; the old copy is freed afterwards.
+        let s = "EXP-021: a string that active defrag moves";
+        let old = IString::intern(s);
+        crate::reinit_shared_string_cache();
+        let new = IString::intern(s);
+        assert_ne!(old.0.ptr_usize(), new.0.ptr_usize());
+        drop(old);
+        let again = IString::intern(s);
+        assert_eq!(
+            again.0.ptr_usize(),
+            new.0.ptr_usize(),
+            "the live copy's entry was removed"
+        );
+        drop(again);
+        drop(new);
+        assert!(get_cache_guard().get_val(s).is_none());
+    }
+
+    #[test]
+    fn drop_of_a_copy_with_no_cache_entry_leaves_the_cache_alone() {
+        let s = "EXP-021: a string whose entry was cleared by a cache rebuild";
+        let old = IString::intern(s);
+        crate::reinit_shared_string_cache();
+        drop(old);
+        assert!(get_cache_guard().get_val(s).is_none());
+        let fresh = IString::intern(s);
+        assert_eq!(fresh.as_str(), s);
+        assert!(get_cache_guard().get_val(s).is_some());
+        drop(fresh);
+        assert!(get_cache_guard().get_val(s).is_none());
+    }
 
     // The unit tests share one cache, which an earlier test may have initialized
     // without a lock, so this test runs again in a process of its own.
