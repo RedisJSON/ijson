@@ -40,7 +40,24 @@ thiserror = "2.0.18"
 zstd = "0.13"
 
 [dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 mockalloc = "0.1.2"
 ctor = "0.1.16"
 rand = "0.8.4"
 zstd = "0.13"
+
+# Criterion microbenchmarks of the calls RedisJSON makes into ijson (parse, serialise, lookup,
+# mutation, typed arrays, clone/drop, CBOR, defrag); see benches/README.md.
+[[bench]]
+name = "callpaths"
+harness = false
+
+# Deterministic memory referee: retained and peak bytes per fixture and call path (not timed).
+[[bench]]
+name = "memory"
+harness = false
+
+# The same call paths over real files fetched by benches/fetch-datasets.sh (exits 0 without them).
+[[bench]]
+name = "corpus"
+harness = false
