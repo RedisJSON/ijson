@@ -16,6 +16,14 @@ jobs:
       
       - name: Run Build and Test
         uses: ./.github/actions/build_and_test
+
+      # `cargo build` and `cargo test` skip bench targets: build them in both configurations so an
+      # API change that breaks a benchmark fails CI.
+      - name: Build benchmarks
+        run: cargo bench --no-default-features --no-run
+
+      - name: Build benchmarks (thread_safe)
+        run: cargo bench --features thread_safe --no-run
   
   fuzz_tests:
     name: Fuzz Tests (${{ matrix.fuzz_target }})
