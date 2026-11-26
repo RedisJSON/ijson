@@ -2,3 +2,5 @@
 Cargo.lock
 /test_data/*.json
 /~$comparison.xlsx
+/benches/datasets
+__pycache__/
