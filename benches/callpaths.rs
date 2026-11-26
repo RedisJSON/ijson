@@ -673,6 +673,9 @@ fn bench_cbor(c: &mut Criterion) {
         b.iter_with_large_drop(|| decode_compressed(&compressed).unwrap())
     });
     // RDB stream: one encoder per save, defining strings once (`local_config` with budget on).
+    // The encoder and decoder are built in setup and handed back with the output, so their
+    // teardown (the encoder's string table, the decoder's definition table) runs after the batch,
+    // outside the timer, like every other output in the suite.
     let cfg = StreamEncoderConfig {
         table_budget_bytes: usize::MAX,
     };
@@ -681,7 +684,7 @@ fn bench_cbor(c: &mut Criterion) {
             || (StreamEncoder::new(cfg), Vec::with_capacity(64 * 1024)),
             |(mut enc, mut out)| {
                 black_box(enc.encode_into(&mut out, &doc));
-                out
+                (enc, out)
             },
             BatchSize::SmallInput,
         )
@@ -692,7 +695,10 @@ fn bench_cbor(c: &mut Criterion) {
     g.bench_function("stream-decode-yelp", |b| {
         b.iter_batched(
             StreamDecoder::new,
-            |mut dec| black_box(dec.decode(&stream_payload, true).unwrap()),
+            |mut dec| {
+                let v = dec.decode(&stream_payload, true).unwrap();
+                (dec, v)
+            },
             BatchSize::SmallInput,
         )
     });
