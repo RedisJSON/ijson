@@ -684,20 +684,27 @@ fn bench_memory_defrag(c: &mut Criterion) {
     g.bench_function("mem_allocated-yelp", |b| {
         b.iter(|| black_box(doc.mem_allocated()))
     });
+    // RedisJSON's `defrag_start` calls `reinit_shared_string_cache()` before a defrag cycle, so each
+    // string's re-intern misses and allocates a new copy in the new cache. Without the reinit the
+    // copy's strings, shared with `doc`, would all be cache hits and no string would move. The cache
+    // is emptied in setup, one defrag per batch so each one starts from an empty cache. The old
+    // strings stay referenced by `doc`, as when other keys share them, so they are not freed here;
+    // `defrag-reinit-yelp` below times the unshared case. Once the cache has been replaced, `doc`'s
+    // strings no longer have entries, so the benchmarks that read `doc` run before this one. (The
+    // `thread_safe` build's `IString::defrag` keeps each string where it is.)
     g.bench_function("defrag-copy-yelp", |b| {
         b.iter_batched(
-            || doc.clone(),
+            || {
+                ijson::reinit_shared_string_cache();
+                doc.clone()
+            },
             |d| black_box(d.defrag(&mut CopyDefrag)),
-            BatchSize::SmallInput,
+            BatchSize::PerIteration,
         )
     });
-    // RedisJSON's `defrag_start` calls `reinit_shared_string_cache()` before the cycle, so every
-    // string is re-interned into an empty cache (a fresh allocation and the cache's growth) and
-    // each old copy, at its last reference, finds the cache pointing at its replacement.
-    // `defrag-copy-yelp` above keeps the cache, so its re-intern is a hit and its old copies are
-    // still referenced by `doc`: neither cost is timed there. Here the document is unique, the
-    // cache is emptied before each defrag, and only the defrag is timed (harness r7). It runs
-    // last: once the cache is replaced, `doc`'s strings no longer have entries.
+    // The same defrag on the only reference to a freshly parsed document: each string is
+    // re-interned into the empty cache and each old copy, at its last reference, finds the cache
+    // pointing at its replacement and is freed. Only the defrag is timed.
     let text = include_str!("fixtures/pass-jsonsl-yelp.json");
     g.bench_function("defrag-reinit-yelp", |b| {
         b.iter_custom(|iters| {

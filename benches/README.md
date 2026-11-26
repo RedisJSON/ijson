@@ -37,7 +37,7 @@ cargo run --release --no-default-features --example mem_attribution -- benches/f
 | `typed` | Homogeneous (typed) arrays: build, retag on a heterogeneous push, slice reads | `build-f64-push-1024`, `build-i64-try-extend-16k`, `retag-on-string-push-1024`, `slice-sum-f64-1024` |
 | `clone-drop` | `.clone()` of a value (multi-target `JSON.SET`/`MERGE`/`ARRAPPEND` clone their argument per target; `JSON.GET` of subtrees); dropping a document (overwrite, `JSON.DEL`, expiry) | `clone/*`, `drop/*`, `drop-last-ref/*` (the only reference, so every string leaves the cache) |
 | `cbor` | RDB save and load: `encode`, `decode`, compressed variants, the streaming encoder/decoder | `encode-yelp`, `decode-yelp`, `encode-compressed-yelp`, `decode-compressed-yelp`, `stream-encode-yelp-fresh-encoder`, `stream-decode-yelp` |
-| `mem-defrag` | `JSON.DEBUG MEMORY` (`mem_allocated`) and active defrag | `mem_allocated-yelp`, `defrag-copy-yelp`, `defrag-reinit-yelp` (after `defrag_start`'s cache reinit), `defrag-cycle-yelp` (reinit timed too) |
+| `mem-defrag` | `JSON.DEBUG MEMORY` (`mem_allocated`) and active defrag | `mem_allocated-yelp`, `defrag-copy-yelp` (strings still shared with another copy), `defrag-reinit-yelp` (the only copy), `defrag-cycle-yelp` (reinit timed too); each defrag follows `defrag_start`'s cache reinit, so every string moves |
 
 `--bench memory` prints, per fixture, the bytes the allocator sees (peak and retained after parse, clone and
 CBOR decode, serialise peak, allocation count), `IValue::mem_allocated()` beside the allocator's truth, the CBOR
