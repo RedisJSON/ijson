@@ -368,6 +368,7 @@ at the pointer value.
 ## Benchmarks
 
 `benches/` holds criterion microbenchmarks for the operations RedisJSON performs on `ijson` (parse, serialise,
-lookup, mutation, typed arrays, clone/drop, CBOR, memory accounting) and a deterministic memory referee. See
+lookup, mutation, typed arrays, clone/drop, CBOR, memory accounting), the same call paths over real JSON files
+fetched by `benches/fetch-datasets.sh`, and a deterministic memory referee. See
 [benches/README.md](benches/README.md) for what each group measures, how to compare two builds, and the
 conventions automated agents are expected to follow when proposing changes.
