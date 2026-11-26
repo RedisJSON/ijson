@@ -284,14 +284,38 @@ impl IString {
     /// Create an inline string by storing bytes in upper bits
     /// Safety: String must be < 8 bytes and valid UTF-8
     unsafe fn new_inline_string(s: &str) -> Self {
-        // 1 byte for the tag(3 bits for tag and rest for the length), 7 bytes for the string
+        // 1 byte for the tag(3 bits for tag and rest for the length), 7 bytes for the string.
+        //
+        // The handle is assembled in a register. The previous version filled a stack `[u8; 8]`
+        // with a byte store and a variable-length `copy_from_slice` (a `memcpy` call for 1..=7
+        // bytes) and then reloaded it as one word, which the compiler split into partial loads
+        // that could not be forwarded from the preceding narrower stores (EXP-020).
         let bytes = s.as_bytes();
-        let mut data_bytes = [0u8; 8];
+        let len = bytes.len();
+        debug_assert!((1..=INLINE_STRING_MAX_LEN).contains(&len));
 
-        // Set the length in the first byte (after tag bits)
-        data_bytes[0] = (s.len() << TAG_SIZE_BITS) as u8;
-        data_bytes[1..1 + bytes.len()].copy_from_slice(bytes);
-        let data: usize = usize::from_ne_bytes(data_bytes);
+        // Text bytes in little-endian order: byte i of the string is bits 8*i..8*i+8 of `text`.
+        let text: u64 = if len >= 4 {
+            // Two overlapping 4-byte loads cover 4..=7 bytes; the overlap holds identical bytes.
+            let lo = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as u64;
+            let hi = u32::from_le_bytes(bytes[len - 4..].try_into().unwrap()) as u64;
+            lo | (hi << (8 * (len - 4)))
+        } else {
+            let mut t = bytes[0] as u64;
+            if len > 1 {
+                t |= (bytes[1] as u64) << 8;
+            }
+            if len > 2 {
+                t |= (bytes[2] as u64) << 16;
+            }
+            t
+        };
+
+        // Byte 0 holds the length above the tag bits, bytes 1..=len the text, the rest zero.
+        // `from_le` reproduces `usize::from_ne_bytes` of that byte layout on every endianness
+        // (a no-op on little-endian targets).
+        let le = ((len as u64) << TAG_SIZE_BITS) | (text << 8);
+        let data = usize::from_le(le as usize);
 
         Self(IValue::new_ptr(data as *mut u8, TypeTag::InlineString))
     }
@@ -802,5 +826,123 @@ mod tests {
             // Both should point to the same inline data
             assert_eq!(original.0.ptr_usize(), cloned.0.ptr_usize());
         });
+    }
+
+    /// Reference construction of an inline handle: the stack byte-buffer algorithm that EXP-020
+    /// replaced with register shifts. Both must produce bit-identical handles.
+    fn inline_handle_reference(s: &str) -> usize {
+        let bytes = s.as_bytes();
+        let mut data_bytes = [0u8; 8];
+        data_bytes[0] = (s.len() << TAG_SIZE_BITS) as u8;
+        data_bytes[1..1 + bytes.len()].copy_from_slice(bytes);
+        usize::from_ne_bytes(data_bytes) | TypeTag::InlineString as usize
+    }
+
+    fn hash_of<T: Hash>(t: &T) -> u64 {
+        use std::hash::Hasher;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        t.hash(&mut h);
+        h.finish()
+    }
+
+    /// Every representation pair must agree with `str` on equality, hashing and ordering:
+    /// inline/inline, inline/heap (a ≤ 7-byte string is never heap, so those are always
+    /// unequal) and the 7/8-byte boundary.
+    fn check_against_str(a_str: &str, a: &IString, b_str: &str, b: &IString) {
+        assert_eq!(a == b, a_str == b_str, "{a_str:?} vs {b_str:?}");
+        assert_eq!(a.cmp(b), a_str.cmp(b_str), "{a_str:?} vs {b_str:?}");
+        assert_eq!(
+            a.partial_cmp(b),
+            a_str.partial_cmp(b_str),
+            "{a_str:?} vs {b_str:?}"
+        );
+        if a_str == b_str {
+            assert_eq!(hash_of(a), hash_of(b), "{a_str:?}");
+        }
+    }
+
+    #[test]
+    fn inline_handle_matches_reference_construction_for_every_length() {
+        let samples = [
+            "a",
+            "ab",
+            "abc",
+            "abcd",
+            "abcde",
+            "abcdef",
+            "abcdefg",
+            "k37",
+            "id",
+            "\u{e9}",
+            "\u{e9}t\u{e9}",
+            "\u{1F980}",
+            "\u{1F980}abc",
+            "\u{1F525}\u{e9}",
+            "\0\0\0",
+            "\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}",
+            "\u{ff}\u{ff}\u{ff}",
+            "\0a\0b\0c\0",
+        ];
+        let heap_str = "abcdefgh";
+        let heap = IString::intern(heap_str);
+        assert!(!heap.is_inline());
+        for (n, s) in samples.iter().enumerate() {
+            assert!((1..=INLINE_STRING_MAX_LEN).contains(&s.len()), "{s:?}");
+            let i = IString::intern(s);
+            assert!(i.is_inline(), "{s:?}");
+            assert_eq!(i.0.ptr_usize(), inline_handle_reference(s), "{s:?}");
+            assert_eq!(i.as_str(), *s);
+            assert_eq!(i.len(), s.len());
+            assert_eq!(i, IString::intern(s));
+            assert_eq!(hash_of(&i), hash_of(&IString::intern(s)));
+            check_against_str(s, &i, heap_str, &heap);
+            for t in &samples[..n] {
+                check_against_str(s, &i, t, &IString::intern(t));
+            }
+        }
+        // 7 bytes is the last inline length; 8 bytes is heap and must compare unequal.
+        let seven = IString::intern("abcdefg");
+        assert!(seven.is_inline());
+        check_against_str("abcdefg", &seven, heap_str, &heap);
+    }
+
+    #[test]
+    fn inline_handle_round_trips_generated_strings_at_every_length() {
+        // Deterministic LCG; 1..=7 byte strings mixing 1-, 2- and 3-byte UTF-8 sequences.
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut prev: Option<(String, IString)> = None;
+        for _ in 0..4000 {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let len = (x >> 60) as usize % INLINE_STRING_MAX_LEN + 1;
+            let mut s = String::new();
+            while s.len() < len {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let c = char::from_u32((x >> 40) as u32 % 0xD800).unwrap();
+                if s.len() + c.len_utf8() > len {
+                    s.push((b'a' + (x >> 32) as u8 % 26) as char);
+                } else {
+                    s.push(c);
+                }
+            }
+            assert_eq!(s.len(), len);
+            let i = IString::intern(&s);
+            assert!(i.is_inline(), "{s:?}");
+            assert_eq!(i.0.ptr_usize(), inline_handle_reference(&s), "{s:?}");
+            assert_eq!(i.as_str(), s);
+            assert_eq!(i, IString::intern(&s));
+            assert_eq!(hash_of(&i), hash_of(&IString::intern(&s)));
+            let long_str = format!("{s}--------");
+            let long = IString::intern(&long_str);
+            assert!(!long.is_inline());
+            check_against_str(&s, &i, &long_str, &long);
+            if let Some((p_str, p)) = &prev {
+                check_against_str(&s, &i, p_str, p);
+            }
+            prev = Some((s, i));
+        }
     }
 }
