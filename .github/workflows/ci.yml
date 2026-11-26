@@ -29,12 +29,16 @@ jobs:
     name: Memory gate (vs tip of the base branch, +5 %)
     runs-on: ubuntu-latest
     steps:
+      # Full history: the gate merges this PR into the base branch's current tip.
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # Runs this PR's memory referee against the library at the base branch's tip, fetched when the
-      # job runs, and against this PR; fails if any retained or peak byte count grows by more than
-      # 5 %. Re-running the job re-checks against the current tip.
+      # Measures the base branch's tip, fetched when the job runs, against that tip with this PR
+      # merged in, using one harness; fails if any retained or peak byte count grows by more than
+      # 5 %. Changes that reached the base branch are on both sides, so only this PR's count.
+      # Re-running the job re-checks against the current tip.
       - name: Memory gate
         run: .github/scripts/memory-gate.sh "${{ github.base_ref }}"
 

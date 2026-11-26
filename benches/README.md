@@ -30,12 +30,12 @@ cargo run --release --no-default-features --example mem_attribution -- benches/f
 
 | Group (`--bench callpaths`) | RedisJSON call path | Benchmarks |
 |---|---|---|
-| `parse` | `JSON.SET` of a document: `IValueDeserSeed::deserialize_compact_objects`, FPHA float arrays | `compact-objects/{yelp,yahoo2,gmaps-place,int-arrays,parser-0000,pass-100,floats-1024,ints-1024,refsnp-400}`, `fpha-f32/floats-1024` |
+| `parse` | `JSON.SET` of a document: `IValueDeserSeed::deserialize_compact_objects`, FPHA float arrays | `compact-objects/{yelp,yahoo2,gmaps-place,int-arrays,parser-0000,pass-100,floats-1024,ints-1024,refsnp-400}` (warm: within a batch the strings are already in the cache, as for keys sharing a schema), `compact-objects-cold/*` (no other copy alive, so every string is inserted), `fpha-f32/floats-1024` |
 | `serialise` | `JSON.GET`: compact and indented `serde` output of a document | `compact/*`, `indent/*` |
 | `lookup` | JSONPath steps and `get`/`get_mut` by key (`json_path` `get_key`, `ivalue_manager` `follow_path`) | `path-chain-yelp`, `business-28-{hit,miss}`, `small-8-{hit-last,miss}`, `wide-128-{hit-short-key,hit-long-key,miss-long-key}`, `typed-array-slice-index-f64-x64` (control) |
-| `mutation` | In-place edits: `JSON.SET` of a member, `JSON.MERGE`, `JSON.ARRINSERT`/`ARRPOP`/`ARRTRIM`, `JSON.NUMINCRBY`, `JSON.STRAPPEND` | `object-insert-remove-28`, `merge-26-into-54-occupied`, `array-push-pop-hetero`, `array-insert-front-remove`, `array-trim-typed-1024-to-512`, `num-incrby-{i64,f64}`, `str-append` |
+| `mutation` | In-place edits: `JSON.SET` of a member, `JSON.MERGE`, `JSON.ARRINSERT`/`ARRPOP`/`ARRTRIM`, `JSON.NUMINCRBY`, `JSON.STRAPPEND` | `object-insert-remove-28`, `merge-26-into-54-occupied`, `array-push-pop-hetero`, `array-insert-front-remove`, `array-trim-typed-1024-to-512` (from index 0, no rotate), `array-trim-typed-1024-middle-512` (rotate then truncate), `num-incrby-{i64,f64}`, `str-append` |
 | `typed` | Homogeneous (typed) arrays: build, retag on a heterogeneous push, slice reads | `build-f64-push-1024`, `build-i64-try-extend-16k`, `retag-on-string-push-1024`, `slice-sum-f64-1024` |
-| `clone-drop` | `.clone()` of a value (multi-target `JSON.SET`/`MERGE`/`ARRAPPEND` clone their argument per target; `JSON.GET` of subtrees); dropping a document (overwrite, `JSON.DEL`, expiry) | `clone/*`, `drop/*`, `drop-last-ref/*` (the only reference, so every string leaves the cache) |
+| `clone-drop` | `.clone()` of a value (multi-target `JSON.SET`/`MERGE`/`ARRAPPEND` clone their argument per target; `JSON.GET` of subtrees); dropping a document (overwrite, `JSON.DEL`, expiry) | `clone/*`, `drop/*`, `drop-last-ref/{yelp,gmaps-place,refsnp-400}` (the only reference, so every string leaves the cache; documents with strings only) |
 | `cbor` | RDB save and load: `encode`, `decode`, compressed variants, the streaming encoder/decoder | `encode-yelp`, `decode-yelp`, `encode-compressed-yelp`, `decode-compressed-yelp`, `stream-encode-yelp-fresh-encoder`, `stream-decode-yelp` |
 | `mem-defrag` | `JSON.DEBUG MEMORY` (`mem_allocated`) and active defrag | `mem_allocated-yelp`, `defrag-copy-yelp` (strings still shared with another copy), `defrag-reinit-yelp` (the only copy), `defrag-cycle-yelp` (reinit timed too); each defrag follows `defrag_start`'s cache reinit, so every string moves |
 
@@ -47,7 +47,8 @@ once per build, not under criterion.
 `--bench corpus` runs RedisJSON's call paths over files fetched by `fetch-datasets.sh`, one key per document (per
 line for `.ndjson`): `corpus-parse` (into an empty string cache), `corpus-drop` (last references),
 `corpus-serialise` (compact) and `corpus-clone`, after a memory table (retained bytes per file, string cache
-reset per file). Default files: `twitter`, `citm_catalog`, `canada`, `gsoc-2018`, `apache_builds`,
+reset per file, so its `parse retained incl. string table` counts the cache's table growth and is not comparable with
+`--bench memory`'s `parse retained`, which leaves it out). Default files: `twitter`, `citm_catalog`, `canada`, `gsoc-2018`, `apache_builds`,
 `amazon_cellphones.ndjson`, the 768-float embedding NDJSON `mobilenetv3_large-768.ndjson`, and
 `ncbi/refsnp-chrMT.ndjson` when fetched. Without datasets it prints the fetch command and exits 0. Knobs:
 
@@ -134,13 +135,15 @@ benchmarks by up to ±30%. The protocol that has held up:
 
 ### Memory gate (CI)
 
-Every pull request runs `.github/scripts/memory-gate.sh`: the PR's `--bench memory` harness measures the library at
-the tip of the base branch, fetched when the job runs, and the PR. Every `*_retained` and `*_peak` byte count,
+Every pull request runs `.github/scripts/memory-gate.sh`: it fetches the tip of the base branch when the job runs
+and measures it, and the same tip with the PR merged in, with one `--bench memory` harness. Commits that reached
+the base branch after the PR branched off are on both sides, so only the PR's own changes count. Every `*_retained` and `*_peak` byte count,
 `ijson_mem_allocated` and `size_of` of the core types is compared per fixture, and the job fails if any grows by
 more than 5 % (`MEMORY_GATE_MAX_PCT`). The default build's counts repeat exactly, so it runs once per side; the
 `thread_safe` build's sharded cache takes a random hash seed, so its figures vary from run to run (up to ~13 % on
 the 1.3 KB fixture) and the gate uses the median of 5 runs per side (`MEMORY_GATE_RUNS_TS`). The table lands in the
-job summary. Run it locally with `.github/scripts/memory-gate.sh master` (needs `origin` pointing at this repository).
+job summary. Run it locally with `.github/scripts/memory-gate.sh master` (needs `origin` pointing at this repository; it
+measures committed HEAD).
 
 Preserve behaviour RedisJSON depends on while optimising: number formatting, typed-array tagging and retagging,
 string interning semantics, CBOR stream compatibility, defrag. Run the unit tests single-threaded:

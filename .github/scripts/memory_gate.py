@@ -50,7 +50,7 @@ def main():
     a = ap.parse_args()
     base, head = median(a.base), median(a.head)
 
-    lines = [f"### Memory gate{(' — ' + a.label) if a.label else ''}: head vs tip of the base branch "
+    lines = [f"### Memory gate{(' — ' + a.label) if a.label else ''}: HEAD merged into the base branch tip vs the tip "
              f"(fail above +{a.max_pct:g} %; "
              f"median of {len(a.base)} base and {len(a.head)} head runs)", "",
              "| Fixture | Figure | Base | Head | Δ | |", "|---|---|---:|---:|---:|---|"]
