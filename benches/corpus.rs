@@ -93,6 +93,8 @@ unsafe impl GlobalAlloc for Counting {
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
         let q = System.realloc(p, l, new_size);
         if COUNTING.load(Ordering::Relaxed) && !q.is_null() {
+            // Counted as an allocation, as `mockalloc` (used by `--bench memory`) records it.
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
             grow(new_size as i64 - l.size() as i64);
         }
         q

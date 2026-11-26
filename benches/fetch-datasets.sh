@@ -91,6 +91,15 @@ pattern() {  # family -> regex over asset names
 }
 
 mkdir -p "$DIR/.download" "$DIR/.verified"
+
+# True when every file a verification mark lists (lines after the sha256) is still unpacked.
+unpacked() {
+  local f
+  [ "$(wc -l < "$1")" -ge 2 ] || return 1  # a mark without a file list predates the check
+  while IFS= read -r f; do
+    [ -e "$DIR/$f" ] || return 1
+  done < <(tail -n +2 "$1")
+}
 DIR=$(cd "$DIR" && pwd)
 fetched=0 skipped=0 dl_bytes=0
 seen=" "
@@ -102,7 +111,7 @@ for fam in "${FAMS[@]}"; do
     [ -n "$asset" ] || continue
     echo "$asset" | grep -qE "$pat" || continue
     mark=$DIR/.verified/$asset
-    if [ -f "$mark" ] && [ "$(cat "$mark")" = "$sum" ]; then
+    if [ -f "$mark" ] && [ "$(head -n 1 "$mark")" = "$sum" ] && unpacked "$mark"; then
       skipped=$((skipped + 1)); echo "  ok       $asset (already verified)"; continue
     fi
     part=$DIR/.download/$asset
@@ -111,14 +120,18 @@ for fam in "${FAMS[@]}"; do
     [ "$got" = "$sum" ] || { rm -f "$part"; die "sha256 mismatch for $asset: got $got, want $sum"; }
     size=$(wc -c < "$part" | tr -d ' ')
     case $asset in
-      *.tar.zst) zstd -q -dc --long=27 "$part" | tar -xf - -C "$DIR" ;;
+      *.tar.zst)
+        zstd -q -dc --long=27 "$part" | tar -xf - -C "$DIR"
+        # The mark lists the unpacked files, so a re-run notices any that were deleted.
+        { echo "$sum"; zstd -q -dc --long=27 "$part" | tar -tf - | grep -v '/$'; } > "$mark.tmp" ;;
       *--*.zst)
         f=${asset%.zst}; d=$DIR/${f%%--*}; out=$d/${f#*--}
-        mkdir -p "$d"; zstd -q -dc --long=27 "$part" > "$out.tmp" && mv "$out.tmp" "$out" ;;
+        mkdir -p "$d"; zstd -q -dc --long=27 "$part" > "$out.tmp" && mv "$out.tmp" "$out"
+        printf '%s\n%s\n' "$sum" "${f%%--*}/${f#*--}" > "$mark.tmp" ;;
       *) die "unknown asset type: $asset" ;;
     esac
     rm -f "$part"
-    echo "$sum" > "$mark"
+    mv "$mark.tmp" "$mark"
     fetched=$((fetched + 1)); dl_bytes=$((dl_bytes + size))
     echo "  fetched  $asset ($(mb "$size"), sha256 ok)"
   done < "$SUMS"

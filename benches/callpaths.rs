@@ -511,21 +511,31 @@ fn bench_typed_arrays(c: &mut Criterion) {
         .map(|_| (lcg.next() % 1_000_000) as i64 - 500_000)
         .collect();
 
+    // The built array is returned and dropped after the batch, outside the timer, as parse and
+    // clone do; `LargeInput` keeps only a thousandth of a sample's arrays alive at once.
     g.bench_function("build-f64-push-1024", |b| {
-        b.iter(|| {
-            let mut a = IArray::new();
-            for &f in &floats {
-                a.push(f).unwrap();
-            }
-            black_box(a)
-        })
+        b.iter_batched(
+            || (),
+            |()| {
+                let mut a = IArray::new();
+                for &f in &floats {
+                    a.push(f).unwrap();
+                }
+                a
+            },
+            BatchSize::LargeInput,
+        )
     });
     g.bench_function("build-i64-try-extend-16k", |b| {
-        b.iter(|| {
-            let mut a = IArray::new();
-            a.try_extend(ints.iter().copied()).unwrap();
-            black_box(a)
-        })
+        b.iter_batched(
+            || (),
+            |()| {
+                let mut a = IArray::new();
+                a.try_extend(ints.iter().copied()).unwrap();
+                a
+            },
+            BatchSize::LargeInput,
+        )
     });
     let typed = parse(&float_array_json(1024), None).into_array().unwrap();
     assert!(
