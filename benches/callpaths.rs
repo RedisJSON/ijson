@@ -178,6 +178,26 @@ fn init() {
 // Parse
 // ---------------------------------------------------------------------------------------------
 
+/// `arr_trim`'s rotate (`ivalue_manager.rs`): every slice type rotated in place.
+fn rotate_left(a: &mut IArray, n: usize) {
+    use ijson::array::ArraySliceMut::*;
+    match a.as_mut_slice() {
+        Heterogeneous(s) => s.rotate_left(n),
+        I8(s) => s.rotate_left(n),
+        U8(s) => s.rotate_left(n),
+        I16(s) => s.rotate_left(n),
+        U16(s) => s.rotate_left(n),
+        F16(s) => s.rotate_left(n),
+        BF16(s) => s.rotate_left(n),
+        I32(s) => s.rotate_left(n),
+        U32(s) => s.rotate_left(n),
+        F32(s) => s.rotate_left(n),
+        I64(s) => s.rotate_left(n),
+        U64(s) => s.rotate_left(n),
+        F64(s) => s.rotate_left(n),
+    }
+}
+
 fn bench_parse(c: &mut Criterion) {
     init();
     let mut g = c.benchmark_group("parse");
@@ -188,6 +208,27 @@ fn bench_parse(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::new("compact-objects", name), &text, |b, t| {
             b.iter_with_large_drop(|| parse(t, None))
         });
+        // `compact-objects` is the warm case: within a batch every parse after the first finds its
+        // strings in the cache, as keys sharing a schema do. A `JSON.SET` of new string values takes
+        // the miss path: here each parse runs with no other copy alive, so every string is
+        // inserted into the cache, and only the parse is timed (the drop that empties the cache
+        // again is not).
+        g.bench_with_input(
+            BenchmarkId::new("compact-objects-cold", name),
+            &text,
+            |b, t| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let t0 = Instant::now();
+                        let v = black_box(parse(t, None));
+                        total += t0.elapsed();
+                        drop(v);
+                    }
+                    total
+                })
+            },
+        );
     }
     // JSON.SET with a float type hint (FPHA): the typed-array detection path with a forced type.
     let floats = float_array_json(1024);
@@ -445,6 +486,20 @@ fn bench_mutation(c: &mut Criterion) {
             BatchSize::LargeInput,
         )
     });
+    // JSON.ARRTRIM keeping the middle half (start 256): `arr_trim` rotates the slice left by
+    // `start`, then truncates, as when a list is capped to its last N elements. From index 0 (above)
+    // the rotate does nothing.
+    g.bench_function("array-trim-typed-1024-middle-512", |b| {
+        b.iter_batched(
+            || ints.clone(),
+            |mut a| {
+                rotate_left(&mut a, 256);
+                a.truncate(512);
+                a
+            },
+            BatchSize::LargeInput,
+        )
+    });
     // JSON.NUMINCRBY on an integer field: read, add, replace (number.rs / ivalue_manager.rs)
     // One object mutated in place: repeated INCRBY on the same key is what RedisJSON sees, the value
     // drifting is realistic, and a setup clone would hand the routine an object freshly laid out by
@@ -574,23 +629,29 @@ fn bench_clone_drop(c: &mut Criterion) {
         .into_iter()
         .filter(|(n, _)| matches!(*n, "yelp" | "gmaps-place" | "floats-1024"))
     {
+        // A typed array holds no strings, so its last-reference drop is `drop`'s work; at ~15 ns
+        // the two `Instant` reads per iteration would dominate it. Only documents with strings get
+        // a `drop-last-ref` variant.
+        let has_strings = name != "floats-1024";
         // RedisJSON frees documents it owns (an overwriting JSON.SET, JSON.DEL, expiry): the
         // last reference to every heap string goes, so each one is unregistered from the string
         // cache. `drop` below cannot see that cost: its batch of identical parses, and `doc`,
         // share every interned string. Measured first, while no other copy of the fixture is
         // alive; only the drop is timed.
-        g.bench_with_input(BenchmarkId::new("drop-last-ref", name), &text, |b, t| {
-            b.iter_custom(|iters| {
-                let mut total = Duration::ZERO;
-                for _ in 0..iters {
-                    let v = parse(t, None);
-                    let t0 = Instant::now();
-                    drop(black_box(v));
-                    total += t0.elapsed();
-                }
-                total
-            })
-        });
+        if has_strings {
+            g.bench_with_input(BenchmarkId::new("drop-last-ref", name), &text, |b, t| {
+                b.iter_custom(|iters| {
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        let v = parse(t, None);
+                        let t0 = Instant::now();
+                        drop(black_box(v));
+                        total += t0.elapsed();
+                    }
+                    total
+                })
+            });
+        }
         let doc = parse(&text, None);
         // Only the clone is timed: `iter` would drop each clone inside the timed loop, adding the
         // `drop` benchmark's cost to this one. Batched, the clones are dropped after each batch;

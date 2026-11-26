@@ -307,7 +307,7 @@ fn memory_table(inputs: &[Input]) {
     println!(
         "\n## corpus memory (bytes requested from the allocator; string cache reset per file)\n"
     );
-    println!("| File | docs | input bytes | file bytes | parse retained | retained / input | parse peak | parse allocs | ijson mem_allocated | clone retained |");
+    println!("| File | docs | input bytes | file bytes | parse retained incl. string table | retained / input | parse peak | parse allocs | ijson mem_allocated | clone retained |");
     println!("|---|---|---|---|---|---|---|---|---|---|");
     for input in inputs {
         fresh_cache();
