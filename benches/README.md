@@ -138,10 +138,11 @@ benchmarks by up to ±30%. The protocol that has held up:
 Every pull request runs `.github/scripts/memory-gate.sh`: it fetches the tip of the base branch when the job runs
 and measures it, and the same tip with the PR merged in, with one `--bench memory` harness. Commits that reached
 the base branch after the PR branched off are on both sides, so only the PR's own changes count. Every `*_retained` and `*_peak` byte count,
-`ijson_mem_allocated` and `size_of` of the core types is compared per fixture, and the job fails if any grows by
-more than 5 % (`MEMORY_GATE_MAX_PCT`). The default build's counts repeat exactly, so it runs once per side; the
-`thread_safe` build's sharded cache takes a random hash seed, so its figures vary from run to run (up to ~13 % on
-the 1.3 KB fixture) and the gate uses the median of 5 runs per side (`MEMORY_GATE_RUNS_TS`). The table lands in the
+`ijson_mem_allocated` and `size_of` of the core types is compared per fixture. The default build's counts repeat
+exactly, so it runs once per side and the job fails on any growth (`MEMORY_GATE_MAX_PCT_DEFAULT`, 0), as the A/B
+protocol asks. The `thread_safe` build's sharded cache takes a random hash seed, so its figures vary from run to run
+(up to ~13 % on the 1.3 KB fixture): the gate uses the median of 5 runs per side (`MEMORY_GATE_RUNS_TS`) and fails
+above +5 % (`MEMORY_GATE_MAX_PCT_TS`). The table lands in the
 job summary. Run it locally with `.github/scripts/memory-gate.sh master` (needs `origin` pointing at this repository; it
 measures committed HEAD).
 

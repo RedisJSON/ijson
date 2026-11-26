@@ -26,7 +26,7 @@ jobs:
         run: cargo bench --features thread_safe --no-run
   
   memory_gate:
-    name: Memory gate (vs tip of the base branch, +5 %)
+    name: Memory gate (vs tip of the base branch)
     runs-on: ubuntu-latest
     steps:
       # Full history: the gate merges this PR into the base branch's current tip.
@@ -36,8 +36,8 @@ jobs:
           fetch-depth: 0
 
       # Measures the base branch's tip, fetched when the job runs, against that tip with this PR
-      # merged in, using one harness; fails if any retained or peak byte count grows by more than
-      # 5 %. Changes that reached the base branch are on both sides, so only this PR's count.
+      # merged in, using one harness; fails if any retained or peak byte count grows at all in the
+      # default build (exact counts), or by more than 5 % in thread_safe (median of 5 runs). Changes that reached the base branch are on both sides, so only this PR's count.
       # Re-running the job re-checks against the current tip.
       - name: Memory gate
         run: .github/scripts/memory-gate.sh "${{ github.base_ref }}"

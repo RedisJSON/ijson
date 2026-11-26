@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Memory gate: measure the library at the current tip of the base branch and the same tip with this
 # checkout's HEAD merged into it, with one harness (the merged tree's `benches/`), and fail if any
-# retained or peak byte count grows by more than MEMORY_GATE_MAX_PCT percent (default 5).
+# retained or peak byte count grows: at all in the default build, whose counts repeat exactly
+# (MEMORY_GATE_MAX_PCT_DEFAULT, default 0), or by more than MEMORY_GATE_MAX_PCT_TS percent in the
+# thread_safe build, whose counts vary from run to run (default 5).
 #
 # Both sides are built from the tip fetched when the gate runs, so the check is always against the
 # base branch as it is now, and only HEAD's own changes differ between them: commits that reached
@@ -48,7 +50,11 @@ status=0
 # The default build's counts repeat exactly; the thread_safe build's vary with the cache's random
 # hash seed, so each side runs MEMORY_GATE_RUNS_TS times (default 5) and the gate uses the median.
 for cfg in "--no-default-features" "--features thread_safe"; do
-  if [ "$cfg" = "--no-default-features" ]; then label=default; runs=1; else label=thread_safe; runs=${MEMORY_GATE_RUNS_TS:-5}; fi
+  if [ "$cfg" = "--no-default-features" ]; then
+    label=default; runs=1; max=${MEMORY_GATE_MAX_PCT_DEFAULT:-0}
+  else
+    label=thread_safe; runs=${MEMORY_GATE_RUNS_TS:-5}; max=${MEMORY_GATE_MAX_PCT_TS:-5}
+  fi
   base_files=() head_files=()
   for i in $(seq 1 "$runs"); do
     # A target dir per side: both sides are the same crate, so a shared one would let cargo reuse
@@ -60,6 +66,6 @@ for cfg in "--no-default-features" "--features thread_safe"; do
     base_files+=("$WORK/base-$label-$i.json"); head_files+=("$WORK/head-$label-$i.json")
   done
   python3 "$WORK/head/.github/scripts/memory_gate.py" --base "${base_files[@]}" --head "${head_files[@]}" \
-    --label "$label" || status=1
+    --label "$label" --max-pct "$max" || status=1
 done
 exit $status

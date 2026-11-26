@@ -10,7 +10,7 @@ a counting allocator. In the default build they are exact and repeat run to run,
 is enough. The `thread_safe` build's sharded string cache takes a random hash seed, so its tables
 grow differently between runs (up to ~13 % on the 1.3 KB fixture); with several runs per side each
 figure is the median, which repeats to within ~1.5 %. A figure
-that grows by more than --max-pct percent over the base fails the gate. Writes a Markdown table to
+that grows by more than --max-pct percent over the base fails the gate (0: any growth fails). Writes a Markdown table to
 stdout (and to $GITHUB_STEP_SUMMARY when set).
 """
 import argparse
