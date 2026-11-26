@@ -76,8 +76,8 @@ heap numbers and unique heap strings, and shows the gap to `mem_allocated()` (th
 
 ## Datasets
 
-`benches/fetch-datasets.sh [--dir DIR] [quick|standard|all|FAMILY...]` downloads the release
-[`datasets-v1`](https://github.com/redis-performance/json-agent-workspace/releases/tag/datasets-v1) assets into
+`benches/fetch-datasets.sh [--dir DIR] [quick|standard|all|FAMILY...]` downloads the
+[`datasets-v1`](https://s3.amazonaws.com/benchmarks.redislabs/ijson/datasets-v1/ASSETS.sha256) assets from a public S3 mirror into
 `benches/datasets` (git-ignored), checks each against [`datasets.sha256`](datasets.sha256) before unpacking, and
 skips assets already verified. Needs `curl`, `zstd`, `tar`. `IJSON_DATASETS_MIRROR=<base URL>` reads another copy
 of the same assets (the pinned hashes still apply).

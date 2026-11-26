@@ -5,15 +5,15 @@ set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 SUMS=$HERE/datasets.sha256
-MIRROR=${IJSON_DATASETS_MIRROR:-https://github.com/redis-performance/json-agent-workspace/releases/download/datasets-v1}
+MIRROR=${IJSON_DATASETS_MIRROR:-https://s3.amazonaws.com/benchmarks.redislabs/ijson/datasets-v1}
 DIR=$HERE/datasets
 
 usage() {
   cat <<EOF
 usage: benches/fetch-datasets.sh [--dir DIR] [quick|standard|all|FAMILY...]
 
-Downloads JSON datasets into DIR (default: benches/datasets) from the release
-datasets-v1 of github.com/redis-performance/json-agent-workspace, verifies each
+Downloads JSON datasets into DIR (default: benches/datasets) from the public
+mirror s3.amazonaws.com/benchmarks.redislabs/ijson/datasets-v1, verifies each
 asset against benches/datasets.sha256, and unpacks it. Re-runs skip assets that
 were already verified and unpacked. Needs curl, zstd and tar.
 
