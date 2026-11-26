@@ -3,7 +3,8 @@
 //! One group per call path in json-agent-workspace `docs/USAGE-PATTERN.md` §"Call paths to
 //! benchmark". Argument shapes follow RedisJSON `9ca1c88` (`redis_json/src/ivalue_manager.rs`,
 //! `formatter.rs`, `key_value.rs`, `rdb_persistence.rs`, `json_path/src/select_value.rs`).
-//! Fixtures under `benches/fixtures/` are copies of RedisJSON's `tests/benchmarks/datasets`.
+//! Fixtures under `benches/fixtures/` are copies of RedisJSON's `tests/benchmarks/datasets`, plus
+//! `refsnp-unsupported-400.ndjson` (NCBI dbSNP records, one key per line).
 //!
 //! The string cache is initialised exactly as OSS RedisJSON does at module load:
 //! `init_shared_string_cache(is_bigredis)` with `is_bigredis == false`.
@@ -57,6 +58,25 @@ fn fixtures() -> Vec<(&'static str, String)> {
         ("floats-1024", float_array_json(1024)),
         ("ints-1024", int_array_json(1024)),
     ]
+}
+
+/// Key-per-document fixtures: NDJSON, one `IValue` per line, as `JSON.SET` stores one key per
+/// document. `refsnp-400` is 400 NCBI dbSNP RefSNP records (public domain; see benches/README.md).
+fn ndjson_fixtures() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![(
+        "refsnp-400",
+        include_str!("fixtures/refsnp-unsupported-400.ndjson")
+            .lines()
+            .collect(),
+    )]
+}
+
+fn ndjson_bytes(lines: &[&str]) -> u64 {
+    lines.iter().map(|l| l.len() as u64).sum()
+}
+
+fn parse_lines(lines: &[&str]) -> Vec<IValue> {
+    lines.iter().map(|l| parse(l, None)).collect()
 }
 
 /// Deterministic LCG so the fixture is identical on every machine and run.
@@ -174,6 +194,26 @@ fn bench_parse(c: &mut Criterion) {
         &floats,
         |b, t| b.iter_with_large_drop(|| parse(t, Some(FloatType::F32))),
     );
+    // One key per line; the batch of documents is dropped outside the timed section.
+    for (name, lines) in ndjson_fixtures() {
+        g.throughput(Throughput::Bytes(ndjson_bytes(&lines)));
+        g.bench_with_input(
+            BenchmarkId::new("compact-objects", name),
+            &lines,
+            |b, ls| {
+                b.iter_batched(
+                    || Vec::with_capacity(ls.len()),
+                    |mut out| {
+                        for l in ls {
+                            out.push(parse(l, None));
+                        }
+                        out
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
     g.finish();
 }
 
@@ -192,6 +232,25 @@ fn bench_serialise(c: &mut Criterion) {
         });
         g.bench_with_input(BenchmarkId::new("indent", name), &doc, |b, d| {
             b.iter(|| black_box(serialise_indent(d)))
+        });
+    }
+    // One JSON.GET per key.
+    for (name, lines) in ndjson_fixtures() {
+        let docs = parse_lines(&lines);
+        g.throughput(Throughput::Bytes(ndjson_bytes(&lines)));
+        g.bench_with_input(BenchmarkId::new("compact", name), &docs, |b, ds| {
+            b.iter(|| {
+                for d in ds {
+                    black_box(serialise_compact(d));
+                }
+            })
+        });
+        g.bench_with_input(BenchmarkId::new("indent", name), &docs, |b, ds| {
+            b.iter(|| {
+                for d in ds {
+                    black_box(serialise_indent(d));
+                }
+            })
         });
     }
     g.finish();
@@ -513,6 +572,42 @@ fn bench_clone_drop(c: &mut Criterion) {
         // cache state the drop runs in (harness r4). Parsing in setup is slower but untimed.
         g.bench_with_input(BenchmarkId::new("drop", name), &text, |b, t| {
             b.iter_batched(|| parse(t, None), drop, BatchSize::SmallInput)
+        });
+    }
+    // The same three over one key per line. Keys share strings with each other (field names), so
+    // `drop-last-ref` frees each shared string only at its last key.
+    for (name, lines) in ndjson_fixtures() {
+        g.bench_with_input(BenchmarkId::new("drop-last-ref", name), &lines, |b, ls| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let mut docs = parse_lines(ls);
+                    let t0 = Instant::now();
+                    for d in docs.drain(..) {
+                        drop(black_box(d));
+                    }
+                    total += t0.elapsed();
+                }
+                total
+            })
+        });
+        let docs = parse_lines(&lines);
+        g.bench_with_input(BenchmarkId::new("clone", name), &docs, |b, ds| {
+            b.iter(|| {
+                for d in ds {
+                    black_box(d.clone());
+                }
+            })
+        });
+        g.bench_with_input(BenchmarkId::new("drop", name), &lines, |b, ls| {
+            b.iter_batched(
+                || parse_lines(ls),
+                |mut docs| {
+                    docs.drain(..).for_each(drop);
+                    docs
+                },
+                BatchSize::SmallInput,
+            )
         });
     }
     g.finish();

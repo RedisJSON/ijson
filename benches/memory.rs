@@ -50,6 +50,14 @@ fn fixtures() -> Vec<(&'static str, String)> {
     ]
 }
 
+/// NDJSON fixtures, one RedisJSON key (one `IValue`) per line.
+fn ndjson_fixtures() -> Vec<(&'static str, &'static str)> {
+    vec![(
+        "refsnp-400",
+        include_str!("fixtures/refsnp-unsupported-400.ndjson"),
+    )]
+}
+
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self) -> u64 {
@@ -142,6 +150,49 @@ fn main() {
             serialise_compact_peak: s.peak_mem(),
             cbor_bytes: cbor.len(),
             cbor_compressed_bytes: cborz.len(),
+            cbor_stream_bytes: stream.len(),
+            cbor_decode_retained: d.mem_leaked(),
+        });
+    }
+    // Key-per-document fixtures: every figure covers all the keys (the `Vec` holding them is
+    // allocated outside the measured window), except serialise peak, the largest single JSON.GET.
+    // The CBOR stream is one encoder over all keys, as one RDB save.
+    for (fixture, text) in ndjson_fixtures() {
+        let lines: Vec<&str> = text.lines().collect();
+        let mut docs = Vec::with_capacity(lines.len());
+        let ((), p) = measure(|| docs.extend(lines.iter().map(|l| parse(l, None))));
+        let ijson_mem_allocated = docs.iter().map(IValue::mem_allocated).sum();
+        let mut clones = Vec::with_capacity(docs.len());
+        let ((), c) = measure(|| clones.extend(docs.iter().cloned()));
+        drop(clones);
+        let serialise_compact_peak = docs
+            .iter()
+            .map(|d| measure(|| serde_json::to_vec(d).unwrap()).1.peak_mem())
+            .max()
+            .unwrap_or(0);
+        let cbor: Vec<Vec<u8>> = docs.iter().map(encode).collect();
+        let cbor_compressed_bytes = docs.iter().map(|d| encode_compressed(d).len()).sum();
+        let mut enc = StreamEncoder::new(StreamEncoderConfig {
+            table_budget_bytes: usize::MAX,
+        });
+        let mut stream = Vec::new();
+        for d in &docs {
+            enc.encode_into(&mut stream, d);
+        }
+        let mut decoded = Vec::with_capacity(cbor.len());
+        let ((), d) = measure(|| decoded.extend(cbor.iter().map(|b| decode(b).unwrap())));
+        rows.push(Row {
+            fixture,
+            json_bytes: lines.iter().map(|l| l.len()).sum(),
+            parse_peak: p.peak_mem(),
+            parse_retained: p.mem_leaked(),
+            parse_allocs: p.num_allocs(),
+            ijson_mem_allocated,
+            clone_peak: c.peak_mem(),
+            clone_retained: c.mem_leaked(),
+            serialise_compact_peak,
+            cbor_bytes: cbor.iter().map(Vec::len).sum(),
+            cbor_compressed_bytes,
             cbor_stream_bytes: stream.len(),
             cbor_decode_retained: d.mem_leaked(),
         });
