@@ -308,10 +308,11 @@ fn bench_lookup(c: &mut Criterion) {
         .unwrap()
         .clone();
     let biz = biz.into_object().unwrap();
-    g.bench_function("business-22-hit", |b| {
+    assert_eq!(biz.len(), 28);
+    g.bench_function("business-28-hit", |b| {
         b.iter(|| black_box(biz.get("review_count")))
     });
-    g.bench_function("business-22-miss", |b| {
+    g.bench_function("business-28-miss", |b| {
         b.iter(|| black_box(biz.get("not_there")))
     });
     // Small object at the threshold (8 keys, no table): the first eight members of the business.
@@ -370,12 +371,14 @@ fn bench_mutation(c: &mut Criterion) {
         .into_object()
         .unwrap();
 
-    // JSON.SET $.new_field "v" then JSON.DEL $.new_field on a ~22-key object. The pair restores the
-    // object, so one object is mutated in place: an `iter_batched` setup clone would dominate the
-    // process (clone + drop of a ~22-key object is ~1 µs against a ~0.5 µs routine) and leave the
+    assert_eq!(biz.len(), 28);
+
+    // JSON.SET $.new_field "v" then JSON.DEL $.new_field on the 28-key business. The pair restores
+    // the object, so one object is mutated in place: an `iter_batched` setup clone would dominate the
+    // process (cloning and dropping the 28-key object costs several times the routine) and leave the
     // routine's cache state to the setup.
     let mut biz_mut = biz.clone();
-    g.bench_function("object-insert-remove-22", |b| {
+    g.bench_function("object-insert-remove-28", |b| {
         b.iter(|| {
             biz_mut.insert("new_field", IValue::from("v")).unwrap();
             black_box(biz_mut.remove("new_field"))
@@ -384,7 +387,7 @@ fn bench_mutation(c: &mut Criterion) {
     // JSON.MERGE of a 26-key patch into an object that already has every key (ivalue_manager.rs
     // `merge()`: `map.entry(key.as_str())` then overwrite). After the first command every entry is
     // occupied, so this times 26 occupied-entry lookups plus 26 scalar replacements; the object is
-    // mutated in place and keeps its shape (54 keys).
+    // mutated in place and keeps its shape (28 + 26 = 54 keys).
     let patch_keys: Vec<String> = (b'a'..=b'z').map(|c| (c as char).to_string()).collect();
     let mut merged = biz.clone();
     for k in &patch_keys {
