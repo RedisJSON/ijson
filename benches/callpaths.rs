@@ -459,8 +459,13 @@ fn bench_mutation(c: &mut Criterion) {
             *v = IValue::from(n + 0.5);
         })
     });
-    // JSON.STRAPPEND: build the appended string from the field's current value and re-intern it; the
-    // field is rewritten from a fixed base each time so the string does not grow across iterations.
+    // JSON.STRAPPEND (ivalue_manager.rs `str_append`): concatenate the field's string and the
+    // argument, intern the result and replace the field's `IString` with it, dropping the old one.
+    // The field is rebuilt from a fixed base so it does not grow across iterations, and the suffix
+    // alternates between two of the same length: each iteration interns a string the cache does not
+    // hold and drops the previous one at its last reference, removing it from the cache, as every
+    // STRAPPEND does. With one suffix every iteration after the first would be a cache hit that
+    // replaces a string with itself.
     let mut biz_str = biz.clone();
     let city_base = biz_str
         .get("city")
@@ -469,13 +474,15 @@ fn bench_mutation(c: &mut Criterion) {
         .unwrap()
         .as_str()
         .to_owned();
+    let suffixes = [" (appended-a)", " (appended-b)"];
+    let mut turn = 0usize;
     g.bench_function("str-append", |b| {
         b.iter(|| {
-            let v = biz_str.get_mut("city").unwrap();
-            let mut s = String::with_capacity(city_base.len() + 11);
-            s.push_str(black_box(&city_base));
-            s.push_str(" (appended)");
-            *v = IValue::from(IString::from(s));
+            turn ^= 1;
+            let v = biz_str.get_mut("city").unwrap().as_string_mut().unwrap();
+            let new_str = [black_box(city_base.as_str()), suffixes[turn]].concat();
+            *v = IString::intern(&new_str);
+            black_box(new_str.len())
         })
     });
     g.finish();
