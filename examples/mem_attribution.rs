@@ -2,6 +2,11 @@
 //! `IValue::mem_allocated()` (what RedisJSON reports through JSON.DEBUG MEMORY).
 //!
 //! `cargo run --release --no-default-features --example mem_attribution -- <file.json>...`
+//!
+//! Each file is parsed once and dropped before the measured parse, so in the default build the
+//! string cache's table already has room for the file's strings and `retained` is the document
+//! alone, whatever file came before it. The `thread_safe` build's cache shrinks a shard when it
+//! empties, so there the gap to `mem_allocated()` is the table growth the parse causes.
 
 use std::alloc::System;
 use std::collections::HashSet;
@@ -23,10 +28,18 @@ struct Stats {
     typed_arrays: usize,
     heap_numbers: usize,
     string_refs: usize,
-    inline_string_refs: usize,
+    /// References to strings that own no heap allocation: the empty string, and in the default
+    /// build strings of up to 7 bytes, which are stored inline in the handle.
+    no_heap_string_refs: usize,
     unique_heap_strings: usize,
     unique_heap_string_bytes: usize,
     uniq: HashSet<usize>,
+}
+
+/// Whether a string of `len` bytes is stored without a heap allocation. The `thread_safe` build's
+/// `IString` (`string.rs`) has no inline form: every non-empty string is on the heap.
+fn no_heap(len: usize) -> bool {
+    len == 0 || (!cfg!(feature = "thread_safe") && len <= 7)
 }
 
 fn walk(v: &IValue, s: &mut Stats) {
@@ -40,8 +53,8 @@ fn walk(v: &IValue, s: &mut Stats) {
         }
         DestructuredRef::String(st) => {
             s.string_refs += 1;
-            if st.len() <= 7 {
-                s.inline_string_refs += 1;
+            if no_heap(st.len()) {
+                s.no_heap_string_refs += 1;
             } else {
                 let p = st.as_str().as_ptr() as usize;
                 if s.uniq.insert(p) {
@@ -68,8 +81,8 @@ fn walk(v: &IValue, s: &mut Stats) {
             s.object_cap += o.capacity() as usize;
             for (k, val) in o.iter() {
                 s.string_refs += 1;
-                if k.len() <= 7 {
-                    s.inline_string_refs += 1;
+                if no_heap(k.len()) {
+                    s.no_heap_string_refs += 1;
                 } else {
                     let p = k.as_str().as_ptr() as usize;
                     if s.uniq.insert(p) {
@@ -83,6 +96,15 @@ fn walk(v: &IValue, s: &mut Stats) {
     }
 }
 
+fn parse(text: &str) -> IValue {
+    let mut de = serde_json::Deserializer::from_str(text);
+    let v = IValueDeserSeed::new(None)
+        .deserialize_compact_objects(&mut de)
+        .unwrap();
+    de.end().unwrap();
+    v
+}
+
 fn main() {
     // As RedisJSON's module load: `init_ijson_shared_string_cache(true)` (the locked cache).
     let _ = ijson::init_shared_string_cache(true);
@@ -90,15 +112,9 @@ fn main() {
     println!("|---|---|---|---|---|---|---|---|---|---|");
     for path in std::env::args().skip(1) {
         let text = std::fs::read_to_string(&path).unwrap();
+        drop(parse(&text));
         let mut slot: Option<IValue> = None;
-        let info = record_allocs(|| {
-            let mut de = serde_json::Deserializer::from_str(&text);
-            let v = IValueDeserSeed::new(None)
-                .deserialize_compact_objects(&mut de)
-                .unwrap();
-            de.end().unwrap();
-            slot = Some(v);
-        });
+        let info = record_allocs(|| slot = Some(parse(&text)));
         let doc = slot.unwrap();
         let mut s = Stats::default();
         walk(&doc, &mut s);
@@ -115,7 +131,7 @@ fn main() {
             text.len(),
             retained,
             acc,
-            retained as f64 - acc,
+            (retained as f64 - acc).round() + 0.0, // + 0.0: an exact match prints as 0, not -0
             s.objects,
             s.object_len,
             s.object_cap,
@@ -125,7 +141,7 @@ fn main() {
             s.typed_arrays,
             s.heap_numbers,
             s.string_refs,
-            s.inline_string_refs,
+            s.no_heap_string_refs,
             s.unique_heap_strings,
             s.unique_heap_string_bytes
         );

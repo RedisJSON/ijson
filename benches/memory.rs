@@ -123,6 +123,12 @@ fn main() {
 
     let mut rows = Vec::new();
     for (fixture, text) in fixtures() {
+        // A parse of the same fixture first, dropped: the string cache's table grows to hold this
+        // fixture's strings and, in the default build, keeps that capacity after they are dropped,
+        // so `parse retained` below counts the document alone, whatever fixture ran before. (The
+        // `thread_safe` build's cache shrinks a shard when it empties, so there it still includes
+        // the table growth.)
+        drop(parse(&text, None));
         let (doc, p) = measure(|| parse(&text, None));
         // Read the self-accounting before any other copy exists: shared strings are divided among
         // live references, so a live clone or decoded copy would halve their attributed bytes.
@@ -137,6 +143,10 @@ fn main() {
         });
         let mut stream = Vec::new();
         enc.encode_into(&mut stream, &doc);
+        drop(enc);
+        // Decode as an RDB load does, with no other copy of the document alive: every string is
+        // allocated, not found in the cache.
+        drop(doc);
         let (_decoded, d) = measure(|| decode(&cbor).unwrap());
         rows.push(Row {
             fixture,
@@ -159,6 +169,8 @@ fn main() {
     // The CBOR stream is one encoder over all keys, as one RDB save.
     for (fixture, text) in ndjson_fixtures() {
         let lines: Vec<&str> = text.lines().collect();
+        // Untimed warm parse, as above.
+        drop(lines.iter().map(|l| parse(l, None)).collect::<Vec<_>>());
         let mut docs = Vec::with_capacity(lines.len());
         let ((), p) = measure(|| docs.extend(lines.iter().map(|l| parse(l, None))));
         let ijson_mem_allocated = docs.iter().map(IValue::mem_allocated).sum();
@@ -179,6 +191,9 @@ fn main() {
         for d in &docs {
             enc.encode_into(&mut stream, d);
         }
+        drop(enc);
+        // As above: no other copy alive during the decode.
+        drop(docs);
         let mut decoded = Vec::with_capacity(cbor.len());
         let ((), d) = measure(|| decoded.extend(cbor.iter().map(|b| decode(b).unwrap())));
         rows.push(Row {

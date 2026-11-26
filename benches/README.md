@@ -60,8 +60,11 @@ reset per file). Default files: `twitter`, `citm_catalog`, `canada`, `gsoc-2018`
 | `IJSON_BENCH_MEMORY` | 1 | `0` skips the memory table |
 
 `examples/mem_attribution.rs` breaks a parsed document's retained bytes down into objects (len/capacity), arrays,
-heap numbers and unique heap strings, and shows the gap to `mem_allocated()` (the shared string table, which
-`mem_allocated()` excludes by design).
+heap numbers and unique heap strings, and shows the gap to `mem_allocated()`. Each file is parsed once and dropped
+before the measured parse, so in the default build the string cache's table is already large enough and the gap
+is 0; the `thread_safe` build's cache shrinks when it empties, so there the gap is the table growth, which
+`mem_allocated()` excludes by design. `--bench memory` takes its `parse retained` the same way, and decodes CBOR
+after dropping the parsed document, so every string is allocated as in an RDB load.
 
 ### Fixtures
 
