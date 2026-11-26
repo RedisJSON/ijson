@@ -54,3 +54,8 @@ harness = false
 [[bench]]
 name = "memory"
 harness = false
+
+# RedisJSON call paths over real files fetched by benches/fetch-datasets.sh (exits 0 without them).
+[[bench]]
+name = "corpus"
+harness = false
