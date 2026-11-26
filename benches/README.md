@@ -132,6 +132,16 @@ benchmarks by up to ±30%. The protocol that has held up:
    Apple M-series (macOS). Mark a platform you did not measure as not measured; never carry a result from one to
    another (cache lines are 64 B or 128 B, pages 4 KB or 16 KB).
 
+### Memory gate (CI)
+
+Every pull request runs `.github/scripts/memory-gate.sh`: the PR's `--bench memory` harness measures the library at
+the tip of the base branch, fetched when the job runs, and the PR. Every `*_retained` and `*_peak` byte count,
+`ijson_mem_allocated` and `size_of` of the core types is compared per fixture, and the job fails if any grows by
+more than 5 % (`MEMORY_GATE_MAX_PCT`). The default build's counts repeat exactly, so it runs once per side; the
+`thread_safe` build's sharded cache takes a random hash seed, so its figures vary from run to run (up to ~13 % on
+the 1.3 KB fixture) and the gate uses the median of 5 runs per side (`MEMORY_GATE_RUNS_TS`). The table lands in the
+job summary. Run it locally with `.github/scripts/memory-gate.sh master` (needs `origin` pointing at this repository).
+
 Preserve behaviour RedisJSON depends on while optimising: number formatting, typed-array tagging and retagging,
 string interning semantics, CBOR stream compatibility, defrag. Run the unit tests single-threaded:
 `cargo test --lib -- --test-threads=1` (the tests share the global string cache).

@@ -25,6 +25,19 @@ jobs:
       - name: Build benchmarks (thread_safe)
         run: cargo bench --features thread_safe --no-run
   
+  memory_gate:
+    name: Memory gate (vs tip of the base branch, +5 %)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Runs this PR's memory referee against the library at the base branch's tip, fetched when the
+      # job runs, and against this PR; fails if any retained or peak byte count grows by more than
+      # 5 %. Re-running the job re-checks against the current tip.
+      - name: Memory gate
+        run: .github/scripts/memory-gate.sh "${{ github.base_ref }}"
+
   fuzz_tests:
     name: Fuzz Tests (${{ matrix.fuzz_target }})
     runs-on: ubuntu-latest
