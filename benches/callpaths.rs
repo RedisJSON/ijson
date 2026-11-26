@@ -1,8 +1,10 @@
 //! Benchmark referee for the RedisJSON call paths.
 //!
-//! One group per call path in json-agent-workspace `docs/USAGE-PATTERN.md` §"Call paths to
-//! benchmark". Argument shapes follow RedisJSON `9ca1c88` (`redis_json/src/ivalue_manager.rs`,
-//! `formatter.rs`, `key_value.rs`, `rdb_persistence.rs`, `json_path/src/select_value.rs`).
+//! One group per kind of operation RedisJSON performs on `ijson`: parse (`JSON.SET`), serialise
+//! (`JSON.GET`), path lookup, in-place mutation, typed arrays, clone and drop, CBOR (RDB save and
+//! load), memory accounting and defrag. Argument shapes follow RedisJSON `9ca1c88`
+//! (`redis_json/src/ivalue_manager.rs`, `formatter.rs`, `key_value.rs`, `rdb_persistence.rs`,
+//! `defrag.rs`, `json_path/src/select_value.rs`), so each benchmark times the call RedisJSON makes.
 //! Fixtures under `benches/fixtures/` are copies of RedisJSON's `tests/benchmarks/datasets`, plus
 //! `refsnp-unsupported-400.ndjson` (NCBI dbSNP records, one key per line).
 //!
@@ -173,7 +175,7 @@ fn init() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// §1 Parse
+// Parse
 // ---------------------------------------------------------------------------------------------
 
 fn bench_parse(c: &mut Criterion) {
@@ -219,7 +221,7 @@ fn bench_parse(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// §2 Serialise
+// Serialise
 // ---------------------------------------------------------------------------------------------
 
 fn bench_serialise(c: &mut Criterion) {
@@ -258,7 +260,7 @@ fn bench_serialise(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// §3 Path traversal (object key lookup, array index) as json_path's select_value drives it
+// Path traversal (object key lookup, array index) as json_path's select_value drives it
 // ---------------------------------------------------------------------------------------------
 
 fn bench_lookup(c: &mut Criterion) {
@@ -351,7 +353,7 @@ fn bench_lookup(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// §4 In-place mutation as ivalue_manager.rs performs it
+// In-place mutation as ivalue_manager.rs performs it
 // ---------------------------------------------------------------------------------------------
 
 fn bench_mutation(c: &mut Criterion) {
@@ -445,8 +447,8 @@ fn bench_mutation(c: &mut Criterion) {
     });
     // JSON.NUMINCRBY on an integer field: read, add, replace (number.rs / ivalue_manager.rs)
     // One object mutated in place: repeated INCRBY on the same key is what RedisJSON sees, the value
-    // drifting is realistic, and a setup clone would make the routine's cache state depend on the
-    // clone implementation (harness r4).
+    // drifting is realistic, and a setup clone would hand the routine an object freshly laid out by
+    // the clone code each iteration, so a change to `clone` would move this benchmark.
     let mut biz_i64 = biz.clone();
     g.bench_function("num-incrby-i64", |b| {
         b.iter(|| {
@@ -494,7 +496,7 @@ fn bench_mutation(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// §5 Typed numeric arrays: build, extend, retag, slice read
+// Typed numeric arrays: build, extend, retag, slice read
 // ---------------------------------------------------------------------------------------------
 
 fn bench_typed_arrays(c: &mut Criterion) {
@@ -552,7 +554,7 @@ fn bench_typed_arrays(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// §6 Clone and drop
+// Clone and drop
 // ---------------------------------------------------------------------------------------------
 
 fn bench_clone_drop(c: &mut Criterion) {
@@ -566,7 +568,7 @@ fn bench_clone_drop(c: &mut Criterion) {
         // last reference to every heap string goes, so each one is unregistered from the string
         // cache. `drop` below cannot see that cost: its batch of identical parses, and `doc`,
         // share every interned string. Measured first, while no other copy of the fixture is
-        // alive; only the drop is timed (harness r6).
+        // alive; only the drop is timed.
         g.bench_with_input(BenchmarkId::new("drop-last-ref", name), &text, |b, t| {
             b.iter_custom(|iters| {
                 let mut total = Duration::ZERO;
@@ -587,8 +589,8 @@ fn bench_clone_drop(c: &mut Criterion) {
         g.bench_with_input(BenchmarkId::new("clone", name), &doc, |b, d| {
             b.iter_batched(|| (), |()| d.clone(), BatchSize::LargeInput)
         });
-        // Drop a freshly parsed value, not a clone: the clone implementation must not decide the
-        // cache state the drop runs in (harness r4). Parsing in setup is slower but untimed.
+        // Drop a freshly parsed value, not a clone: a clone's memory layout is set by the clone code,
+        // so a change to `clone` would move the `drop` numbers. Parsing in setup is slower but untimed.
         g.bench_with_input(BenchmarkId::new("drop", name), &text, |b, t| {
             b.iter_batched(|| parse(t, None), drop, BatchSize::SmallInput)
         });
@@ -638,7 +640,7 @@ fn bench_clone_drop(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// §7 CBOR stream encode/decode (rdb_persistence.rs), plain and zstd
+// CBOR stream encode/decode (rdb_persistence.rs), plain and zstd
 // ---------------------------------------------------------------------------------------------
 
 fn bench_cbor(c: &mut Criterion) {
@@ -688,7 +690,7 @@ fn bench_cbor(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// §8 Memory accounting and defrag (defrag.rs, JSON.DEBUG MEMORY)
+// Memory accounting and defrag (defrag.rs, JSON.DEBUG MEMORY)
 // ---------------------------------------------------------------------------------------------
 
 fn bench_memory_defrag(c: &mut Criterion) {
@@ -736,7 +738,7 @@ fn bench_memory_defrag(c: &mut Criterion) {
     });
     // The same cycle with the reinit inside the timed section: `defrag_start` runs once per cycle,
     // so a change that moves work into the reinit (presizing the new cache, for example) is
-    // charged for it here and not in `defrag-reinit-yelp` (harness r8).
+    // charged for it here and not in `defrag-reinit-yelp`.
     g.bench_function("defrag-cycle-yelp", |b| {
         b.iter_custom(|iters| {
             let mut total = Duration::ZERO;
