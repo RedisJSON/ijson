@@ -118,8 +118,8 @@ struct Row {
 
 fn main() {
     let json = std::env::args().any(|a| a == "--json");
-    // OSS RedisJSON: `init_ijson_shared_string_cache(is_bigredis = false)`.
-    let _ = ijson::init_shared_string_cache(false);
+    // As RedisJSON's module load: `init_ijson_shared_string_cache(true)` (the locked cache).
+    let _ = ijson::init_shared_string_cache(true);
 
     let mut rows = Vec::new();
     for (fixture, text) in fixtures() {

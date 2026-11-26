@@ -84,8 +84,9 @@ fn walk(v: &IValue, s: &mut Stats) {
 }
 
 fn main() {
-    let _ = ijson::init_shared_string_cache(false);
-    println!("| file | JSON bytes | retained (allocator) | mem_allocated() | gap | objects (len/cap) | arrays (len/cap, typed) | heap numbers | string refs (inline) | unique heap strings (bytes) |");
+    // As RedisJSON's module load: `init_ijson_shared_string_cache(true)` (the locked cache).
+    let _ = ijson::init_shared_string_cache(true);
+    println!("| file | JSON bytes | retained (allocator) | mem_allocated() | gap | objects (len/cap) | arrays (len/cap, typed) | heap numbers | string refs (no heap) | unique heap strings (bytes) |");
     println!("|---|---|---|---|---|---|---|---|---|---|");
     for path in std::env::args().skip(1) {
         let text = std::fs::read_to_string(&path).unwrap();

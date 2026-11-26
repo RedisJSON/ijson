@@ -15,7 +15,9 @@ cargo bench --no-default-features --bench corpus           # the same call paths
 Compare two commits with criterion baselines: `-- --save-baseline base` on the first, `-- --baseline base` on the
 second (see [Comparing two builds](#comparing-two-builds-ab-protocol)); results are kept under `target/criterion/`.
 Add `--features thread_safe` to measure that build; the default build is the one RedisJSON uses
-(`default-features = false`). More:
+(`default-features = false`). Every bench initialises the string cache as RedisJSON does at module load,
+`init_shared_string_cache(true)`: the locked cache, so interning a heap string or dropping its last reference
+takes the cache's mutex. More:
 
 ```bash
 cargo bench --no-default-features --bench callpaths -- lookup     # one group (any criterion name filter)

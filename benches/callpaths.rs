@@ -6,8 +6,9 @@
 //! Fixtures under `benches/fixtures/` are copies of RedisJSON's `tests/benchmarks/datasets`, plus
 //! `refsnp-unsupported-400.ndjson` (NCBI dbSNP records, one key per line).
 //!
-//! The string cache is initialised exactly as OSS RedisJSON does at module load:
-//! `init_shared_string_cache(is_bigredis)` with `is_bigredis == false`.
+//! The string cache is initialised as RedisJSON does at module load: `init_shared_string_cache(true)`,
+//! the locked cache (RedisJSON always enables it, for atomic slot migration), so interning a heap
+//! string, or dropping its last reference, takes the cache's mutex as it does in RedisJSON.
 //!
 //! Timing only. Memory is reported by `benches/memory.rs`.
 
@@ -167,8 +168,8 @@ impl DefragAllocator for CopyDefrag {
 }
 
 fn init() {
-    // OSS RedisJSON: `init_ijson_shared_string_cache(is_bigredis = false)`.
-    let _ = ijson::init_shared_string_cache(false);
+    // As RedisJSON's module load: `init_ijson_shared_string_cache(true)` (the locked cache).
+    let _ = ijson::init_shared_string_cache(true);
 }
 
 // ---------------------------------------------------------------------------------------------

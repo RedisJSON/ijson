@@ -425,8 +425,8 @@ fn main() {
         );
         return;
     };
-    // OSS RedisJSON: `init_ijson_shared_string_cache(is_bigredis = false)`.
-    let _ = ijson::init_shared_string_cache(false);
+    // As RedisJSON's module load: `init_ijson_shared_string_cache(true)` (the locked cache).
+    let _ = ijson::init_shared_string_cache(true);
 
     let max_docs = env_usize("IJSON_BENCH_MAX_DOCS", 1000);
     let max_bytes = env_usize("IJSON_BENCH_MAX_BYTES", 4 << 20);
